@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadState, saveState, diffFile, logFile } from './paths.js'
-import { findTask, updateTask, appendToSection, listTasks, createTask } from './tasks.js'
+import { findTask, updateTask, appendToSection, listTasks, createTask, getSection } from './tasks.js'
 import { decomposeTask } from './decomposer.js'
 import { prepareWorkspace, cleanupWorkspace, captureDiff, gitSettings, isGitRepo } from './git.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
@@ -11,6 +11,15 @@ import { normalizeModel } from './models.js'
 import { isFuture } from './scheduler.js'
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
+// Tag aplicada quando o agente termina sinalizando que depende de decisão humana.
+// Cards com ela ficam fora do auto-pilot até o humano responder e re-executar.
+export const HUMAN_REQUEST_TAG = 'human-request'
+
+// O agente sinaliza bloqueio por decisão humana escrevendo uma seção
+// "## Human Request" com conteúdo no arquivo da task.
+export function hasHumanRequest(body) {
+  return !!getSection(body, 'Human Request')
+}
 const MAX_CONCURRENCY = 8
 
 // Teto do log persistido por task. Um run longo com tool_results grandes passa
@@ -70,6 +79,12 @@ export class Runner {
         return false
       }
       clearExecuted(taskId) // usuário pediu explicitamente: libera novo run
+    }
+
+    // Re-execução de um card que voltou aguardando decisão humana: o pedido de
+    // run (manual ou drag para todo) significa que o humano respondeu — limpa a tag.
+    if (!auto && task.tags?.includes(HUMAN_REQUEST_TAG)) {
+      updateTask(project.path, taskId, { tags: task.tags.filter(t => t !== HUMAN_REQUEST_TAG) })
     }
 
     if (task.status === 'backlog') updateTask(project.path, taskId, { status: 'todo' })
@@ -188,7 +203,11 @@ export class Runner {
 
     const taskRelPath = path.relative(project.path, task.filePath)
     const md = fs.readFileSync(task.filePath, 'utf8')
-    const prompt = buildPrompt(taskRelPath, md, workspace.branch, gitSettings(project))
+    // Enriquecimento na hora do run: override da task > configuração do projeto.
+    const enrichMode = task.enrich === true ? 'always'
+      : task.enrich === false ? 'off'
+      : (project.enrichMode || 'off')
+    const prompt = buildPrompt(taskRelPath, md, workspace.branch, gitSettings(project), enrichMode)
 
     // O Claude Code não auto-aprova edits em .claude/ mesmo com acceptEdits.
     // Como as tasks vivem em .claude/claude-kanban/tasks/, liberamos Edit/Write
@@ -428,6 +447,19 @@ export class Runner {
       appendToSection(project.path, a.taskId, 'Log de erros',
         `[${runMeta.completed_at}] Sessão morta manualmente pelo usuário.`)
       this.emit('run.killed', { projectId: a.projectId, taskId: a.taskId })
+    } else if (exitCode === 0 && !a.timedOut && hasHumanRequest(task?.body)) {
+      // O agente sinalizou que depende de uma decisão humana: o card volta para
+      // todo com a tag human-request (fora do auto-pilot) em vez de concluir.
+      updateTask(project.path, a.taskId, {
+        status: 'todo',
+        run: runMeta,
+        ...(task.tags?.includes(HUMAN_REQUEST_TAG) ? {} : { tags: [...(task.tags || []), HUMAN_REQUEST_TAG] }),
+      })
+      this.emit('run.finished', {
+        projectId: a.projectId, taskId: a.taskId, exitCode, humanRequest: true,
+        costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
+        numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
+      })
     } else if (exitCode === 0 && !a.timedOut) {
       updateTask(project.path, a.taskId, { status: 'done', run: runMeta })
       // Registra no ledger ANTES de qualquer coisa depender do status: mesmo que
@@ -509,14 +541,36 @@ function gitInstructions(branch, g) {
   return steps.join('')
 }
 
-function buildPrompt(taskRelPath, md, branch, g) {
+// Instrução opcional de enriquecimento: 'always' reescreve sempre; 'auto' deixa
+// o próprio agente julgar se a descrição precisa; 'off' não instrui nada.
+function enrichInstructions(mode) {
+  if (mode !== 'always' && mode !== 'auto') return ''
+  return `
+Antes de implementar${mode === 'auto' ? ', SE julgar que a descrição está vaga, ambígua ou sem contexto suficiente' : ''}:
+reescreva a seção "## Descrição" do arquivo da task para ficar mais clara e objetiva —
+objetivo e escopo explícitos, arquivos/módulos relevantes do código citados pelo caminho,
+critérios de aceite. Preserve TODA a intenção original (enriqueça, não invente requisitos).${mode === 'auto' ? '\nSe a descrição já estiver clara e específica, não a altere.' : ''}
+Só então execute a task.
+`
+}
+
+const HUMAN_REQUEST_INSTRUCTIONS = `
+Se em algum ponto a task depender de uma escolha ou decisão humana que você não pode
+tomar com segurança (ex.: ambiguidade de produto, trade-off de negócio, credencial),
+NÃO decida por conta própria e NÃO invente: adicione ao arquivo da task uma seção
+"## Human Request" descrevendo objetivamente a(s) pergunta(s) e as opções, registre
+em "## Resultado" o que já foi feito, e encerre normalmente. O orquestrador devolverá
+o card para revisão humana.
+`
+
+function buildPrompt(taskRelPath, md, branch, g, enrichMode = 'off') {
   return `Você vai executar a task abaixo, definida no arquivo ${taskRelPath} deste projeto.
 Siga a skill "claude-kanban" deste projeto para o workflow de tasks.
 
 <task>
 ${md}
 </task>
-
+${enrichInstructions(enrichMode)}${HUMAN_REQUEST_INSTRUCTIONS}
 Instruções obrigatórias ao concluir:
 1. Edite ${taskRelPath}, seção "## Resultado": resumo do que foi feito, decisões
    técnicas e porquês, arquivos criados/alterados, contexto para memória futura

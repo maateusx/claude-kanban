@@ -48,6 +48,7 @@ export function serializeTask(task, body) {
     priority: task.priority || 'medium',
     tags: task.tags || [],
     model: task.model || null,
+    enrich: task.enrich ?? null,
     decompose: task.decompose ?? null,
     scheduled_at: task.scheduled_at || null,
     created_at: task.created_at,
@@ -125,10 +126,10 @@ export function findTask(projectPath, taskId) {
   return listTasks(projectPath).find(t => t.id === taskId) || null
 }
 
-export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, decompose = null, scheduled_at = null }) {
+export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, enrich = null, decompose = null, scheduled_at = null }) {
   if (!STATUSES.includes(status)) status = 'backlog'
   const now = new Date().toISOString()
-  const task = { id: newId(), title, status, priority, tags, model: normalizeModel(model), decompose, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
+  const task = { id: newId(), title, status, priority, tags, model: normalizeModel(model), enrich, decompose, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
   const dir = tasksDir(projectPath, status)
   fs.mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, taskFileName(task))
@@ -144,7 +145,7 @@ export function updateTask(projectPath, taskId, patch) {
   const { frontmatter: fm, body } = parseTaskFile(task.filePath)
 
   const newBody = patch.body !== undefined ? patch.body : body
-  for (const k of ['title', 'priority', 'tags', 'status', 'model', 'decompose', 'scheduled_at']) {
+  for (const k of ['title', 'priority', 'tags', 'status', 'model', 'enrich', 'decompose', 'scheduled_at']) {
     if (patch[k] !== undefined) fm[k] = patch[k]
   }
   if (patch.run) fm.run = { ...DEFAULT_RUN, ...fm.run, ...patch.run }
@@ -164,6 +165,30 @@ export function updateTask(projectPath, taskId, patch) {
     filePath = targetPath
   }
   return loadTask(projectPath, filePath)
+}
+
+// Extrai o conteúdo de uma seção "## <header>" do corpo (sem comentários HTML).
+export function getSection(body, header) {
+  if (!body) return ''
+  const re = new RegExp(`^##\\s+${header}\\s*$`, 'im')
+  const m = re.exec(body)
+  if (!m) return ''
+  const rest = body.slice(m.index + m[0].length)
+  const next = /^##\s+/m.exec(rest)
+  return (next ? rest.slice(0, next.index) : rest)
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .trim()
+}
+
+// Substitui o conteúdo de uma seção "## <header>" no corpo, preservando as demais.
+export function replaceSection(body, header, text) {
+  const re = new RegExp(`^##\\s+${header}\\s*$`, 'im')
+  const m = re.exec(body || '')
+  if (!m) return `${body || ''}\n## ${header}\n\n${text}\n`
+  const rest = body.slice(m.index + m[0].length)
+  const next = /^##\s+/m.exec(rest)
+  const tail = next ? rest.slice(next.index) : ''
+  return `${body.slice(0, m.index)}## ${header}\n\n${text}\n\n${tail}`
 }
 
 export function appendToSection(projectPath, taskId, section, text) {
