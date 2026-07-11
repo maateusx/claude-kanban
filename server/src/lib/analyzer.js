@@ -13,7 +13,7 @@ export const SUGGESTION_TYPES = {
 const TIMEOUT_MS = 5 * 60 * 1000
 const PRIORITIES = ['low', 'medium', 'high', 'urgent']
 
-function buildPrompt(types) {
+export function buildPrompt(types) {
   const lines = types.map(t => `- "${t}": ${SUGGESTION_TYPES[t]}`).join('\n')
   return `Analise este projeto (leia README, estrutura de pastas e os arquivos principais)
 e sugira tasks concretas e acionáveis, APENAS dos tipos abaixo:
@@ -31,7 +31,7 @@ Responda SOMENTE com um JSON válido, sem texto antes ou depois, no formato:
 {"suggestions":[{"title":"...","description":"...","type":"<um dos tipos acima>","priority":"low|medium|high|urgent"}]}`
 }
 
-function parseSuggestions(text, wanted) {
+export function parseSuggestions(text, wanted) {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start === -1 || end <= start) throw new Error('resposta do modelo não contém JSON')
