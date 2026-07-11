@@ -10,6 +10,7 @@ import {
 import {
   listTasks, findTask, createTask, updateTask, reconcileProject,
 } from './lib/tasks.js'
+import { sortTasks } from './lib/sort.js'
 import { bootstrapProject, bootstrapStatus, uninstallGuardrails } from './lib/bootstrap.js'
 import { listPendingActions, resolvePendingAction } from './lib/pending.js'
 import { listConfigFiles, readConfigFile, writeConfigFile } from './lib/claudeConfig.js'
@@ -63,11 +64,11 @@ function emit(type, payload) {
 // Auto-executar: com o modo ligado, tudo que está (ou entra) em todo/ vai para a fila.
 function autoEnqueue(project, excludeTaskId) {
   if (!project?.autoRun || !claudeAvailable || !fs.existsSync(project.path)) return
-  for (const t of listTasks(project.path)) {
-    if (t.status !== 'todo' || t.id === excludeTaskId) continue
-    if ((t.tags || []).includes('blocked')) continue
-    runner.enqueue(project.id, t.id, { auto: true })
-  }
+  const todo = listTasks(project.path).filter(t =>
+    t.status === 'todo' && t.id !== excludeTaskId && !(t.tags || []).includes('blocked'))
+  // A ordem de entrada na fila é a mesma que o board mostra por default:
+  // prioridade mais alta primeiro, empate pela mais antiga.
+  for (const t of sortTasks(todo)) runner.enqueue(project.id, t.id, { auto: true })
 }
 
 function maybeAutoRun(type, payload) {

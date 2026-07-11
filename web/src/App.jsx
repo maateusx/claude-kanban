@@ -3,6 +3,7 @@ import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors, useDropp
 import { api, connectWS } from './api.js'
 import { reducer, effectsFor, initialState } from './events.js'
 import { DiffDrawer } from './Diff.jsx'
+import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
 
 const COLUMNS = [
   { key: 'backlog', label: 'Backlog', dot: 'bg-st-backlog' },
@@ -77,6 +78,7 @@ export default function App() {
   const [showClaudeConfig, setShowClaudeConfig] = useState(false)
   const [showAddProject, setShowAddProject] = useState(false)
   const [view, setView] = useState('todas')
+  const [sorts, setSorts] = useState(loadSorts)  // colKey -> sort key
   const [query, setQuery] = useState('')
   const [health, setHealth] = useState({ ok: true, claudeAvailable: true })
   const [activeId, setActiveId] = useState(null)
@@ -152,6 +154,12 @@ export default function App() {
 
   const columns = VIEWS.find(v => v.key === view).columns
 
+  const setSort = (colKey, sort) => setSorts(prev => {
+    const next = { ...prev, [colKey]: sort }
+    saveSorts(next)
+    return next
+  })
+
   const patchTask = (tid, patch) => api.patchTask(project.id, tid, patch)
     .then(() => api.tasks(project.id).then(d => setTasks(d.tasks)))
     .catch(e => alert(e.message))
@@ -193,6 +201,7 @@ export default function App() {
                     <Column key={col.key} col={col} tasks={visible.filter(t => t.status === col.key)}
                       queue={queue} onRun={runTask} onOpen={setDetailId} selectedId={detailId}
                       defaultModel={project.defaultModel} pending={pending}
+                      sort={sorts[col.key] || DEFAULT_SORT} onSort={s => setSort(col.key, s)}
                       onAddTask={col.key !== 'archived' ? () => setNewTask({ status: col.key }) : null} />
                   ))}
                 </div>
@@ -657,8 +666,40 @@ function BootstrapBadge({ project, onRerun }) {
 
 /* ------------------------------------------------------------------ colunas */
 
-function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pending }) {
+function SortMenu({ value, onChange }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const onDoc = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+  const current = SORT_OPTIONS.find(o => o.key === value) || SORT_OPTIONS[0]
+  return (
+    <div className="relative" ref={ref}>
+      <button onClick={() => setOpen(v => !v)} title={`Ordenar por — ${current.label}`}
+        className="rounded-[4px] px-1.5 text-meta text-muted hover:bg-hover hover:text-ink-2">⇅</button>
+      {open && (
+        <div className="absolute right-0 z-30 mt-1 w-48 rounded-[8px] border border-line bg-bg py-1">
+          <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-muted">Ordenar por</div>
+          {SORT_OPTIONS.map(o => (
+            <button key={o.key} onClick={() => { onChange(o.key); setOpen(false) }}
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-meta hover:bg-hover ${o.key === value ? 'text-accent' : 'text-ink-2'}`}>
+              <span className="w-3">{o.key === value ? '✓' : ''}</span>
+              <span className="flex-1">{o.label}</span>
+              {o.key === DEFAULT_SORT && <span className="text-[10px] text-muted">default</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pending, sort, onSort }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key })
+  const ordered = useMemo(() => sortTasks(tasks, sort), [tasks, sort])
   return (
     <div ref={setNodeRef} data-column={col.key}
       className={`flex w-[var(--col-min-w)] shrink-0 flex-col border-r border-line ${isOver ? 'border-t-2 border-t-accent' : 'border-t-2 border-t-transparent'}`}>
@@ -667,13 +708,14 @@ function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pendi
         <span className="text-body font-medium">{col.label}</span>
         <span className="text-meta text-muted">{tasks.length}</span>
         <div className="flex-1" />
+        <SortMenu value={sort} onChange={onSort} />
         {onAddTask && (
           <button onClick={onAddTask} title={`Nova task em ${col.label}`}
             className="rounded-[4px] px-1.5 text-ink-2 hover:bg-hover">+</button>
         )}
       </div>
       <div className="flex-1 space-y-3 overflow-y-auto px-3 pb-4">
-        {tasks.map(t => (
+        {ordered.map(t => (
           <Card key={t.id} task={t} queue={queue} onRun={onRun} onOpen={onOpen}
             selected={t.id === selectedId} pending={pending} />
         ))}

@@ -5,6 +5,7 @@ import { loadState, saveState, diffFile, logFile } from './paths.js'
 import { findTask, updateTask, appendToSection, listTasks } from './tasks.js'
 import { prepareWorkspace, cleanupWorkspace, captureDiff, gitSettings, isGitRepo } from './git.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
+import { PRIORITY_RANK } from './sort.js'
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 const MAX_CONCURRENCY = 8
@@ -37,6 +38,15 @@ export class Runner {
     return this.maxConcurrency
   }
 
+  // Posição de entrada na fila: antes do primeiro item de prioridade estritamente
+  // menor. Empate mantém FIFO, e itens já enfileirados nunca trocam de posição
+  // entre si — um reorder manual só é ultrapassado por algo de prioridade maior.
+  insertAt(priority) {
+    const p = PRIORITY_RANK[priority] ?? PRIORITY_RANK.medium
+    const idx = this.queue.findIndex(q => (PRIORITY_RANK[q.priority] ?? PRIORITY_RANK.medium) < p)
+    return idx === -1 ? this.queue.length : idx
+  }
+
   // auto=true: caminhos automáticos (autoRun/recover). auto=false: pedido explícito
   // do usuário via API — nesse caso limpamos o ledger para permitir re-execução.
   enqueue(projectId, taskId, { auto = false } = {}) {
@@ -60,9 +70,10 @@ export class Runner {
     }
 
     if (task.status === 'backlog') updateTask(project.path, taskId, { status: 'todo' })
-    this.queue.push({ projectId, taskId })
+    const at = this.insertAt(task.priority)
+    this.queue.splice(at, 0, { projectId, taskId, priority: task.priority || 'medium' })
     this.persist()
-    this.emit('run.queued', { projectId, taskId, position: this.queue.length - 1 })
+    this.emit('run.queued', { projectId, taskId, position: at })
     this.tick()
     return true
   }
