@@ -44,6 +44,7 @@ export const api = {
   pauseQueue: (pid, until) => fetch(`/api/projects/${pid}/queue/pause`, opts({ until })).then(j),
   resumeQueue: pid => fetch(`/api/projects/${pid}/queue/resume`, opts({})).then(j),
   kill: taskId => fetch('/api/run/kill', opts(taskId ? { taskId } : {})).then(j),
+  dequeue: taskId => fetch('/api/run/dequeue', opts({ taskId })).then(j),
   queue: () => fetch('/api/run/queue').then(j),
   setConcurrency: max => fetch('/api/run/concurrency', opts({ max })).then(j),
   reorderQueue: taskIds => fetch('/api/run/queue/reorder', opts({ taskIds })).then(j),

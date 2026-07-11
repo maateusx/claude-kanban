@@ -192,6 +192,29 @@ test('enqueue com projeto inexistente retorna false, sem quebrar', () => {
   assert.equal(runner.queue.length, 0)
 })
 
+test('dequeue tira a task da fila e não mexe nas outras', () => {
+  const root = proj(); bootstrapProject(root)
+  const a = createTask(root, { title: 'A', status: 'todo' })
+  const b = createTask(root, { title: 'B', status: 'todo' })
+  const emitted = []
+  const runner = new Runner(() => ({ id: 'p1', path: root }), (type, p) => emitted.push({ type, ...p }))
+  runner.tick = () => {}
+  runner.queue = [] // ignora fila persistida por testes anteriores
+
+  runner.enqueue('p1', a.id)
+  runner.enqueue('p1', b.id)
+
+  assert.equal(runner.dequeue('inexistente'), null, 'task fora da fila não cancela nada')
+  const removed = runner.dequeue(a.id)
+  assert.equal(removed.taskId, a.id)
+  assert.deepEqual(runner.queue.map(q => q.taskId), [b.id])
+  assert.ok(emitted.some(e => e.type === 'run.dequeued' && e.taskId === a.id))
+  assert.ok(emitted.some(e => e.type === 'run.queue'), 'atualiza a fila na UI')
+
+  // status não é tocado pelo runner: quem decide devolver para backlog é a rota
+  assert.equal(findTask(root, a.id).status, 'todo')
+})
+
 test('dropProject limpa a fila do projeto removido e emite atualização', () => {
   const root = proj(); bootstrapProject(root)
   const a = createTask(root, { title: 'A', status: 'todo' })

@@ -185,6 +185,7 @@ export default function App() {
   }
 
   const runTask = tid => api.run(project.id, tid).then(setQueue).catch(e => alert(e.message))
+  const dequeueTask = tid => api.dequeue(tid).then(setQueue).catch(e => alert(e.message))
   const [enriching, setEnriching] = useState(null) // taskId em enriquecimento
   const enrichNow = tid => {
     setEnriching(tid)
@@ -288,6 +289,7 @@ export default function App() {
                   onClose={() => setDetailId(null)}
                   onPatch={patch => patchTask(detail.id, patch)}
                   onRun={() => runTask(detail.id)}
+                  onDequeue={() => dequeueTask(detail.id)}
                   onEnrich={() => enrichNow(detail.id)}
                   enriching={enriching === detail.id}
                   onDecompose={() => decomposeNow(detail.id)}
@@ -309,7 +311,8 @@ export default function App() {
             setLogTask(withLog ? q.taskId : null)
           }}
           onKill={tid => api.kill(tid).then(() => api.queue().then(setQueue))}
-          onReorder={ids => api.reorderQueue(ids).then(setQueue)} />
+          onReorder={ids => api.reorderQueue(ids).then(setQueue)}
+          onDequeue={dequeueTask} />
       </main>
 
       {showAddProject && (
@@ -1022,7 +1025,7 @@ function Section({ title, badge, action, children }) {
 
 const Empty = ({ children }) => <div className="text-body text-muted">{children}</div>
 
-function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, onDecompose, onKill, onLog, onDiff, onArchive, onResolve, onEnrich, enriching }) {
+function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, onDequeue, onDecompose, onKill, onLog, onDiff, onArchive, onResolve, onEnrich, enriching }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(task.title)
   const [body, setBody] = useState(task.body ?? '')
@@ -1045,7 +1048,10 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
         <span className="font-mono text-key uppercase text-muted">{task.id}</span>
         <div className="flex-1" />
         <Menu items={[
-          { label: running ? 'Matar sessão' : 'Executar agora', onClick: running ? onKill : onRun, disabled: queued },
+          // Na fila (ainda não começou): a ação disponível é cancelar, não matar.
+          queued
+            ? { label: 'Cancelar (tirar da fila)', onClick: onDequeue, danger: true }
+            : { label: running ? 'Matar sessão' : 'Executar agora', onClick: running ? onKill : onRun },
           { label: enriching ? '✦ Enriquecendo…' : '✦ Enriquecer descrição (Claude)', onClick: onEnrich, disabled: running || queued || enriching },
           { label: 'Quebrar em subtasks agora', onClick: onDecompose, disabled: running || queued },
           { label: 'Ver log', onClick: onLog },
@@ -1133,7 +1139,9 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
       <Section title="Execuções"
         action={running
           ? <button onClick={onKill} className="text-meta text-danger hover:underline">Matar sessão</button>
-          : run.has_diff ? <button onClick={onDiff} className="text-meta text-accent hover:underline">Ver diff</button> : null}>
+          : queued
+            ? <button onClick={onDequeue} className="text-meta text-danger hover:underline">Cancelar (tirar da fila)</button>
+            : run.has_diff ? <button onClick={onDiff} className="text-meta text-accent hover:underline">Ver diff</button> : null}>
         {!run.started_at && !running ? (
           <Empty>Nenhuma execução ainda.</Empty>
         ) : (
@@ -1926,7 +1934,7 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
   )
 }
 
-function QueueBar({ queue, tasks, projects, onOpen, onKill, onReorder }) {
+function QueueBar({ queue, tasks, projects, onOpen, onKill, onReorder, onDequeue }) {
   const items = queue.queue
   if (!(queue.actives || []).length && items.length === 0) return null
   const label = q => {
@@ -1956,6 +1964,8 @@ function QueueBar({ queue, tasks, projects, onOpen, onKill, onReorder }) {
           <button onClick={() => onOpen(q, false)} title="Ver detalhes" className="hover:text-ink hover:underline">{label(q)}</button>
           <button onClick={() => move(i, -1)} className="px-0.5 text-muted hover:text-ink">◂</button>
           <button onClick={() => move(i, 1)} className="px-0.5 text-muted hover:text-ink">▸</button>
+          <button onClick={() => onDequeue(q.taskId)} title="Cancelar (tirar da fila)"
+            className="px-0.5 text-muted hover:text-danger">✕</button>
         </div>
       ))}
     </footer>

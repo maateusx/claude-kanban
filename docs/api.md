@@ -161,6 +161,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | `POST` | `/api/run/queue/reorder` | `{ taskIds: [...] }` | `queueView`. Ids omitidos vão para o fim, na ordem atual. |
 | `POST` | `/api/run/concurrency` | `{ max }` | `queueView`. Clampado em `1..8`. Duas tasks do **mesmo** projeto só rodam em paralelo se o projeto usar worktree isolado. |
 | `POST` | `/api/run/kill` | `{ taskId? }` | `{ ok: true }`. Mata a sessão (SIGTERM, SIGKILL após 10s); a task volta para `todo/`. `taskId` é opcional só quando há exatamente uma sessão ativa — senão **409**. |
+| `POST` | `/api/run/dequeue` | `{ taskId }` | `queueView`. Cancela uma task que **ainda não começou**: tira da fila. **409** se ela não está na fila (se já está rodando, use `/api/run/kill`). Com auto-run ligado, a task volta para `backlog/` — senão o próprio auto-run a re-enfileiraria na hora. |
 
 ### Agendamento
 
@@ -189,7 +190,8 @@ Cada mensagem é uma linha JSON no formato `{ "type": "<evento>", ...payload }`.
 | `run.log` | `{ projectId, taskId, event }` | Uma linha do `--output-format stream-json` da sessão. `event` é o objeto do próprio Claude Code (`assistant`, `user`, `result`…); linhas não-JSON viram `{ type: "raw", text }`. Este é o evento de alto volume. |
 | `run.finished` | `{ projectId, taskId, exitCode, humanRequest?, costUsd, durationMs, numTurns, sessionId }` | Sessão terminou (sucesso, erro ou timeout). `exitCode: 0` ⇒ task foi para `done/` e registrada no ledger — exceto se o agente deixou uma seção `## Human Request` preenchida: nesse caso `humanRequest: true`, a task volta para `todo/` com a tag `human-request` (fora do auto-pilot) e aguarda decisão do humano; qualquer outro valor ⇒ volta para `todo/` e o motivo é anexado ao "## Log de erros" da task. `exitCode: -1` também cobre falha ao preparar o workspace git. |
 | `run.killed` | `{ projectId, taskId }` | Sessão morta manualmente (`/api/run/kill`). A task volta para `todo/` e **não** re-entra sozinha na fila, mesmo com auto-run ligado. |
-| `run.queue` | `queueView` | A fila foi alterada por fora do fluxo normal (hoje: remoção de um projeto). |
+| `run.dequeued` | `{ projectId, taskId }` | Task cancelada antes de começar (`/api/run/dequeue`): saiu da fila. Vem seguido de um `run.queue`. |
+| `run.queue` | `queueView` | A fila foi alterada por fora do fluxo normal (remoção de um projeto, cancelamento de um item da fila). |
 | `pending.updated` | `{ projectId, actions }` | `pending-actions.md` mudou (guardrail bloqueou algo, ou uma ação foi resolvida). |
 | `devserver.updated` | `{ projectId, running, pid, startedAt, exitCode? }` | Dev server iniciou ou morreu. `exitCode` só aparece quando o processo terminou. |
 | `project.updated` | `{ projectId }` | Algo do projeto mudou fora do board (checkout de branch, escrita em claude-config). Sinal de "refaça o `GET /api/projects`". |
