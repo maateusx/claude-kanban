@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .DS_Store
+
+# claude-kanban: artefatos de runtime gerados pelo app (nao sao codigo do projeto)
 .claude/claude-kanban/pending-actions.md
 .claude/claude-kanban/meta.json
 .claude/claude-kanban/tasks/
