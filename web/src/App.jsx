@@ -610,9 +610,16 @@ function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pendi
             selected={t.id === selectedId} pending={pending} />
         ))}
         {tasks.length === 0 && (
-          <div className="rounded-[8px] border border-dashed border-line px-3 py-6 text-center text-meta text-muted">
-            {onAddTask ? 'Arraste uma task ou crie com +' : 'Nada arquivado'}
-          </div>
+          onAddTask ? (
+            <button onClick={onAddTask} title={`Nova task em ${col.label}`}
+              className="w-full rounded-[8px] border border-dashed border-line px-3 py-6 text-center text-meta text-muted hover:border-accent hover:text-ink-2">
+              Arraste uma task ou crie com +
+            </button>
+          ) : (
+            <div className="rounded-[8px] border border-dashed border-line px-3 py-6 text-center text-meta text-muted">
+              Nada arquivado
+            </div>
+          )
         )}
       </div>
     </div>
