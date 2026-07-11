@@ -220,6 +220,11 @@ export default function App() {
           <EmptyProjects onAdd={() => setShowAddProject(true)} />
         )}
         <QueueBar queue={queue} tasks={tasks} projects={projects}
+          onOpen={(q, withLog) => {
+            if (q.projectId && q.projectId !== selectedId) setSelectedId(q.projectId)
+            setDetailId(q.taskId)
+            setLogTask(withLog ? q.taskId : null)
+          }}
           onKill={tid => api.kill(tid).then(() => api.queue().then(setQueue))}
           onReorder={ids => api.reorderQueue(ids).then(setQueue)} />
       </main>
@@ -1483,7 +1488,7 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
   )
 }
 
-function QueueBar({ queue, tasks, projects, onKill, onReorder }) {
+function QueueBar({ queue, tasks, projects, onOpen, onKill, onReorder }) {
   const items = queue.queue
   if (!(queue.actives || []).length && items.length === 0) return null
   const label = q => {
@@ -1503,13 +1508,14 @@ function QueueBar({ queue, tasks, projects, onKill, onReorder }) {
       {(queue.actives || []).map(a => (
         <div key={a.taskId} className="flex shrink-0 items-center gap-2 rounded-[6px] bg-subtle px-3 py-1.5">
           <Dot className="animate-pulse bg-st-doing" />
-          <span className="text-ink-2">{label(a)}</span>
+          <button onClick={() => onOpen(a, true)} title="Ver log ao vivo" className="text-ink-2 hover:text-ink hover:underline">{label(a)}</button>
           <button onClick={() => onKill(a.taskId)} className="text-danger hover:underline">matar</button>
         </div>
       ))}
       {items.map((q, i) => (
         <div key={q.taskId} className="flex shrink-0 items-center gap-1.5 rounded-[6px] bg-subtle px-3 py-1.5 text-ink-2">
-          <span className="font-mono text-muted">#{i + 1}</span> {label(q)}
+          <span className="font-mono text-muted">#{i + 1}</span>
+          <button onClick={() => onOpen(q, false)} title="Ver detalhes" className="hover:text-ink hover:underline">{label(q)}</button>
           <button onClick={() => move(i, -1)} className="px-0.5 text-muted hover:text-ink">◂</button>
           <button onClick={() => move(i, 1)} className="px-0.5 text-muted hover:text-ink">▸</button>
         </div>
