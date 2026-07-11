@@ -182,8 +182,9 @@ export function reconcileProject(projectPath) {
       try { task = loadTask(projectPath, filePath) } catch { continue }
       const prev = seen.get(task.id)
       if (prev) {
-        // id duplicado: regenera o do arquivo mais novo
+        // id duplicado: regenera o do arquivo mais novo; o outro preserva o id
         const newer = fs.statSync(filePath).mtimeMs >= fs.statSync(prev).mtimeMs ? filePath : prev
+        const keeper = newer === filePath ? prev : filePath
         const { frontmatter: fm, body } = parseTaskFile(newer)
         fm.id = newId()
         fm.updated_at = new Date().toISOString()
@@ -191,8 +192,10 @@ export function reconcileProject(projectPath) {
         fs.writeFileSync(newer, matter.stringify(body, fm))
         console.warn(`[reconcile] id duplicado em ${newer}: novo id ${fm.id}`)
         seen.set(fm.id, newer)
+        seen.set(task.id, keeper)
+      } else {
+        seen.set(task.id, filePath)
       }
-      seen.set(task.id, filePath)
     }
   }
   return listTasks(projectPath)

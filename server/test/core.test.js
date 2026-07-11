@@ -108,6 +108,20 @@ test('reconcileProject regenera id duplicado', () => {
   assert.equal(tasks.length, 2)
 })
 
+test('reconcileProject resolve tres arquivos com o mesmo id', () => {
+  const root = proj(); bootstrapProject(root)
+  const t = createTask(root, { title: 'Original', status: 'todo' })
+  const src = readFileSync(t.filePath, 'utf8')
+  for (const status of ['backlog', 'doing']) {
+    const copy = path.join(tasksDir(root, status), `copia-${status}--${t.id}.md`)
+    writeFileSync(copy, src.replace('status: todo', `status: ${status}`))
+  }
+  const tasks = reconcileProject(root)
+  assert.equal(tasks.length, 3)
+  const ids = tasks.map(x => x.id)
+  assert.equal(new Set(ids).size, 3, 'os tres ids devem ser distintos')
+})
+
 test('pending-actions: parse e resolve', () => {
   const root = proj(); bootstrapProject(root)
   writeFileSync(pendingFile(root), `
