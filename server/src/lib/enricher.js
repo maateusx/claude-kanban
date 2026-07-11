@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { getSection } from './tasks.js'
+import { normalizeModel } from './models.js'
 
 const TIMEOUT_MS = 5 * 60 * 1000
 
@@ -55,7 +56,7 @@ export function enrichTask(project, task, { auto = false } = {}) {
     '-p', buildEnrichPrompt(task, { auto }),
     '--output-format', 'json',
     '--allowedTools', 'Read Glob Grep',
-    ...(project.defaultModel ? ['--model', project.defaultModel] : []),
+    ...(normalizeModel(project.defaultModel) ? ['--model', normalizeModel(project.defaultModel)] : []),
   ]
 
   return new Promise((resolve, reject) => {

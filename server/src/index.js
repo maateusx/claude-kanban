@@ -22,10 +22,14 @@ import { replaceSection } from './lib/tasks.js'
 import { DevServers } from './lib/devservers.js'
 import { DEFAULT_GIT, gitSettings, projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty } from './lib/git.js'
 import { getUsage } from './lib/usage.js'
+import { MODEL_IDS, normalizeModel } from './lib/models.js'
+import { Scheduler, parseWhen, isFuture } from './lib/scheduler.js'
 
 const PORT = Number(process.env.PORT || 4400)
 const MIN_TIMEOUT_MS = 60_000
 const MAX_TIMEOUT_MS = 240 * 60_000
+
+const invalidModelMsg = (v) => `modelo inválido: "${v}". Use um destes: ${MODEL_IDS.join(', ')}`
 
 // ---- lockfile (única instância) ----
 fs.mkdirSync(HOME_DIR, { recursive: true })
@@ -66,9 +70,12 @@ function emit(type, payload) {
 // Auto-executar: com o modo ligado, tudo que está (ou entra) em todo/ vai para a fila.
 function autoEnqueue(project, excludeTaskId) {
   if (!project?.autoRun || !claudeAvailable || !fs.existsSync(project.path)) return
+  // Task com horário marcado no futuro não entra na fila agora — quem a coloca
+  // lá é o Scheduler, quando a hora chegar.
   const todo = listTasks(project.path).filter(t =>
     t.status === 'todo' && t.id !== excludeTaskId
-    && !(t.tags || []).includes('blocked') && !(t.tags || []).includes('human-request'))
+    && !(t.tags || []).includes('blocked') && !(t.tags || []).includes('human-request')
+    && !isFuture(t.scheduled_at))
   // A ordem de entrada na fila é a mesma que o board mostra por default:
   // prioridade mais alta primeiro, empate pela mais antiga.
   for (const t of sortTasks(todo)) runner.enqueue(project.id, t.id, { auto: true })
@@ -87,6 +94,7 @@ function maybeAutoRun(type, payload) {
 const getProject = id => db.projects.find(p => p.id === id) || null
 const runner = new Runner(getProject, emit)
 const devServers = new DevServers(emit)
+const scheduler = new Scheduler({ db, saveProjects, runner, emit })
 
 function projectView(p) {
   const available = fs.existsSync(p.path)
@@ -118,6 +126,9 @@ for (const p of db.projects) {
 }
 runner.recover(db.projects.filter(p => fs.existsSync(p.path)))
 for (const p of db.projects) autoEnqueue(p)
+// Depois do recover/autoEnqueue: o primeiro tick já solta o que venceu enquanto
+// o servidor estava fora do ar.
+scheduler.start()
 
 // ---- app ----
 const app = Fastify()
@@ -178,7 +189,7 @@ app.post('/api/projects', (req, reply) => {
 app.patch('/api/projects/:projectId', (req, reply) => {
   const p = getProject(req.params.projectId)
   if (!p) return reply.code(404).send({ error: 'projeto não encontrado' })
-  const { name, skipPermissions, git, defaultModel, autoRun, devServer, timeoutMs, enrichMode } = req.body || {}
+  const { name, skipPermissions, git, defaultModel, autoRun, autoDecompose, devServer, timeoutMs, enrichMode } = req.body || {}
   if (name !== undefined) p.name = name
   if (skipPermissions !== undefined) p.skipPermissions = !!skipPermissions
   if (timeoutMs !== undefined) {
@@ -192,7 +203,12 @@ app.patch('/api/projects/:projectId', (req, reply) => {
       p.timeoutMs = Math.round(ms)
     }
   }
-  if (defaultModel !== undefined) p.defaultModel = String(defaultModel || '').trim() || null
+  if (defaultModel !== undefined) {
+    if (defaultModel && !normalizeModel(defaultModel)) {
+      return reply.code(400).send({ error: invalidModelMsg(defaultModel) })
+    }
+    p.defaultModel = normalizeModel(defaultModel)
+  }
   if (enrichMode !== undefined) {
     if (!['off', 'auto', 'always'].includes(enrichMode)) {
       return reply.code(400).send({ error: 'enrichMode deve ser off, auto ou always' })
@@ -205,6 +221,7 @@ app.patch('/api/projects/:projectId', (req, reply) => {
     if (devServer.url !== undefined) next.url = String(devServer.url || '').trim()
     p.devServer = next
   }
+  if (autoDecompose !== undefined) p.autoDecompose = !!autoDecompose
   if (autoRun !== undefined) {
     p.autoRun = !!autoRun
     if (p.autoRun) autoEnqueue(p)
@@ -317,9 +334,12 @@ app.get('/api/projects/:projectId/tasks', (req, reply) => {
 
 app.post('/api/projects/:projectId/tasks', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
-  const { title, description, priority, tags, status, model, enrich } = req.body || {}
+  const { title, description, priority, tags, status, model, enrich, decompose, scheduled_at } = req.body || {}
   if (!title) return reply.code(400).send({ error: 'title é obrigatório' })
-  const task = createTask(p.path, { title, description, priority, tags, status, model, enrich })
+  if (model && !normalizeModel(model)) return reply.code(400).send({ error: invalidModelMsg(model) })
+  const when = scheduled_at ? parseWhen(scheduled_at) : null
+  if (scheduled_at && !when) return reply.code(400).send({ error: 'scheduled_at inválido (use uma data ISO)' })
+  const task = createTask(p.path, { title, description, priority, tags, status, model: normalizeModel(model), enrich, decompose, scheduled_at: when })
   emit('task.upserted', { projectId: p.id, task })
   return { task }
 })
@@ -335,7 +355,24 @@ app.patch('/api/projects/:projectId/tasks/:taskId', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
   const before = findTask(p.path, req.params.taskId)
   if (!before) return reply.code(404).send({ error: 'task não encontrada' })
-  const task = updateTask(p.path, req.params.taskId, req.body || {})
+  const patch = { ...(req.body || {}) }
+  if (patch.model !== undefined) {
+    if (patch.model && !normalizeModel(patch.model)) {
+      return reply.code(400).send({ error: invalidModelMsg(patch.model) })
+    }
+    patch.model = normalizeModel(patch.model)
+  }
+  // scheduled_at: '' / null desagenda; qualquer outra coisa precisa ser uma data.
+  if (patch.scheduled_at !== undefined) {
+    if (!patch.scheduled_at) {
+      patch.scheduled_at = null
+    } else {
+      const iso = parseWhen(patch.scheduled_at)
+      if (!iso) return reply.code(400).send({ error: 'scheduled_at inválido (use uma data ISO)' })
+      patch.scheduled_at = iso
+    }
+  }
+  const task = updateTask(p.path, req.params.taskId, patch)
   if (before.status !== task.status) {
     emit('task.moved', { projectId: p.id, taskId: task.id, from: before.status, to: task.status })
   }
@@ -453,11 +490,43 @@ app.post('/api/projects/:projectId/tasks/:taskId/run', (req, reply) => {
   return runner.getQueueView()
 })
 
+// Desmembrar agora: roda a sessão de decomposição imediatamente (fora da fila).
+app.post('/api/projects/:projectId/tasks/:taskId/decompose', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  if (!claudeAvailable) return reply.code(409).send({ error: 'CLI `claude` não encontrado no PATH' })
+  const ok = runner.decomposeNow(p.id, req.params.taskId)
+  if (!ok) return reply.code(409).send({ error: 'task já está na fila/rodando ou não existe' })
+  return runner.getQueueView()
+})
+
 app.post('/api/run/kill', (req, reply) => {
   if (!runner.kill(req.body?.taskId)) {
     return reply.code(409).send({ error: 'nenhuma sessão ativa correspondente (com mais de uma ativa, informe taskId)' })
   }
   return { ok: true }
+})
+
+// ---- agendamento da fila (adiar tudo de um projeto para X) ----
+app.post('/api/projects/:projectId/queue/pause', (req, reply) => {
+  const p = getProject(req.params.projectId)
+  if (!p) return reply.code(404).send({ error: 'projeto não encontrado' })
+  const until = parseWhen(req.body?.until)
+  if (!until) return reply.code(400).send({ error: 'until inválido (use uma data ISO)' })
+  if (!isFuture(until)) return reply.code(400).send({ error: 'until precisa estar no futuro' })
+  p.queuePausedUntil = until
+  saveProjects(db)
+  emit('project.updated', { projectId: p.id })
+  return { project: projectView(p) }
+})
+
+app.post('/api/projects/:projectId/queue/resume', (req, reply) => {
+  const p = getProject(req.params.projectId)
+  if (!p) return reply.code(404).send({ error: 'projeto não encontrado' })
+  p.queuePausedUntil = null
+  saveProjects(db)
+  emit('project.updated', { projectId: p.id })
+  runner.tick()
+  return { project: projectView(p) }
 })
 
 app.post('/api/run/concurrency', req => {

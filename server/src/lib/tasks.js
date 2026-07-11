@@ -3,6 +3,7 @@ import path from 'node:path'
 import matter from 'gray-matter'
 import { customAlphabet } from 'nanoid'
 import { STATUSES, tasksDir } from './paths.js'
+import { normalizeModel } from './models.js'
 
 export const newId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6)
 
@@ -48,6 +49,8 @@ export function serializeTask(task, body) {
     tags: task.tags || [],
     model: task.model || null,
     enrich: task.enrich ?? null,
+    decompose: task.decompose ?? null,
+    scheduled_at: task.scheduled_at || null,
     created_at: task.created_at,
     updated_at: task.updated_at,
     run: { ...DEFAULT_RUN, ...(task.run || {}) },
@@ -99,6 +102,17 @@ export function loadTask(projectPath, filePath) {
   if (!STATUSES.includes(fm.status)) { fm.status = folderStatus || 'backlog'; dirty = true }
   if (!fm.priority) { fm.priority = 'medium'; dirty = true }
   if (!fm.run) { fm.run = { ...DEFAULT_RUN }; dirty = true }
+  // O YAML resolve um timestamp sem aspas (o humano editando o .md na mão) como
+  // Date; o resto do sistema — e o JSON da API — só fala ISO string.
+  if (fm.scheduled_at instanceof Date) fm.scheduled_at = fm.scheduled_at.toISOString()
+  if (fm.scheduled_at === undefined) fm.scheduled_at = null
+
+  // Migra o apelido legado ("opus") para o slug oficial ("claude-opus-4-8");
+  // apaga o que não for um modelo conhecido, para não quebrar o spawn.
+  if (fm.model) {
+    const normalized = normalizeModel(fm.model)
+    if (normalized !== fm.model) { fm.model = normalized; dirty = true }
+  }
 
   if (dirty) {
     fm.updated_at = new Date().toISOString()
@@ -112,10 +126,10 @@ export function findTask(projectPath, taskId) {
   return listTasks(projectPath).find(t => t.id === taskId) || null
 }
 
-export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, enrich = null }) {
+export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, enrich = null, decompose = null, scheduled_at = null }) {
   if (!STATUSES.includes(status)) status = 'backlog'
   const now = new Date().toISOString()
-  const task = { id: newId(), title, status, priority, tags, model, enrich, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
+  const task = { id: newId(), title, status, priority, tags, model: normalizeModel(model), enrich, decompose, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
   const dir = tasksDir(projectPath, status)
   fs.mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, taskFileName(task))
@@ -131,7 +145,7 @@ export function updateTask(projectPath, taskId, patch) {
   const { frontmatter: fm, body } = parseTaskFile(task.filePath)
 
   const newBody = patch.body !== undefined ? patch.body : body
-  for (const k of ['title', 'priority', 'tags', 'status', 'model', 'enrich']) {
+  for (const k of ['title', 'priority', 'tags', 'status', 'model', 'enrich', 'decompose', 'scheduled_at']) {
     if (patch[k] !== undefined) fm[k] = patch[k]
   }
   if (patch.run) fm.run = { ...DEFAULT_RUN, ...fm.run, ...patch.run }

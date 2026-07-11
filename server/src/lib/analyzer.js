@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { normalizeModel } from './models.js'
 
 // Tipos de sugestão que o usuário pode pedir. A chave vira tag na task criada.
 export const SUGGESTION_TYPES = {
@@ -54,11 +55,12 @@ export function analyzeProject(project, types) {
     .filter(t => SUGGESTION_TYPES[t])
   if (!wanted.length) return Promise.reject(new Error('nenhum tipo de sugestão válido'))
 
+  const model = normalizeModel(project.defaultModel)
   const args = [
     '-p', buildPrompt(wanted),
     '--output-format', 'json',
     '--allowedTools', 'Read Glob Grep',
-    ...(project.defaultModel ? ['--model', project.defaultModel] : []),
+    ...(model ? ['--model', model] : []),
   ]
 
   return new Promise((resolve, reject) => {

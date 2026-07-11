@@ -2,10 +2,13 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadState, saveState, diffFile, logFile } from './paths.js'
-import { findTask, updateTask, appendToSection, listTasks, getSection } from './tasks.js'
+import { findTask, updateTask, appendToSection, listTasks, createTask, getSection } from './tasks.js'
+import { decomposeTask } from './decomposer.js'
 import { prepareWorkspace, cleanupWorkspace, captureDiff, gitSettings, isGitRepo } from './git.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
 import { PRIORITY_RANK } from './sort.js'
+import { normalizeModel } from './models.js'
+import { isFuture } from './scheduler.js'
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 // Tag aplicada quando o agente termina sinalizando que depende de decisão humana.
@@ -142,6 +145,8 @@ export class Runner {
   eligible(projectId) {
     const project = this.getProject(projectId)
     if (!project) return true // start() descarta e segue
+    // Fila adiada: os itens ficam na fila, na ordem, mas nada sai dela até a hora.
+    if (isFuture(project.queuePausedUntil)) return false
     const busy = [...this.actives.values()].some(a => a.projectId === projectId)
     return !busy || this.canRunConcurrently(project)
   }
@@ -156,11 +161,19 @@ export class Runner {
     }
   }
 
-  start(projectId, taskId) {
+  start(projectId, taskId, { skipDecompose = false } = {}) {
     const project = this.getProject(projectId)
     if (!project) return
     let task = findTask(project.path, taskId)
     if (!task) return
+
+    // Desmembrar em vez de executar: forçado pela task (decompose: true) ou,
+    // com o autoDecompose do projeto ligado, o próprio modelo decide.
+    const decomposeMode = skipDecompose ? null
+      : task.decompose === true ? 'forced'
+      : (task.decompose == null && project.autoDecompose) ? 'auto'
+      : null
+    if (decomposeMode) return this.startDecompose(project, taskId, decomposeMode)
 
     let workspace
     try {
@@ -173,8 +186,10 @@ export class Runner {
       return
     }
 
-    // Modelo: task > default do projeto > default do claude-code (sem --model)
-    const model = task.model || project.defaultModel || null
+    // Modelo: task > default do projeto > default do claude-code (sem --model).
+    // normalizeModel converte apelidos legados ("opus") no slug oficial, que é o
+    // que de fato vai para `claude --model` — a sessão roda no modelo escolhido.
+    const model = normalizeModel(task.model) || normalizeModel(project.defaultModel) || null
 
     task = updateTask(project.path, taskId, {
       status: 'doing',
@@ -262,6 +277,97 @@ export class Runner {
       a.stderr += `\nspawn error: ${err.message}`
       this.finish(a, -1)
     })
+  }
+
+  // Decomposição imediata pedida pelo usuário via API (não passa pela fila:
+  // é uma sessão somente leitura e barata, como a análise do projeto).
+  decomposeNow(projectId, taskId) {
+    if (this.queue.some(q => q.taskId === taskId) || this.actives.has(taskId)) return false
+    const project = this.getProject(projectId)
+    if (!project) return false
+    if (!findTask(project.path, taskId)) return false
+    clearExecuted(taskId) // pedido explícito: libera mesmo se já executada
+    this.startDecompose(project, taskId, 'forced')
+    return true
+  }
+
+  // Roda a sessão de decomposição no lugar da execução normal. Registrada em
+  // actives para o kill/queue view funcionarem como num run comum.
+  startDecompose(project, taskId, mode) {
+    const projectId = project.id
+    let task = findTask(project.path, taskId)
+    if (!task) return
+    task = updateTask(project.path, taskId, {
+      status: 'doing',
+      run: { started_at: new Date().toISOString(), attempts: (task.run?.attempts || 0) + 1 },
+    })
+    this.emit('task.upserted', { projectId, task })
+
+    const { child, promise } = decomposeTask(project, task, mode)
+    const a = { projectId, taskId, child, decompose: true }
+    this.actives.set(taskId, a)
+    this.emit('run.started', { projectId, taskId, pid: child.pid })
+    promise.then(res => this.finishDecompose(a, res), err => this.finishDecompose(a, null, err))
+  }
+
+  finishDecompose(a, res, err) {
+    if (!this.actives.delete(a.taskId)) return
+    const project = this.getProject(a.projectId)
+    if (!project) return this.tick()
+    const completedAt = new Date().toISOString()
+
+    if (a.killed) {
+      const task = updateTask(project.path, a.taskId, { status: 'todo', run: { completed_at: completedAt } })
+      appendToSection(project.path, a.taskId, 'Log de erros',
+        `[${completedAt}] Decomposição cancelada manualmente pelo usuário.`)
+      this.emit('task.upserted', { projectId: a.projectId, task })
+      this.emit('run.killed', { projectId: a.projectId, taskId: a.taskId })
+      return this.tick()
+    }
+
+    if (err) {
+      const task = updateTask(project.path, a.taskId, { status: 'todo', run: { completed_at: completedAt, exit_code: -1 } })
+      appendToSection(project.path, a.taskId, 'Log de erros',
+        `[${completedAt}] Falha na decomposição: ${err.message}`)
+      this.emit('task.upserted', { projectId: a.projectId, task })
+      this.emit('run.finished', { projectId: a.projectId, taskId: a.taskId, exitCode: -1 })
+      return this.tick()
+    }
+
+    // Modo auto e o modelo decidiu que não vale desmembrar: executa normalmente.
+    if (!res.decompose) {
+      this.start(a.projectId, a.taskId, { skipDecompose: true })
+      return
+    }
+
+    const parent = findTask(project.path, a.taskId)
+    const created = []
+    for (const s of res.subtasks) {
+      const t = createTask(project.path, {
+        title: s.title,
+        description: `${s.description}\n\n_Subtask desmembrada de "${parent.title}" (${parent.id})._`,
+        priority: s.priority,
+        tags: ['subtask', `pai:${parent.id}`],
+        status: 'todo',
+        model: parent.model || null,
+      })
+      created.push(t)
+      this.emit('task.upserted', { projectId: a.projectId, task: t })
+    }
+
+    appendToSection(project.path, a.taskId, 'Resultado',
+      `Task desmembrada em ${created.length} subtasks:\n${created.map(t => `- ${t.id} — ${t.title}`).join('\n')}`)
+    const task = updateTask(project.path, a.taskId, {
+      status: 'done',
+      run: { completed_at: completedAt, exit_code: 0, cost_usd: res.costUsd },
+    })
+    markSucceeded(a.taskId, { completedAt })
+    this.emit('task.upserted', { projectId: a.projectId, task })
+    this.emit('run.finished', {
+      projectId: a.projectId, taskId: a.taskId, exitCode: 0,
+      costUsd: res.costUsd, decomposed: created.map(t => t.id),
+    })
+    this.tick()
   }
 
   // Guarda o evento no buffer em memória (fonte do replay enquanto o run está

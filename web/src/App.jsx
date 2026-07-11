@@ -4,6 +4,7 @@ import { api, connectWS } from './api.js'
 import { reducer, effectsFor, initialState } from './events.js'
 import { DiffDrawer } from './Diff.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
+import { MODELS, modelLabel } from './models.js'
 
 const COLUMNS = [
   { key: 'backlog', label: 'Backlog', dot: 'bg-st-backlog' },
@@ -12,7 +13,6 @@ const COLUMNS = [
   { key: 'done', label: 'Done', dot: 'bg-st-done' },
   { key: 'archived', label: 'Archived', dot: 'bg-st-archived' },
 ]
-const MODELS = ['fable', 'opus', 'sonnet', 'haiku']
 const HUMAN_REQUEST_TAG = 'human-request'
 const ENRICH_LABEL = { off: 'não enriquecer', auto: 'Claude decide', always: 'sempre enriquecer' }
 
@@ -56,6 +56,49 @@ const fmtDur = ms => {
   const s = Math.round(ms / 1000)
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
 }
+// ---- agendamento ----
+// O <input type="datetime-local"> fala no fuso local sem timezone; o backend só
+// entende ISO. Estas duas fazem a ponte nos dois sentidos.
+export const toLocalInput = iso => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+export const fromLocalInput = v => {
+  const t = Date.parse(v || '')
+  return Number.isNaN(t) ? null : new Date(t).toISOString()
+}
+export const isFuture = iso => {
+  const t = Date.parse(iso || '')
+  return !Number.isNaN(t) && t > Date.now()
+}
+// "hoje 23:00" / "amanhã 06:30" / "12/03 06:30" — o horário é a informação, a
+// data só aparece quando não é hoje nem amanhã.
+export const fmtWhen = iso => {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const hhmm = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const today = day(new Date())
+  const diff = Math.round((day(d) - today) / 86400000)
+  if (diff === 0) return `hoje ${hhmm}`
+  if (diff === 1) return `amanhã ${hhmm}`
+  return `${d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} ${hhmm}`
+}
+// Presets de adiamento relativos ao agora, arredondando ao minuto.
+export const inHours = h => new Date(Math.round((Date.now() + h * 3600_000) / 60000) * 60000).toISOString()
+// Próxima ocorrência de HH:00 (hoje se ainda não passou, senão amanhã).
+export const nextAt = hour => {
+  const d = new Date()
+  d.setSeconds(0, 0)
+  d.setMinutes(0)
+  if (d.getHours() >= hour) d.setDate(d.getDate() + 1)
+  d.setHours(hour)
+  return d.toISOString()
+}
+
 const ago = iso => {
   if (!iso) return ''
   const min = Math.round((Date.now() - new Date(iso).getTime()) / 60000)
@@ -153,6 +196,7 @@ export default function App() {
       .catch(e => alert(e.message))
       .finally(() => setEnriching(null))
   }
+  const decomposeNow = tid => api.decompose(project.id, tid).then(setQueue).catch(e => alert(e.message))
   const pendingCount = pending.filter(a => a.status === 'pending').length
   const detail = tasks.find(t => t.id === detailId) || null
 
@@ -246,6 +290,7 @@ export default function App() {
                   onRun={() => runTask(detail.id)}
                   onEnrich={() => enrichNow(detail.id)}
                   enriching={enriching === detail.id}
+                  onDecompose={() => decomposeNow(detail.id)}
                   onKill={() => api.kill(detail.id)}
                   onLog={() => setLogTask(detail.id)}
                   onDiff={() => setDiffTask(detail)}
@@ -616,6 +661,7 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
           placeholder="Buscar tasks…   /"
           className="w-64 rounded-[6px] border border-transparent bg-subtle px-3 py-1.5 text-body outline-none placeholder:text-muted focus:border-line focus:bg-bg" />
         <div className="flex-1" />
+        <QueuePauseButton project={project} onChanged={onChanged} />
         <button onClick={onAutoRun}
           title="Com o auto ligado, toda task em To Do entra na fila sozinha (respeitando a concorrência configurada)."
           className={`rounded-[6px] border px-3 py-1.5 text-body ${project.autoRun ? 'border-line bg-subtle text-ink' : 'border-line text-ink-2 hover:bg-hover'}`}>
@@ -879,8 +925,14 @@ function CardBody({ task, queue, onRun, onOpen, selected, pending = [], innerRef
           </Chip>
         )}
         <div className="flex-1" />
+        {isFuture(task.scheduled_at) && (
+          <Chip className="text-info" title={`Agendada para ${new Date(task.scheduled_at).toLocaleString('pt-BR')}`}>
+            ⏱ {fmtWhen(task.scheduled_at)}
+          </Chip>
+        )}
         {queued && <Chip className="text-info">na fila</Chip>}
-        {task.model && <Chip className="font-mono">{task.model}</Chip>}
+        {task.decompose === true && <Chip title="Ao executar, esta task será quebrada em subtasks">✂ quebrar</Chip>}
+        {task.model && <Chip className="font-mono" title={modelLabel(task.model)}>{task.model}</Chip>}
       </div>
 
       <RunStrip task={task} running={running} openPending={openPending}
@@ -970,7 +1022,7 @@ function Section({ title, badge, action, children }) {
 
 const Empty = ({ children }) => <div className="text-body text-muted">{children}</div>
 
-function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, onKill, onLog, onDiff, onArchive, onResolve, onEnrich, enriching }) {
+function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, onDecompose, onKill, onLog, onDiff, onArchive, onResolve, onEnrich, enriching }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(task.title)
   const [body, setBody] = useState(task.body ?? '')
@@ -995,6 +1047,7 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
         <Menu items={[
           { label: running ? 'Matar sessão' : 'Executar agora', onClick: running ? onKill : onRun, disabled: queued },
           { label: enriching ? '✦ Enriquecendo…' : '✦ Enriquecer descrição (Claude)', onClick: onEnrich, disabled: running || queued || enriching },
+          { label: 'Quebrar em subtasks agora', onClick: onDecompose, disabled: running || queued },
           { label: 'Ver log', onClick: onLog },
           { label: 'Ver diff', onClick: onDiff, disabled: !run.has_diff },
           { label: 'Arquivar', onClick: onArchive, danger: true, disabled: task.status === 'archived' },
@@ -1016,7 +1069,16 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           title="Modelo desta task (vazio: default do projeto)"
           className="rounded-[6px] bg-chip px-2 py-1 font-mono text-meta text-chip-ink outline-none disabled:opacity-40">
           <option value="">{project.defaultModel ? `↳ ${project.defaultModel}` : '↳ auto'}</option>
-          {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+          {MODELS.map(m => <option key={m.id} value={m.id}>{m.id} ({m.label})</option>)}
+        </select>
+        <select value={task.decompose === true ? 'on' : task.decompose === false ? 'off' : ''}
+          disabled={running || queued}
+          onChange={e => onPatch({ decompose: e.target.value === 'on' ? true : e.target.value === 'off' ? false : null })}
+          title="Ao executar: quebrar esta task em subtasks menores em vez de rodá-la"
+          className="rounded-[6px] bg-chip px-2 py-1 text-meta text-chip-ink outline-none disabled:opacity-40">
+          <option value="">quebrar: {project.autoDecompose ? '↳ auto' : '↳ não'}</option>
+          <option value="on">quebrar: sim</option>
+          <option value="off">quebrar: não</option>
         </select>
         <select value={task.enrich === true ? 'on' : task.enrich === false ? 'off' : ''}
           disabled={running || queued}
@@ -1060,6 +1122,13 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           </div>
         </div>
       )}
+
+      <Section title="Agendamento">
+        <SchedulePicker
+          value={task.scheduled_at}
+          disabled={running || queued || !['backlog', 'todo'].includes(task.status)}
+          onChange={iso => onPatch({ scheduled_at: iso })} />
+      </Section>
 
       <Section title="Execuções"
         action={running
@@ -1119,6 +1188,109 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
   )
 }
 
+// Agendamento de uma task: quando a hora chegar, o servidor a coloca na fila
+// (mesmo com o auto-pilot desligado) e limpa o horário.
+function SchedulePicker({ value, disabled, onChange }) {
+  const scheduled = isFuture(value)
+  const presets = [
+    { label: 'em 1h', at: () => inHours(1) },
+    { label: 'em 4h', at: () => inHours(4) },
+    { label: 'hoje 22h', at: () => nextAt(22) },
+    { label: 'amanhã 9h', at: () => nextAt(9) },
+  ]
+  return (
+    <div className="space-y-2">
+      {scheduled ? (
+        <div className="flex items-center gap-2 rounded-[6px] border border-line p-2.5 text-meta">
+          <Dot className="bg-info" />
+          <span className="text-ink-2">Entra na fila {fmtWhen(value)}</span>
+          <div className="flex-1" />
+          <button onClick={() => onChange(null)} className="text-meta text-danger hover:underline">Cancelar</button>
+        </div>
+      ) : (
+        <Empty>Sem agendamento — roda quando for enfileirada.</Empty>
+      )}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <input type="datetime-local" disabled={disabled}
+          value={toLocalInput(value)}
+          onChange={e => onChange(fromLocalInput(e.target.value))}
+          className="rounded-[6px] border border-line bg-bg px-2 py-1 text-meta text-ink-2 outline-none focus:border-accent disabled:opacity-40" />
+        {presets.map(p => (
+          <Chip key={p.label} onClick={disabled ? undefined : () => onChange(p.at())}
+            className={disabled ? 'opacity-40' : ''}>{p.label}</Chip>
+        ))}
+      </div>
+      {disabled && <div className="text-meta text-muted">Task já em execução ou fora de Backlog/To Do.</div>}
+    </div>
+  )
+}
+
+// Adiar a fila inteira do projeto: os itens continuam enfileirados, na ordem,
+// mas nenhum sai da fila até a hora marcada.
+function QueuePauseButton({ project, onChanged }) {
+  const [open, setOpen] = useState(false)
+  const [custom, setCustom] = useState('')
+  const ref = useRef(null)
+  const paused = isFuture(project.queuePausedUntil)
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+
+  const pause = iso => {
+    if (!iso) return
+    setOpen(false)
+    api.pauseQueue(project.id, iso).then(onChanged).catch(e => alert(e.message))
+  }
+  const resume = () => api.resumeQueue(project.id).then(onChanged).catch(e => alert(e.message))
+
+  const presets = [
+    { label: 'Adiar 1 hora', at: () => inHours(1) },
+    { label: 'Adiar 4 horas', at: () => inHours(4) },
+    { label: 'Retomar às 22h', at: () => nextAt(22) },
+    { label: 'Retomar amanhã às 9h', at: () => nextAt(9) },
+  ]
+
+  if (paused) {
+    return (
+      <div className="flex items-center overflow-hidden rounded-[6px] border border-warning">
+        <span className="px-3 py-1.5 text-body text-warning" title={new Date(project.queuePausedUntil).toLocaleString('pt-BR')}>
+          ⏸ Fila adiada até {fmtWhen(project.queuePausedUntil)}
+        </span>
+        <button onClick={resume} title="Retomar a fila agora"
+          className="border-l border-warning px-2 py-1.5 text-body text-warning hover:bg-hover">✕</button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="relative" ref={ref}>
+      <button onClick={() => setOpen(v => !v)}
+        title="Adia a fila deste projeto: nada sai dela até o horário escolhido."
+        className="rounded-[6px] border border-line px-3 py-1.5 text-body text-ink-2 hover:bg-hover">
+        ⏱ Adiar fila
+      </button>
+      {open && (
+        <div className="absolute right-0 z-30 mt-1 w-64 rounded-[8px] border border-line bg-bg py-1">
+          {presets.map(p => (
+            <button key={p.label} onClick={() => pause(p.at())}
+              className="block w-full px-3 py-1.5 text-left text-body text-ink-2 hover:bg-hover">{p.label}</button>
+          ))}
+          <div className="flex items-center gap-1.5 border-t border-line px-3 py-2">
+            <input type="datetime-local" value={custom} onChange={e => setCustom(e.target.value)}
+              className="min-w-0 flex-1 rounded-[6px] border border-line bg-bg px-2 py-1 text-meta text-ink-2 outline-none focus:border-accent" />
+            <button onClick={() => pause(fromLocalInput(custom))} disabled={!fromLocalInput(custom)}
+              className="text-meta text-accent hover:underline disabled:opacity-40">Ok</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 /* -------------------------------------------------------------------- modais */
 
 function TaskModal({ onClose, onSave }) {
@@ -1126,7 +1298,9 @@ function TaskModal({ onClose, onSave }) {
   const [priority, setPriority] = useState('medium')
   const [tags, setTags] = useState('')
   const [model, setModel] = useState('')
+  const [decompose, setDecompose] = useState(false)
   const [description, setDescription] = useState('')
+  const [when, setWhen] = useState('')
   return (
     <Modal onClose={onClose} title="Nova task">
       <div className="space-y-3">
@@ -1140,18 +1314,27 @@ function TaskModal({ onClose, onSave }) {
           <select value={model} onChange={e => setModel(e.target.value)} title="Modelo (vazio: default do projeto)"
             className="rounded-[6px] border border-line px-2 py-2 text-body outline-none">
             <option value="">modelo: default</option>
-            {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+            {MODELS.map(m => <option key={m.id} value={m.id}>{m.id} ({m.label})</option>)}
           </select>
           <input value={tags} onChange={e => setTags(e.target.value)} placeholder="tags, separadas, por vírgula"
             className="flex-1 rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
+          <input type="datetime-local" value={when} onChange={e => setWhen(e.target.value)}
+            title="Agendar: a task entra na fila sozinha neste horário"
+            className="rounded-[6px] border border-line px-2 py-2 text-body text-ink-2 outline-none focus:border-accent" />
         </div>
         <textarea value={description} onChange={e => setDescription(e.target.value)}
           placeholder="Descrição (markdown)" spellCheck={false}
           className="h-56 w-full resize-none rounded-[6px] bg-subtle p-3 font-mono text-body outline-none placeholder:text-muted" />
+        <label className="flex items-center gap-2 text-body text-ink-2">
+          <input type="checkbox" checked={decompose} onChange={e => setDecompose(e.target.checked)}
+            className="accent-[var(--color-accent)]" />
+          Quebrar em subtasks menores ao executar (em vez de rodar a task inteira)
+        </label>
         <div className="flex justify-end gap-2">
           <Btn variant="quiet" onClick={onClose}>Cancelar</Btn>
           <Btn variant="primary" disabled={!title.trim()}
-            onClick={() => onSave({ title, priority, tags: splitTags(tags), model: model || null, description })}>
+            onClick={() => onSave({ title, priority, tags: splitTags(tags), model: model || null, decompose: decompose || null, description, scheduled_at: fromLocalInput(when) })}>
+
             Criar task
           </Btn>
         </div>
@@ -1605,7 +1788,7 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
           <select value={project.defaultModel || ''} onChange={e => onPatch({ defaultModel: e.target.value || null })}
             className="rounded-[6px] border border-line px-2 py-1 text-body outline-none">
             <option value="">default do claude-code</option>
-            {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+            {MODELS.map(m => <option key={m.id} value={m.id}>{m.id} ({m.label})</option>)}
           </select>
           <span className="text-meta text-muted">tasks sem modelo próprio usam este</span>
         </label>
@@ -1646,6 +1829,13 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
             className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
           <span className="text-meta text-muted">entre 1 e 240 min. Vale a partir do próximo run.</span>
         </label>
+
+        <div className="rounded-[8px] border border-line p-3">
+          <GitCheck label="Desmembrar tasks automaticamente"
+            desc="Antes de executar, o Claude avalia cada task sem opção própria de quebra: se ela for grande demais, é desmembrada em subtasks menores em vez de rodar inteira."
+            checked={!!project.autoDecompose}
+            onChange={v => onPatch({ autoDecompose: v })} />
+        </div>
 
         <DevServerSettings project={project} onPatch={onPatch} />
 

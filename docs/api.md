@@ -33,6 +33,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
   "skipPermissions": false,
   "defaultModel": null,
   "autoRun": false,
+  "queuePausedUntil": null,
   "devServer": { "command": "npm run dev", "url": "http://localhost:3000" },
   "git": {
     "baseBranch": "main",
@@ -53,7 +54,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 }
 ```
 
-`available` é `false` quando o diretório não existe mais; nesse caso `bootstrap` vira `"unknown"` e `branch` vira `null`. `git` é sempre o objeto completo (defaults + overrides).
+`available` é `false` quando o diretório não existe mais; nesse caso `bootstrap` vira `"unknown"` e `branch` vira `null`. `git` é sempre o objeto completo (defaults + overrides). `queuePausedUntil` (ISO ou `null`) adia a fila **deste projeto**: os itens continuam enfileirados, na ordem, mas nenhum sai da fila antes do horário; o servidor limpa o campo sozinho quando a hora chega.
 
 ### `task`
 
@@ -65,6 +66,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
   "priority": "medium",
   "tags": ["documentacao"],
   "model": null,
+  "scheduled_at": null,
   "created_at": "...",
   "updated_at": "...",
   "run": {
@@ -78,6 +80,8 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 ```
 
 `status` ∈ `backlog | todo | doing | done | archived` e é **derivado da pasta** do arquivo — a pasta vence o frontmatter em caso de divergência.
+
+`scheduled_at` (ISO ou `null`) agenda a task: quando o horário chega, o servidor a enfileira sozinho — mesmo com o auto-pilot desligado — e zera o campo. Só vale para tasks em `backlog`/`todo` e sem a tag `blocked`; enquanto o horário está no futuro, o auto-pilot **não** enfileira a task. A resolução é a do ticker (20s), então o disparo pode atrasar até esse tanto — nunca adiantar.
 
 ## Rotas
 
@@ -120,9 +124,9 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | Método | Path | Body | Resposta |
 | --- | --- | --- | --- |
 | `GET` | `/api/projects/:projectId/tasks` | — | `{ tasks: [task] }` |
-| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model?, enrich? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. |
+| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model?, enrich?, decompose?, scheduled_at? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. **400** se `scheduled_at` não é uma data ISO válida. `model` (aqui, no PATCH da task e no `defaultModel` do projeto) tem que ser o **slug exato** de um modelo do catálogo (`server/src/lib/models.js`): `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` — é ele que vai para `claude --model`. Apelidos legados (`opus`, `sonnet`…) são convertidos no slug; qualquer outro valor dá **400**. |
 | `GET` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }` — **404** se não existe. |
-| `PATCH` | `/api/projects/:projectId/tasks/:taskId` | subconjunto do frontmatter (`title`, `status`, `priority`, `tags`, `model`, `enrich`, `run`, `body`…) | `{ task }`. Mudar `status` move o arquivo de pasta e emite `task.moved`. |
+| `PATCH` | `/api/projects/:projectId/tasks/:taskId` | subconjunto do frontmatter (`title`, `status`, `priority`, `tags`, `model`, `enrich`, `decompose`, `scheduled_at`, `run`, `body`…) | `{ task }`. Mudar `status` move o arquivo de pasta e emite `task.moved`. `scheduled_at`: ISO agenda, `null`/`""` desagenda, lixo dá **400**. |
 | `DELETE` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }`. **Não apaga o arquivo**: move para `archived/`. |
 | `POST` | `/api/projects/:projectId/tasks/:taskId/enrich` | `{ auto? }` | `{ enriched, reason, costUsd, task }`. Sessão headless read-only que reescreve a `## Descrição` (e possivelmente o título) para ficar mais clara e com contexto do código. Com `auto: true` o modelo só reescreve se julgar necessário (`enriched: false` caso contrário). **409** se a task está rodando ou o CLI `claude` não existe. |
 | `GET` | `/api/projects/:projectId/tasks/:taskId/diff` | — | `{ diff }` — o patch unificado capturado ao fim do último run. **404** se a task não gerou diff. |
@@ -157,6 +161,17 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | `POST` | `/api/run/queue/reorder` | `{ taskIds: [...] }` | `queueView`. Ids omitidos vão para o fim, na ordem atual. |
 | `POST` | `/api/run/concurrency` | `{ max }` | `queueView`. Clampado em `1..8`. Duas tasks do **mesmo** projeto só rodam em paralelo se o projeto usar worktree isolado. |
 | `POST` | `/api/run/kill` | `{ taskId? }` | `{ ok: true }`. Mata a sessão (SIGTERM, SIGKILL após 10s); a task volta para `todo/`. `taskId` é opcional só quando há exatamente uma sessão ativa — senão **409**. |
+
+### Agendamento
+
+Agendar **uma task**: `PATCH .../tasks/:taskId` com `{ scheduled_at }` (ISO; `null`/`""` desagenda). Adiar **a fila do projeto**:
+
+| Método | Path | Body | Resposta |
+| --- | --- | --- | --- |
+| `POST` | `/api/projects/:projectId/queue/pause` | `{ until }` | `{ project }`. Nada sai da fila desse projeto até `until`. **400** se `until` não é uma data ISO válida ou não está no futuro. Emite `project.updated`. |
+| `POST` | `/api/projects/:projectId/queue/resume` | — | `{ project }`. Limpa a pausa e destrava a fila na hora. Emite `project.updated`. |
+
+Uma pausa vencida é limpa pelo próprio servidor no tick seguinte (ou seja: `queuePausedUntil` no passado equivale a fila liberada).
 
 ## WebSocket
 
