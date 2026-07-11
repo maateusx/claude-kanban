@@ -164,6 +164,19 @@ export default function App() {
     .then(() => api.tasks(project.id).then(d => setTasks(d.tasks)))
     .catch(e => alert(e.message))
 
+  // Arquiva em série: cada DELETE reescreve o .md da task e o watcher reprocessa o diretório,
+  // então disparar tudo em paralelo embaralharia os eventos de move.
+  const archiveAll = async ids => {
+    try {
+      for (const id of ids) await api.archiveTask(project.id, id)
+    } catch (e) {
+      alert(e.message)
+    }
+    const d = await api.tasks(project.id)
+    setTasks(d.tasks)
+    if (ids.includes(detailId)) setDetailId(null)
+  }
+
   return (
     <div className="flex h-full bg-bg text-ink">
       <Rail
@@ -202,7 +215,8 @@ export default function App() {
                       queue={queue} onRun={runTask} onOpen={setDetailId} selectedId={detailId}
                       defaultModel={project.defaultModel} pending={pending}
                       sort={sorts[col.key] || DEFAULT_SORT} onSort={s => setSort(col.key, s)}
-                      onAddTask={col.key !== 'archived' ? () => setNewTask({ status: col.key }) : null} />
+                      onAddTask={col.key !== 'archived' ? () => setNewTask({ status: col.key }) : null}
+                      onArchiveAll={col.key === 'done' ? archiveAll : null} />
                   ))}
                 </div>
                 <DragOverlay>
@@ -756,9 +770,15 @@ function SortMenu({ value, onChange }) {
   )
 }
 
-function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pending, sort, onSort }) {
+function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pending, sort, onSort, onArchiveAll }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key })
   const ordered = useMemo(() => sortTasks(tasks, sort), [tasks, sort])
+  const [archiving, setArchiving] = useState(false)
+  const archiveAll = () => {
+    if (!confirm(`Arquivar ${tasks.length} task(s) de ${col.label}?`)) return
+    setArchiving(true)
+    Promise.resolve(onArchiveAll(ordered.map(t => t.id))).finally(() => setArchiving(false))
+  }
   return (
     <div ref={setNodeRef} data-column={col.key}
       className={`flex w-[var(--col-min-w)] shrink-0 flex-col border-r border-line ${isOver ? 'border-t-2 border-t-accent' : 'border-t-2 border-t-transparent'}`}>
@@ -768,6 +788,13 @@ function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pendi
         <span className="text-meta text-muted">{tasks.length}</span>
         <div className="flex-1" />
         <SortMenu value={sort} onChange={onSort} />
+        {onArchiveAll && tasks.length > 0 && (
+          <button onClick={archiveAll} disabled={archiving}
+            title={`Arquivar todas as tasks de ${col.label}`}
+            className="rounded-[4px] px-1.5 text-meta text-ink-2 hover:bg-hover disabled:opacity-50">
+            {archiving ? 'Arquivando…' : 'Arquivar todas'}
+          </button>
+        )}
         {onAddTask && (
           <button onClick={onAddTask} title={`Nova task em ${col.label}`}
             className="rounded-[4px] px-1.5 text-ink-2 hover:bg-hover">+</button>
