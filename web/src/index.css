@@ -45,6 +45,7 @@
 
 :root {
   --rail-w: 64px;
+  --rail-w-open: 220px;
   --detail-w: 440px;
   --col-min-w: 320px;
 }
