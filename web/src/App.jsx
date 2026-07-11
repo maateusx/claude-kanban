@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import React, { useEffect, useMemo, useRef, useState, useCallback, useReducer } from 'react'
 import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors, useDroppable, useDraggable, closestCorners } from '@dnd-kit/core'
 import { api, connectWS } from './api.js'
+import { reducer, effectsFor, initialState } from './events.js'
 import { DiffDrawer } from './Diff.jsx'
 
 const COLUMNS = [
@@ -21,10 +22,8 @@ const PRIORITY_STYLE = {
 export default function App() {
   const [projects, setProjects] = useState([])
   const [selectedId, setSelectedId] = useState(null)
-  const [tasks, setTasks] = useState([])
-  const [pending, setPending] = useState([])
+  const [{ tasks, pending, logs }, dispatch] = useReducer(reducer, initialState)
   const [queue, setQueue] = useState({ actives: [], queue: [], maxConcurrency: 1 })
-  const [logs, setLogs] = useState({}) // taskId -> [events]
   const [logTask, setLogTask] = useState(null)
   const [diffTask, setDiffTask] = useState(null)
   const [editTask, setEditTask] = useState(null) // task ou 'new'
@@ -39,6 +38,9 @@ export default function App() {
   selectedIdRef.current = selectedId
 
   const project = projects.find(p => p.id === selectedId) || null
+
+  const setTasks = useCallback(ts => dispatch({ type: 'setTasks', tasks: ts }), [])
+  const setPending = useCallback(p => dispatch({ type: 'setPending', pending: p }), [])
 
   const refreshProjects = useCallback(() => api.projects().then(d => {
     setProjects(d.projects)
@@ -55,43 +57,13 @@ export default function App() {
 
   useEffect(() => connectWS(evt => {
     const cur = selectedIdRef.current
-    switch (evt.type) {
-      case 'task.upserted':
-        if (evt.projectId === cur) {
-          setTasks(ts => {
-            const i = ts.findIndex(t => t.id === evt.task.id)
-            if (i === -1) return [...ts, evt.task]
-            const next = [...ts]; next[i] = evt.task; return next
-          })
-        }
-        break
-      case 'task.removed':
-        if (evt.projectId === cur) setTasks(ts => ts.filter(t => t.id !== evt.taskId))
-        break
-      case 'pending.updated':
-        if (evt.projectId === cur) setPending(evt.actions)
-        refreshProjects()
-        break
-      case 'run.queued':
-      case 'run.queue':
-      case 'run.started':
-      case 'run.killed':
-        api.queue().then(setQueue)
-        break
-      case 'run.finished':
-        api.queue().then(setQueue)
-        if (evt.projectId === cur) api.tasks(cur).then(d => setTasks(d.tasks))
-        break
-      case 'devserver.updated':
-      case 'project.updated':
-        refreshProjects()
-        break
-      case 'run.log':
-        setLogs(l => ({ ...l, [evt.taskId]: [...(l[evt.taskId] || []).slice(-500), evt.event] }))
-        break
-      default: break
+    dispatch({ type: 'ws', evt, projectId: cur })
+    for (const effect of effectsFor(evt, cur)) {
+      if (effect === 'projects') refreshProjects()
+      if (effect === 'queue') api.queue().then(setQueue)
+      if (effect === 'tasks') api.tasks(cur).then(d => setTasks(d.tasks))
     }
-  }), [refreshProjects])
+  }), [refreshProjects, setTasks])
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -101,7 +73,7 @@ export default function App() {
     const status = over.id
     const task = tasks.find(t => t.id === active.id)
     if (!task || task.status === status) return
-    setTasks(ts => ts.map(t => t.id === task.id ? { ...t, status } : t)) // otimista
+    setTasks(tasks.map(t => t.id === task.id ? { ...t, status } : t)) // otimista
     api.patchTask(project.id, task.id, { status }).catch(() => api.tasks(project.id).then(d => setTasks(d.tasks)))
   }
 
