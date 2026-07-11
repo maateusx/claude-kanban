@@ -29,12 +29,14 @@ export class DevServers {
     if (this.running.has(project.id)) return this.status(project.id)
     if (!fs.existsSync(project.path)) throw new Error('diretório do projeto indisponível')
 
+    // detached: true coloca o shell e todos os seus filhos (vite, next dev, ...)
+    // em um process group próprio, o que permite matar a árvore inteira em stop().
     const child = spawn(command, {
       cwd: project.path,
       shell: true,
       env: { ...process.env },
       stdio: ['ignore', 'pipe', 'pipe'],
-      detached: false,
+      detached: process.platform !== 'win32',
     })
 
     const s = { child, command, startedAt: new Date().toISOString(), logs: [] }
@@ -58,13 +60,31 @@ export class DevServers {
     return this.status(project.id)
   }
 
+  // Mata o process group inteiro (shell + dev server real). No Windows não há
+  // process group POSIX, então usamos taskkill com /T para a árvore.
+  #signal(child, signal) {
+    if (!child.pid) return
+    if (process.platform === 'win32') {
+      if (signal === 'SIGKILL') {
+        try { execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], () => {}) } catch {}
+      } else {
+        try { child.kill(signal) } catch {}
+      }
+      return
+    }
+    try { process.kill(-child.pid, signal) } catch { try { child.kill(signal) } catch {} }
+  }
+
   stop(projectId) {
     const s = this.running.get(projectId)
     if (!s) return false
-    // shell:true cria um processo de shell pai; matar o grupo é mais confiável,
-    // mas mantemos simples: SIGTERM e SIGKILL de fallback.
-    try { s.child.kill('SIGTERM') } catch {}
-    setTimeout(() => { try { s.child.kill('SIGKILL') } catch {} }, 8000)
+    this.#signal(s.child, 'SIGTERM')
+    setTimeout(() => {
+      // só escala para SIGKILL se o processo ainda estiver vivo (o handler de
+      // 'close' remove a entrada de this.running).
+      if (this.running.get(projectId) !== s) return
+      this.#signal(s.child, 'SIGKILL')
+    }, 8000).unref?.()
     return true
   }
 
@@ -104,6 +124,13 @@ export class DevServers {
   }
 
   stopAll() {
-    for (const id of this.running.keys()) this.stop(id)
+    for (const id of [...this.running.keys()]) this.stop(id)
+  }
+
+  // Usado no cleanup síncrono do processo (handler de 'exit'), onde timers não
+  // chegam a rodar: mata os grupos imediatamente com SIGKILL.
+  killAll() {
+    for (const s of this.running.values()) this.#signal(s.child, 'SIGKILL')
+    this.running.clear()
   }
 }
