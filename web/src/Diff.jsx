@@ -29,36 +29,36 @@ function parseDiff(text) {
 }
 
 const LINE_STYLE = {
-  hunk: 'bg-sky-950/40 text-sky-400',
-  add: 'bg-emerald-950/50 text-emerald-300',
-  del: 'bg-red-950/50 text-red-300',
-  ctx: 'text-zinc-400',
+  hunk: 'bg-subtle text-muted',
+  add: 'bg-success/10 text-success',
+  del: 'bg-danger/10 text-danger',
+  ctx: 'text-ink-2',
 }
 const STATUS_BADGE = {
-  added: ['A', 'bg-emerald-900 text-emerald-300'],
-  deleted: ['D', 'bg-red-900 text-red-300'],
-  modified: ['M', 'bg-amber-900 text-amber-300'],
+  added: ['A', 'bg-chip text-success'],
+  deleted: ['D', 'bg-chip text-danger'],
+  modified: ['M', 'bg-chip text-warning'],
 }
 
 function FileDiff({ file }) {
   const [open, setOpen] = useState(true)
   const [badge, badgeCls] = STATUS_BADGE[file.status]
   return (
-    <div className="overflow-hidden rounded-md border border-zinc-800">
+    <div className="overflow-hidden rounded-[8px] border border-line">
       <button onClick={() => setOpen(v => !v)}
-        className="flex w-full items-center gap-2 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800/70">
-        <span className="text-zinc-600">{open ? '▾' : '▸'}</span>
+        className="flex w-full items-center gap-2 bg-subtle px-3 py-2 text-left text-meta hover:bg-hover">
+        <span className="text-muted">{open ? '▾' : '▸'}</span>
         <span className={`rounded px-1 font-bold ${badgeCls}`}>{badge}</span>
-        <span className="flex-1 truncate font-mono text-zinc-200">{file.path}</span>
+        <span className="flex-1 truncate font-mono text-ink">{file.path}</span>
         <span className="shrink-0 font-mono">
-          <span className="text-emerald-400">+{file.additions}</span>{' '}
-          <span className="text-red-400">−{file.deletions}</span>
+          <span className="text-success">+{file.additions}</span>{' '}
+          <span className="text-danger">−{file.deletions}</span>
         </span>
       </button>
       {open && (
-        <div className="overflow-x-auto bg-zinc-950 font-mono text-xs leading-5">
+        <div className="overflow-x-auto font-mono text-meta leading-5">
           {file.binary
-            ? <div className="px-3 py-2 text-zinc-600">arquivo binário</div>
+            ? <div className="px-3 py-2 text-muted">arquivo binário</div>
             : file.lines.map((l, i) => (
                 <div key={i} className={`whitespace-pre px-3 ${LINE_STYLE[l.type]}`}>{l.text || ' '}</div>
               ))}
@@ -82,23 +82,23 @@ export function DiffDrawer({ projectId, task, onClose }) {
   const deletions = state.files.reduce((n, f) => n + f.deletions, 0)
 
   return (
-    <div className="fixed inset-y-0 right-0 z-40 flex w-[720px] max-w-full flex-col border-l border-zinc-800 bg-zinc-950 shadow-2xl">
-      <div className="flex items-center gap-3 border-b border-zinc-800 px-4 py-3">
-        <span className="text-sm font-semibold">Diff — {task.title}</span>
-        {task.run?.branch && <code className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-violet-300">{task.run.branch}</code>}
+    <div className="fixed inset-y-0 right-0 z-40 flex w-[720px] max-w-full flex-col border-l border-line bg-bg">
+      <div className="flex items-center gap-3 border-b border-line px-4 py-3">
+        <span className="text-body font-semibold">Diff — {task.title}</span>
+        {task.run?.branch && <code className="rounded-[6px] bg-chip px-1.5 py-0.5 text-meta font-mono text-chip-ink">{task.run.branch}</code>}
         <div className="flex-1" />
         {!state.loading && !state.error && (
-          <span className="font-mono text-xs">
+          <span className="font-mono text-meta">
             {state.files.length} arquivo{state.files.length === 1 ? '' : 's'} ·{' '}
-            <span className="text-emerald-400">+{additions}</span>{' '}
-            <span className="text-red-400">−{deletions}</span>
+            <span className="text-success">+{additions}</span>{' '}
+            <span className="text-danger">−{deletions}</span>
           </span>
         )}
-        <button onClick={onClose} className="text-zinc-500 hover:text-white">✕</button>
+        <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
       </div>
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
-        {state.loading && <div className="text-sm text-zinc-600">Carregando diff…</div>}
-        {state.error && <div className="text-sm text-red-400">{state.error}</div>}
+        {state.loading && <div className="text-body text-muted">Carregando diff…</div>}
+        {state.error && <div className="text-body text-danger">{state.error}</div>}
         {state.files.map((f, i) => <FileDiff key={i} file={f} />)}
       </div>
     </div>

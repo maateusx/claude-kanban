@@ -48,8 +48,8 @@ const TASK = { id: 'task-1', title: 'Minha task', status: 'todo', priority: 'med
 const EMPTY_QUEUE = { actives: [], queue: [], maxConcurrency: 1 }
 
 // Um card vive em exatamente uma coluna: subimos do card até a raiz da coluna
-// (.w-72) e lemos o cabeçalho dela.
-const columnOfCard = () => screen.getByText('Minha task').closest('.w-72').textContent
+// ([data-column]) e lemos o cabeçalho dela.
+const columnOfCard = () => screen.getByText('Minha task').closest('[data-column]').textContent
 
 beforeEach(() => {
   api.health.mockResolvedValue({ ok: true, claudeAvailable: true })

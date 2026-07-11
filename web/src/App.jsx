@@ -5,18 +5,61 @@ import { reducer, effectsFor, initialState } from './events.js'
 import { DiffDrawer } from './Diff.jsx'
 
 const COLUMNS = [
-  { key: 'backlog', label: 'Backlog', dot: 'bg-zinc-500' },
-  { key: 'todo', label: 'To Do', dot: 'bg-sky-400' },
-  { key: 'doing', label: 'Doing', dot: 'bg-amber-400' },
-  { key: 'done', label: 'Done', dot: 'bg-emerald-400' },
-  { key: 'archived', label: 'Archived', dot: 'bg-zinc-600', collapsible: true },
+  { key: 'backlog', label: 'Backlog', dot: 'bg-st-backlog' },
+  { key: 'todo', label: 'To Do', dot: 'bg-st-todo' },
+  { key: 'doing', label: 'Doing', dot: 'bg-st-doing' },
+  { key: 'done', label: 'Done', dot: 'bg-st-done' },
+  { key: 'archived', label: 'Archived', dot: 'bg-st-archived' },
 ]
 const MODELS = ['fable', 'opus', 'sonnet', 'haiku']
-const PRIORITY_STYLE = {
-  low: 'bg-zinc-800 text-zinc-400 ring-1 ring-inset ring-zinc-700',
-  medium: 'bg-sky-950 text-sky-300 ring-1 ring-inset ring-sky-800/60',
-  high: 'bg-orange-950 text-orange-300 ring-1 ring-inset ring-orange-800/60',
-  urgent: 'bg-red-950 text-red-300 ring-1 ring-inset ring-red-800/60',
+
+// Cada view escolhe as colunas visíveis. Archived nunca aparece por padrão.
+const VIEWS = [
+  { key: 'ativas', label: 'Ativas', columns: ['todo', 'doing', 'done'] },
+  { key: 'todas', label: 'Todas', columns: ['backlog', 'todo', 'doing', 'done'] },
+  { key: 'backlog', label: 'Backlog', columns: ['backlog'] },
+  { key: 'arquivadas', label: 'Arquivadas', columns: ['archived'] },
+]
+
+const PRIORITY = {
+  low: { arrow: '↓', cls: 'text-muted', label: 'Low' },
+  medium: { arrow: '—', cls: 'text-muted', label: 'Medium' },
+  high: { arrow: '↑', cls: 'text-warning', label: 'High' },
+  urgent: { arrow: '↑↑', cls: 'text-danger', label: 'Urgent' },
+}
+
+const hash = s => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) | 0; return Math.abs(h) }
+const tagHue = t => hash(t) % 360
+const avatarBg = name => `hsl(${tagHue(name)} 62% 92%)`
+const avatarInk = name => `hsl(${tagHue(name)} 45% 30%)`
+const initials = name => (name || '?').trim().split(/[\s\-_/]+/).slice(0, 2).map(w => w[0]).join('').toUpperCase().slice(0, 2)
+
+// O corpo da task é o .md inteiro; a UI mostra apenas a seção pedida.
+export function section(body, header) {
+  if (!body) return ''
+  const re = new RegExp(`^##\\s+${header}\\s*$`, 'im')
+  const m = re.exec(body)
+  if (!m) return ''
+  const rest = body.slice(m.index + m[0].length)
+  const next = /^##\s+/m.exec(rest)
+  return (next ? rest.slice(0, next.index) : rest)
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .trim()
+}
+
+const fmtCost = v => v == null ? null : `$${Number(v).toFixed(2)}`
+const fmtDur = ms => {
+  if (ms == null) return null
+  const s = Math.round(ms / 1000)
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
+}
+const ago = iso => {
+  if (!iso) return ''
+  const min = Math.round((Date.now() - new Date(iso).getTime()) / 60000)
+  if (min < 1) return 'agora'
+  if (min < 60) return `há ${min}min`
+  if (min < 1440) return `há ${Math.round(min / 60)}h`
+  return `há ${Math.round(min / 1440)}d`
 }
 
 export default function App() {
@@ -26,14 +69,18 @@ export default function App() {
   const [queue, setQueue] = useState({ actives: [], queue: [], maxConcurrency: 1 })
   const [logTask, setLogTask] = useState(null)
   const [diffTask, setDiffTask] = useState(null)
-  const [editTask, setEditTask] = useState(null) // task ou 'new'
+  const [detailId, setDetailId] = useState(null)   // task aberta no drawer
+  const [newTask, setNewTask] = useState(null)     // null | { status }
   const [showPending, setShowPending] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showSuggest, setShowSuggest] = useState(false)
   const [showClaudeConfig, setShowClaudeConfig] = useState(false)
-  const [showArchived, setShowArchived] = useState(false)
+  const [showAddProject, setShowAddProject] = useState(false)
+  const [view, setView] = useState('todas')
+  const [query, setQuery] = useState('')
   const [health, setHealth] = useState({ ok: true, claudeAvailable: true })
   const [activeId, setActiveId] = useState(null)
+  const searchRef = useRef(null)
   const selectedIdRef = useRef(null)
   selectedIdRef.current = selectedId
 
@@ -65,6 +112,19 @@ export default function App() {
     }
   }), [refreshProjects, setTasks])
 
+  // Atalhos: n = nova task, / = busca, esc = fecha o drawer.
+  useEffect(() => {
+    const onKey = e => {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable
+      if (e.key === 'Escape') { setDetailId(null); return }
+      if (typing) return
+      if (e.key === 'n' && project) { e.preventDefault(); setNewTask({ status: 'backlog' }) }
+      if (e.key === '/') { e.preventDefault(); searchRef.current?.focus() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [project])
+
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
   const onDragEnd = ({ active, over }) => {
@@ -79,89 +139,102 @@ export default function App() {
 
   const runTask = tid => api.run(project.id, tid).then(setQueue).catch(e => alert(e.message))
   const pendingCount = pending.filter(a => a.status === 'pending').length
+  const detail = tasks.find(t => t.id === detailId) || null
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return tasks
+    return tasks.filter(t =>
+      t.title?.toLowerCase().includes(q) ||
+      t.id?.toLowerCase().includes(q) ||
+      (t.tags || []).some(tag => tag.toLowerCase().includes(q)))
+  }, [tasks, query])
+
+  const columns = VIEWS.find(v => v.key === view).columns
+
+  const patchTask = (tid, patch) => api.patchTask(project.id, tid, patch)
+    .then(() => api.tasks(project.id).then(d => setTasks(d.tasks)))
+    .catch(e => alert(e.message))
 
   return (
-    <div className="flex h-full">
-      <Sidebar
+    <div className="flex h-full bg-bg text-ink">
+      <Rail
         projects={projects} selectedId={selectedId} onSelect={setSelectedId} queue={queue}
-        onAdd={(name, path) => api.addProject(name, path).then(d => { refreshProjects(); setSelectedId(d.project.id) }).catch(e => alert(e.message))}
+        onAdd={() => setShowAddProject(true)}
+        onSettings={() => project && setShowSettings(true)}
       />
-      <main className="flex flex-1 flex-col overflow-hidden">
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {!health.claudeAvailable && (
-          <div className="bg-red-900/60 px-4 py-2 text-sm text-red-200">CLI `claude` não encontrado no PATH — execução de tasks indisponível.</div>
+          <div className="border-b border-line bg-accent-soft px-4 py-2 text-body text-danger">
+            CLI <code className="font-mono">claude</code> não encontrado no PATH — execução de tasks indisponível.
+          </div>
         )}
         {project ? (
           <>
-            <header className="flex items-center gap-3 border-b border-zinc-800/80 bg-zinc-950/40 px-4 py-3 backdrop-blur">
-              <h1 className="text-lg font-semibold">{project.name}</h1>
-              <BootstrapBadge project={project} onRerun={() => api.rebootstrap(project.id).then(refreshProjects)} />
-              <BranchSelector project={project} onChanged={refreshProjects} />
-              {project.skipPermissions && <span className="rounded bg-red-900/70 px-2 py-0.5 text-xs text-red-200">skip-permissions</span>}
-              <div className="flex-1" />
-              <button onClick={() => api.patchProject(project.id, { autoRun: !project.autoRun }).then(refreshProjects)}
-                title="Com o auto ligado, toda task em To Do entra na fila sozinha (respeitando a concorrência configurada)."
-                className={`rounded-md px-3 py-1.5 text-sm ${project.autoRun ? 'bg-emerald-500 font-medium text-emerald-950 shadow-sm shadow-emerald-900/50' : 'bg-zinc-800/80 text-zinc-400 ring-1 ring-inset ring-zinc-700/60 hover:text-zinc-200'}`}>
-                ⚡ Auto {project.autoRun ? 'on' : 'off'}
-              </button>
-              <button onClick={() => setShowPending(true)}
-                className={`rounded-md px-3 py-1.5 text-sm ${pendingCount ? 'bg-amber-500 font-medium text-amber-950 shadow-sm shadow-amber-900/50' : 'bg-zinc-800/80 text-zinc-400 ring-1 ring-inset ring-zinc-700/60 hover:text-zinc-200'}`}>
-                Ações manuais{pendingCount ? ` (${pendingCount})` : ''}
-              </button>
-              <DevServerButton project={project} onChanged={refreshProjects} />
-              <button onClick={() => setShowClaudeConfig(true)} title="Ver e editar settings.json, .mcp.json, hooks, skills, agents…"
-                className="rounded-md bg-zinc-800/80 px-3 py-1.5 text-sm text-zinc-300 ring-1 ring-inset ring-zinc-700/60 hover:bg-zinc-700/80">.claude</button>
-              <button onClick={() => setShowSettings(true)} className="rounded-md bg-zinc-800/80 px-3 py-1.5 text-sm text-zinc-300 ring-1 ring-inset ring-zinc-700/60 hover:bg-zinc-700/80">Config</button>
-              <button onClick={() => setShowSuggest(true)} disabled={!health.claudeAvailable}
-                title="Analisa o projeto com o Claude e sugere tasks para o backlog"
-                className="rounded-md bg-violet-600 px-3 py-1.5 text-sm font-medium shadow-sm shadow-violet-950/60 hover:bg-violet-500 disabled:opacity-50">✨ Sugerir tasks</button>
-              <button onClick={() => setEditTask('new')} className="rounded-md bg-sky-500 px-3 py-1.5 text-sm font-semibold text-sky-950 shadow-sm shadow-sky-950/60 hover:bg-sky-400">+ Task</button>
-            </header>
-            <DndContext sensors={sensors} collisionDetection={closestCorners}
-              onDragStart={({ active }) => setActiveId(active.id)}
-              onDragCancel={() => setActiveId(null)} onDragEnd={onDragEnd}>
-              <div className="flex flex-1 gap-4 overflow-x-auto p-4">
-                {COLUMNS.map(col => (
-                  (col.key !== 'archived' || showArchived)
-                    ? <Column key={col.key} col={col} tasks={tasks.filter(t => t.status === col.key)}
-                        queue={queue} onRun={runTask} onEdit={setEditTask} onLog={setLogTask} onDiff={setDiffTask}
-                        defaultModel={project.defaultModel}
-                        onModel={(tid, model) => api.patchTask(project.id, tid, { model }).catch(e => alert(e.message))}
-                        onArchive={tid => api.archiveTask(project.id, tid)}
-                        onAddTask={col.key !== 'archived' ? () => setEditTask({ __new: true, status: col.key }) : null}
-                        onCollapse={col.collapsible ? () => setShowArchived(false) : null} />
-                    : <button key={col.key} onClick={() => setShowArchived(true)}
-                        className="h-fit shrink-0 rounded-lg border border-dashed border-zinc-700 px-3 py-2 text-xs text-zinc-500 hover:text-zinc-300">
-                        Archived ({tasks.filter(t => t.status === 'archived').length}) ▸
-                      </button>
-                ))}
-              </div>
-              <DragOverlay>
-                {activeId ? (
-                  <CardBody task={tasks.find(t => t.id === activeId)} queue={queue}
-                    defaultModel={project.defaultModel} dragging />
-                ) : null}
-              </DragOverlay>
-            </DndContext>
+            <BoardHeader
+              project={project} health={health} view={view} onView={setView}
+              query={query} onQuery={setQuery} searchRef={searchRef}
+              pendingCount={pendingCount}
+              onNewTask={() => setNewTask({ status: 'backlog' })}
+              onPending={() => setShowPending(true)}
+              onSuggest={() => setShowSuggest(true)}
+              onClaudeConfig={() => setShowClaudeConfig(true)}
+              onSettings={() => setShowSettings(true)}
+              onRerun={() => api.rebootstrap(project.id).then(refreshProjects)}
+              onAutoRun={() => api.patchProject(project.id, { autoRun: !project.autoRun }).then(refreshProjects)}
+              onChanged={refreshProjects}
+            />
+            <div className="flex min-h-0 flex-1">
+              <DndContext sensors={sensors} collisionDetection={closestCorners}
+                onDragStart={({ active }) => setActiveId(active.id)}
+                onDragCancel={() => setActiveId(null)} onDragEnd={onDragEnd}>
+                <div className="flex min-w-0 flex-1 overflow-x-auto">
+                  {COLUMNS.filter(c => columns.includes(c.key)).map(col => (
+                    <Column key={col.key} col={col} tasks={visible.filter(t => t.status === col.key)}
+                      queue={queue} onRun={runTask} onOpen={setDetailId} selectedId={detailId}
+                      defaultModel={project.defaultModel} pending={pending}
+                      onAddTask={col.key !== 'archived' ? () => setNewTask({ status: col.key }) : null} />
+                  ))}
+                </div>
+                <DragOverlay>
+                  {activeId ? (
+                    <CardBody task={tasks.find(t => t.id === activeId)} queue={queue} pending={pending} dragging />
+                  ) : null}
+                </DragOverlay>
+              </DndContext>
+              {detail && (
+                <TaskDrawer task={detail} project={project} queue={queue}
+                  pending={pending.filter(a => a.taskId === detail.id)}
+                  onClose={() => setDetailId(null)}
+                  onPatch={patch => patchTask(detail.id, patch)}
+                  onRun={() => runTask(detail.id)}
+                  onKill={() => api.kill(detail.id)}
+                  onLog={() => setLogTask(detail.id)}
+                  onDiff={() => setDiffTask(detail)}
+                  onArchive={() => api.archiveTask(project.id, detail.id).then(() => setDetailId(null))}
+                  onResolve={aid => api.resolvePending(project.id, aid).then(d => setPending(d.actions))} />
+              )}
+            </div>
           </>
         ) : (
-          <div className="flex flex-1 items-center justify-center text-zinc-500">Cadastre um projeto na sidebar para começar.</div>
+          <EmptyProjects onAdd={() => setShowAddProject(true)} />
         )}
         <QueueBar queue={queue} tasks={tasks} projects={projects}
           onKill={tid => api.kill(tid).then(() => api.queue().then(setQueue))}
           onReorder={ids => api.reorderQueue(ids).then(setQueue)} />
       </main>
 
-      {editTask && project && (
-        <TaskModal task={(editTask === 'new' || editTask.__new) ? null : editTask}
-          onClose={() => setEditTask(null)}
-          onSave={data => {
-            const p = editTask === 'new'
-              ? api.addTask(project.id, data)
-              : editTask.__new
-                ? api.addTask(project.id, { ...data, status: editTask.status })
-                : api.patchTask(project.id, editTask.id, data)
-            p.then(() => { setEditTask(null); api.tasks(project.id).then(d => setTasks(d.tasks)) }).catch(e => alert(e.message))
-          }} />
+      {showAddProject && (
+        <AddProjectModal onClose={() => setShowAddProject(false)}
+          onAdd={(name, path) => api.addProject(name, path)
+            .then(d => { setShowAddProject(false); refreshProjects(); setSelectedId(d.project.id) })
+            .catch(e => alert(e.message))} />
+      )}
+      {newTask && project && (
+        <TaskModal onClose={() => setNewTask(null)}
+          onSave={data => api.addTask(project.id, { ...data, status: newTask.status })
+            .then(() => { setNewTask(null); api.tasks(project.id).then(d => setTasks(d.tasks)) })
+            .catch(e => alert(e.message))} />
       )}
       {diffTask && project && (
         <DiffDrawer projectId={project.id} task={diffTask} onClose={() => setDiffTask(null)} />
@@ -193,41 +266,117 @@ export default function App() {
   )
 }
 
-function Sidebar({ projects, selectedId, onSelect, onAdd, queue }) {
-  const [name, setName] = useState('')
-  const [path, setPath] = useState('')
+/* ---------------------------------------------------------------- primitivos */
+
+const Btn = ({ variant = 'ghost', className = '', ...props }) => {
+  const base = 'rounded-[6px] px-3 py-1.5 text-body disabled:opacity-40'
+  const styles = {
+    primary: 'bg-accent font-medium text-white hover:bg-accent-hover',
+    ghost: 'border border-line text-ink-2 hover:bg-hover',
+    quiet: 'text-ink-2 hover:bg-hover',
+    danger: 'border border-line text-danger hover:bg-hover',
+  }
+  return <button {...props} className={`${base} ${styles[variant]} ${className}`} />
+}
+
+const Chip = ({ children, className = '', ...props }) => {
+  const Tag = props.onClick ? 'button' : 'span'
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950/50">
-      <div className="flex items-center gap-2 px-4 py-3.5">
-        <span className="flex size-6 items-center justify-center rounded-md bg-gradient-to-br from-sky-500 to-violet-600 text-xs font-bold text-white shadow">K</span>
-        <span className="flex-1 text-sm font-bold tracking-wide text-zinc-200">claude-kanban</span>
-      </div>
-      <div className="flex-1 space-y-0.5 overflow-y-auto px-2">
-        {projects.map(p => (
-          <button key={p.id} onClick={() => onSelect(p.id)}
-            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm ${p.id === selectedId ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'}`}>
-            <span className="flex-1 truncate">{p.name}</span>
-            {!p.available && <span title="diretório indisponível" className="text-red-400">!</span>}
-            {queue.actives?.some(a => a.projectId === p.id) && <span className="size-2 animate-pulse rounded-full bg-emerald-400" title="executando" />}
-            {p.pendingCount > 0 && <span className="rounded bg-amber-500 px-1.5 text-xs font-semibold text-black">{p.pendingCount}</span>}
-          </button>
-        ))}
-      </div>
-      <UsagePanel />
-      <form className="space-y-2 border-t border-zinc-800 p-3"
-        onSubmit={e => { e.preventDefault(); if (name && path) { onAdd(name, path); setName(''); setPath('') } }}>
-        <input value={name} onChange={e => setName(e.target.value)} placeholder="Nome do projeto"
-          className="w-full rounded-md bg-zinc-800/80 px-2 py-1.5 text-sm outline-none ring-1 ring-inset ring-zinc-700/60 placeholder:text-zinc-600 focus:ring-sky-600" />
-        <div className="flex gap-2">
-          <input value={path} onChange={e => setPath(e.target.value)} placeholder="/caminho/do/projeto"
-            className="w-full rounded-md bg-zinc-800/80 px-2 py-1.5 text-sm outline-none ring-1 ring-inset ring-zinc-700/60 placeholder:text-zinc-600 focus:ring-sky-600" />
-          <button type="button" title="Buscar pasta"
-            onClick={() => api.pickFolder().then(d => { if (d.path) setPath(d.path) }).catch(e => alert(e.message))}
-            className="shrink-0 rounded bg-zinc-700 px-2 py-1.5 text-sm hover:bg-zinc-600">📁</button>
+    <Tag {...props} className={`inline-flex items-center gap-1.5 rounded-[6px] bg-chip px-2 py-0.5 text-meta text-chip-ink ${props.onClick ? 'hover:bg-line' : ''} ${className}`}>
+      {children}
+    </Tag>
+  )
+}
+
+const Dot = ({ className = '', style }) => <span style={style} className={`size-2 shrink-0 rounded-full ${className}`} />
+
+const TagChip = ({ tag }) => (
+  <Chip><Dot style={{ background: `hsl(${tagHue(tag)} 65% 55%)` }} />{tag}</Chip>
+)
+
+const Segmented = ({ value, onChange, options }) => (
+  <div className="flex items-center gap-0.5 rounded-[6px] bg-subtle p-0.5">
+    {options.map(o => (
+      <button key={o.key} onClick={() => onChange(o.key)}
+        className={`rounded-[4px] px-2.5 py-1 text-meta ${value === o.key ? 'border border-line bg-bg text-ink' : 'text-ink-2 hover:text-ink'}`}>
+        {o.label}
+      </button>
+    ))}
+  </div>
+)
+
+function Menu({ items, label = '···' }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const onDoc = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+  return (
+    <div className="relative" ref={ref}>
+      <button onClick={() => setOpen(v => !v)} title="Mais ações"
+        className="rounded-[6px] px-2 py-1 text-ink-2 hover:bg-hover">{label}</button>
+      {open && (
+        <div className="absolute right-0 z-30 mt-1 w-60 rounded-[8px] border border-line bg-bg py-1">
+          {items.filter(Boolean).map(it => (
+            <button key={it.label} disabled={it.disabled}
+              onClick={() => { setOpen(false); it.onClick() }}
+              className={`block w-full px-3 py-1.5 text-left text-body hover:bg-hover disabled:opacity-40 ${it.danger ? 'text-danger' : 'text-ink-2'}`}>
+              {it.label}
+            </button>
+          ))}
         </div>
-        <button className="w-full rounded-md bg-zinc-800 py-1.5 text-sm text-zinc-300 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-700 hover:text-white">Cadastrar projeto</button>
-      </form>
+      )}
+    </div>
+  )
+}
+
+/* --------------------------------------------------------------------- rail */
+
+function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue }) {
+  return (
+    <aside className="flex w-[var(--rail-w)] shrink-0 flex-col items-center gap-2 border-r border-line py-3">
+      <span title="claude-kanban"
+        className="flex size-8 items-center justify-center rounded-[8px] bg-accent text-meta font-bold text-white">K</span>
+      <div className="mt-2 flex flex-1 flex-col items-center gap-2 overflow-y-auto">
+        {projects.map(p => {
+          const running = queue.actives?.some(a => a.projectId === p.id)
+          return (
+            <button key={p.id} onClick={() => onSelect(p.id)} title={p.name}
+              className={`relative flex size-9 items-center justify-center rounded-[8px] text-meta font-semibold ${p.id === selectedId ? 'ring-2 ring-accent' : ''}`}
+              style={{ background: avatarBg(p.name), color: avatarInk(p.name) }}>
+              {initials(p.name)}
+              {!p.available && <span title="diretório indisponível" className="absolute -left-1 -top-1 text-danger">!</span>}
+              {p.pendingCount > 0 && (
+                <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-warning px-1 text-[10px] font-semibold leading-4 text-white">{p.pendingCount}</span>
+              )}
+              {running && <Dot className="absolute -bottom-0.5 -right-0.5 animate-pulse bg-st-doing" />}
+            </button>
+          )
+        })}
+        <button onClick={onAdd} title="Cadastrar projeto"
+          className="flex size-9 items-center justify-center rounded-[8px] border border-dashed border-line-strong text-muted hover:bg-hover hover:text-ink-2">+</button>
+      </div>
+      <QueueIndicator queue={queue} />
+      <button onClick={onSettings} title="Configurações do projeto"
+        className="rounded-[6px] p-1.5 text-muted hover:bg-hover hover:text-ink-2">⚙</button>
+      <UsageRail />
     </aside>
+  )
+}
+
+function QueueIndicator({ queue }) {
+  const actives = queue.actives?.length || 0
+  const waiting = queue.queue?.length || 0
+  if (!actives && !waiting) return null
+  return (
+    <div title={`${actives} ativa(s) · ${waiting} na fila`}
+      className="flex flex-col items-center gap-0.5 text-[10px] text-muted">
+      <Dot className="animate-pulse bg-st-doing" />
+      <span className="font-mono">{actives}/{actives + waiting}</span>
+    </div>
   )
 }
 
@@ -248,7 +397,8 @@ function usageResetLabel(iso) {
   return `reseta ${d.toLocaleDateString('pt-BR', { weekday: 'short' })} ${time}`
 }
 
-function UsagePanel() {
+// No rail cabe só o essencial: a barra mais crítica, com o detalhe no tooltip.
+function UsageRail() {
   const [usage, setUsage] = useState(null)
   useEffect(() => {
     let alive = true
@@ -259,30 +409,60 @@ function UsagePanel() {
   }, [])
 
   if (!usage?.available || !usage.limits?.length) return null
+  const worst = usage.limits.reduce((a, b) => (b.percent ?? 0) > (a.percent ?? 0) ? b : a)
+  const pct = Math.min(100, Math.max(0, worst.percent ?? 0))
+  const bar = pct >= 90 || worst.severity !== 'normal' ? 'bg-danger' : pct >= 70 ? 'bg-warning' : 'bg-success'
+  const title = usage.limits
+    .map(l => `${USAGE_LABEL[l.kind] || l.kind}${l.model ? ` · ${l.model}` : ''}: ${l.percent ?? 0}% (${usageResetLabel(l.resetsAt)})`)
+    .join('\n')
   return (
-    <div className="space-y-2.5 border-t border-zinc-800 px-4 py-3">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Uso do Claude</div>
-      {usage.limits.map((l, i) => {
-        const pct = Math.min(100, Math.max(0, l.percent ?? 0))
-        const bar = l.severity !== 'normal' || pct >= 90 ? 'bg-red-500'
-          : pct >= 70 ? 'bg-amber-400'
-          : 'bg-emerald-500'
-        return (
-          <div key={i} title={usageResetLabel(l.resetsAt)}>
-            <div className="mb-1 flex items-baseline justify-between text-[11px]">
-              <span className="text-zinc-400">
-                {USAGE_LABEL[l.kind] || l.kind}{l.model ? ` · ${l.model}` : ''}
-              </span>
-              <span className="font-mono text-zinc-500">{pct}%</span>
-            </div>
-            <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800">
-              <div className={`h-full rounded-full ${bar}`} style={{ width: `${pct}%` }} />
-            </div>
-            <div className="mt-0.5 text-[10px] text-zinc-600">{usageResetLabel(l.resetsAt)}</div>
-          </div>
-        )
-      })}
+    <div title={title} className="flex w-8 flex-col items-center gap-1 pb-1">
+      <div className="h-1 w-full overflow-hidden rounded-full bg-line">
+        <div className={`h-full ${bar}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="font-mono text-[10px] text-muted">{pct}%</span>
     </div>
+  )
+}
+
+/* ------------------------------------------------------------------- header */
+
+function BoardHeader({ project, health, view, onView, query, onQuery, searchRef, pendingCount,
+  onNewTask, onPending, onSuggest, onClaudeConfig, onSettings, onRerun, onAutoRun, onChanged }) {
+  return (
+    <header className="border-b border-line px-4 py-3">
+      <div className="flex items-center gap-2">
+        <h1 className="text-title font-semibold">{project.name}</h1>
+        <BootstrapBadge project={project} onRerun={onRerun} />
+        <BranchSelector project={project} onChanged={onChanged} />
+        {project.skipPermissions && <Chip className="text-danger">skip-permissions</Chip>}
+        <div className="flex-1" />
+        <DevServerButton project={project} onChanged={onChanged} />
+        <Menu items={[
+          { label: 'Re-rodar bootstrap (guardrails)', onClick: onRerun },
+          { label: 'Config do Claude (.claude)', onClick: onClaudeConfig },
+          { label: 'Configurações do projeto', onClick: onSettings },
+          { label: '✦ Sugerir tasks com o Claude', onClick: onSuggest, disabled: !health.claudeAvailable },
+        ]} />
+      </div>
+      <div className="mt-3 flex items-center gap-2">
+        <Segmented value={view} onChange={onView} options={VIEWS} />
+        <input ref={searchRef} value={query} onChange={e => onQuery(e.target.value)}
+          placeholder="Buscar tasks…   /"
+          className="w-64 rounded-[6px] border border-transparent bg-subtle px-3 py-1.5 text-body outline-none placeholder:text-muted focus:border-line focus:bg-bg" />
+        <div className="flex-1" />
+        <button onClick={onAutoRun}
+          title="Com o auto ligado, toda task em To Do entra na fila sozinha (respeitando a concorrência configurada)."
+          className={`rounded-[6px] border px-3 py-1.5 text-body ${project.autoRun ? 'border-line bg-subtle text-ink' : 'border-line text-ink-2 hover:bg-hover'}`}>
+          {project.autoRun ? <Dot className="mr-1.5 inline-block bg-success" /> : null}
+          Auto-pilot {project.autoRun ? 'on' : 'off'}
+        </button>
+        <Btn onClick={onPending} className={pendingCount ? 'border-warning text-warning' : ''}>
+          Ações manuais{pendingCount ? ` (${pendingCount})` : ''}
+        </Btn>
+        <Btn variant="primary" onClick={onNewTask}>Nova task +</Btn>
+      </div>
+    </header>
   )
 }
 
@@ -300,16 +480,16 @@ function DevServerButton({ project, onChanged }) {
     api.stopDevServer(project.id).then(onChanged).catch(e => alert(e.message)).finally(() => setBusy(false))
   }
   return (
-    <div className="flex items-center overflow-hidden rounded">
+    <div className="flex items-center overflow-hidden rounded-[6px] border border-line">
       <button onClick={launch} disabled={busy}
         title={configured ? project.devServer.command : 'Configure o comando do dev server em Config'}
-        className={`px-3 py-1.5 text-sm ${running ? 'bg-emerald-700 text-emerald-100' : 'bg-zinc-800 text-zinc-300'} disabled:opacity-50`}>
-        {running && <span className="mr-1 inline-block size-2 animate-pulse rounded-full bg-emerald-300 align-middle" />}
-        Abrir dev server no Chrome
+        className="px-3 py-1.5 text-body text-ink-2 hover:bg-hover disabled:opacity-40">
+        {running && <Dot className="mr-1.5 inline-block animate-pulse bg-success" />}
+        Dev server
       </button>
       {running && (
         <button onClick={stop} disabled={busy} title="Parar dev server"
-          className="border-l border-zinc-900/40 bg-emerald-800 px-2 py-1.5 text-sm text-emerald-100 hover:bg-red-800 disabled:opacity-50">✕</button>
+          className="border-l border-line px-2 py-1.5 text-body text-danger hover:bg-hover disabled:opacity-40">✕</button>
       )}
     </div>
   )
@@ -328,7 +508,6 @@ function BranchSelector({ project, onChanged }) {
     return () => document.removeEventListener('mousedown', onDoc)
   }, [open])
 
-  if (!project.branch && project.bootstrap === 'unknown') return null
   if (!project.branch) return null // não é repo git
 
   const load = doFetch => {
@@ -360,28 +539,28 @@ function BranchSelector({ project, onChanged }) {
   return (
     <div className="relative" ref={ref}>
       <button title="Branch atual — clique para trocar" onClick={toggle} disabled={busy}
-        className="flex items-center gap-1 rounded bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50">
-        <span className="text-zinc-500">⑃</span>
+        className="flex items-center gap-1 rounded-[6px] bg-chip px-2 py-0.5 text-meta text-chip-ink hover:bg-line disabled:opacity-40">
+        <span className="text-muted">⑃</span>
         <span className="max-w-[16rem] truncate font-mono">{project.branch}</span>
-        <span className="text-zinc-500">▾</span>
+        <span className="text-muted">▾</span>
       </button>
       {open && (
-        <div className="absolute left-0 z-20 mt-1 w-64 rounded border border-zinc-700 bg-zinc-900 shadow-lg">
-          <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-1.5">
-            <span className="text-xs text-zinc-500">branches</span>
+        <div className="absolute left-0 z-30 mt-1 w-64 rounded-[8px] border border-line bg-bg">
+          <div className="flex items-center justify-between border-b border-line px-3 py-1.5">
+            <span className="text-meta text-muted">branches</span>
             <button onClick={() => load(true)} disabled={busy}
               title="Buscar branches remotas (git fetch)"
-              className="rounded px-1.5 py-0.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50">↻ fetch</button>
+              className="rounded px-1.5 py-0.5 text-meta text-ink-2 hover:bg-hover disabled:opacity-40">↻ fetch</button>
           </div>
           <div className="max-h-72 overflow-auto py-1">
-            {branches === null && <div className="px-3 py-1.5 text-xs text-zinc-500">carregando…</div>}
-            {branches?.length === 0 && <div className="px-3 py-1.5 text-xs text-zinc-500">nenhuma branch</div>}
+            {branches === null && <div className="px-3 py-1.5 text-meta text-muted">carregando…</div>}
+            {branches?.length === 0 && <div className="px-3 py-1.5 text-meta text-muted">nenhuma branch</div>}
             {branches?.map(b => (
               <button key={b.name} onClick={() => switchTo(b.name)} disabled={busy}
-                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-zinc-800 disabled:opacity-50 ${b.current ? 'text-emerald-300' : 'text-zinc-300'}`}>
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-meta hover:bg-hover disabled:opacity-40 ${b.current ? 'text-accent' : 'text-ink-2'}`}>
                 <span className="w-3">{b.current ? '✓' : ''}</span>
                 <span className="flex-1 truncate font-mono">{b.name}</span>
-                {b.remote && <span className="rounded bg-zinc-800 px-1 text-[10px] text-zinc-500">remote</span>}
+                {b.remote && <span className="rounded bg-chip px-1 text-[10px] text-muted">remote</span>}
               </button>
             ))}
           </div>
@@ -393,44 +572,47 @@ function BranchSelector({ project, onChanged }) {
 
 function BootstrapBadge({ project, onRerun }) {
   const map = {
-    ok: ['bg-emerald-900/60 text-emerald-300', 'bootstrap ok'],
-    outdated: ['bg-amber-900/60 text-amber-300', 'bootstrap desatualizado — clique para atualizar'],
-    failed: ['bg-red-900/60 text-red-300', project.bootstrapError || 'bootstrap falhou — clique para tentar de novo'],
-    missing: ['bg-zinc-800 text-zinc-400', 'sem bootstrap — clique para rodar'],
-    unknown: ['bg-zinc-800 text-zinc-500', 'diretório indisponível'],
+    ok: ['text-success', 'bootstrap ok'],
+    outdated: ['text-warning', 'bootstrap desatualizado — clique para atualizar'],
+    failed: ['text-danger', project.bootstrapError || 'bootstrap falhou — clique para tentar de novo'],
+    missing: ['text-muted', 'sem bootstrap — clique para rodar'],
+    unknown: ['text-muted', 'diretório indisponível'],
   }
   const [cls, title] = map[project.bootstrap] || map.unknown
   return (
     <button title={title} onClick={project.bootstrap !== 'ok' ? onRerun : undefined}
-      className={`rounded px-2 py-0.5 text-xs ${cls}`}>
+      className={`rounded-[6px] bg-chip px-2 py-0.5 text-meta ${cls}`}>
       {project.bootstrap === 'ok' ? 'guardrails ✓' : `bootstrap: ${project.bootstrap}`}
     </button>
   )
 }
 
-function Column({ col, tasks, queue, onRun, onEdit, onLog, onDiff, onArchive, onAddTask, onCollapse, defaultModel, onModel }) {
+/* ------------------------------------------------------------------ colunas */
+
+function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pending }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key })
   return (
-    <div ref={setNodeRef}
-      className={`flex w-72 shrink-0 flex-col rounded-xl border transition-colors ${isOver ? 'border-sky-500/70 bg-sky-950/25 ring-1 ring-sky-500/30' : 'border-zinc-800/80 bg-zinc-900/50'}`}>
-      <div className="flex items-center justify-between px-3.5 py-2.5 text-xs font-semibold uppercase tracking-wider text-zinc-400">
-        <span className="flex items-center gap-2">
-          <span className={`size-2 rounded-full ${col.dot}`} />
-          {col.label}
-          <span className="rounded-full bg-zinc-800 px-1.5 py-px text-[10px] font-medium text-zinc-500">{tasks.length}</span>
-        </span>
-        {onCollapse && <button onClick={onCollapse} className="text-zinc-600 hover:text-zinc-300">◂</button>}
-      </div>
-      <div className="flex-1 space-y-2 overflow-y-auto p-2 pt-0">
-        {tasks.map(t => (
-          <Card key={t.id} task={t} queue={queue} onRun={onRun} onEdit={onEdit} onLog={onLog} onDiff={onDiff} onArchive={onArchive}
-            defaultModel={defaultModel} onModel={onModel} />
-        ))}
+    <div ref={setNodeRef} data-column={col.key}
+      className={`flex w-[var(--col-min-w)] shrink-0 flex-col border-r border-line ${isOver ? 'border-t-2 border-t-accent' : 'border-t-2 border-t-transparent'}`}>
+      <div className="flex items-center gap-2 px-4 py-3">
+        <Dot className={col.dot} />
+        <span className="text-body font-medium">{col.label}</span>
+        <span className="text-meta text-muted">{tasks.length}</span>
+        <div className="flex-1" />
         {onAddTask && (
-          <button onClick={onAddTask}
-            className="w-full rounded-lg border border-dashed border-zinc-800 px-3 py-2 text-left text-xs text-zinc-600 hover:border-zinc-600 hover:bg-zinc-800/30 hover:text-zinc-300">
-            + Adicionar task
-          </button>
+          <button onClick={onAddTask} title={`Nova task em ${col.label}`}
+            className="rounded-[4px] px-1.5 text-ink-2 hover:bg-hover">+</button>
+        )}
+      </div>
+      <div className="flex-1 space-y-3 overflow-y-auto px-3 pb-4">
+        {tasks.map(t => (
+          <Card key={t.id} task={t} queue={queue} onRun={onRun} onOpen={onOpen}
+            selected={t.id === selectedId} pending={pending} />
+        ))}
+        {tasks.length === 0 && (
+          <div className="rounded-[8px] border border-dashed border-line px-3 py-6 text-center text-meta text-muted">
+            {onAddTask ? 'Arraste uma task ou crie com +' : 'Nada arquivado'}
+          </div>
         )}
       </div>
     </div>
@@ -446,104 +628,327 @@ function Card(props) {
   )
 }
 
-function CardBody({ task, queue, onRun, onEdit, onLog, onDiff, onArchive, defaultModel, onModel,
-  innerRef, handleProps, hidden, dragging }) {
+function CardBody({ task, queue, onRun, onOpen, selected, pending = [], innerRef, handleProps, hidden, dragging }) {
   const running = queue.actives?.some(a => a.taskId === task.id)
-  const queued = queue.queue.some(q => q.taskId === task.id)
+  const queued = queue.queue?.some(q => q.taskId === task.id)
+  const desc = section(task.body, 'Descrição')
+  const prio = PRIORITY[task.priority] || PRIORITY.medium
+  const openPending = pending.filter(a => a.taskId === task.id && a.status === 'pending').length
+  // O card inteiro é a área de drag; só é clique (abre o drawer) se o ponteiro
+  // mal se moveu — senão todo drop abriria o detalhe.
+  const down = useRef(null)
+  const onPointerUp = e => {
+    const p = down.current
+    if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) < 5) onOpen?.(task.id)
+    down.current = null
+  }
+
   return (
     <div ref={innerRef} {...handleProps}
-      className={`group rounded-lg border border-zinc-800 bg-zinc-900/90 p-3 text-sm shadow-md shadow-black/20 transition-colors hover:border-zinc-700 ${hidden ? 'opacity-0' : ''} ${dragging ? 'cursor-grabbing shadow-2xl ring-1 ring-sky-500' : 'cursor-grab'}`}>
-      <div className="flex items-start justify-between gap-2">
-        <button onClick={() => onEdit(task)} className="text-left font-medium leading-snug hover:text-sky-300">{task.title}</button>
-        {running && <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-emerald-400 border-t-transparent" title="executando" />}
+      onPointerDown={e => { down.current = { x: e.clientX, y: e.clientY }; handleProps?.onPointerDown?.(e) }}
+      onPointerUp={onPointerUp}
+      className={`rounded-[8px] bg-bg p-3.5 text-body ${selected ? 'border-2 border-accent p-[13px]' : 'border border-line'} ${hidden ? 'opacity-0' : ''} ${dragging ? 'cursor-grabbing' : 'cursor-grab hover:bg-hover'}`}>
+      <div className="font-mono text-key uppercase text-muted">{task.id}</div>
+      <div className="mt-1 line-clamp-2 text-card font-semibold leading-snug">{task.title}</div>
+      {desc && <p className="mt-1.5 line-clamp-3 whitespace-pre-wrap text-body text-ink-2">{desc}</p>}
+
+      <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        <span title={prio.label} className={`text-body ${prio.cls}`}>{prio.arrow}</span>
+        {(task.tags || []).map(tag => <TagChip key={tag} tag={tag} />)}
+        <div className="flex-1" />
+        {queued && <Chip className="text-info">na fila</Chip>}
+        {task.model && <Chip className="font-mono">{task.model}</Chip>}
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${PRIORITY_STYLE[task.priority] || PRIORITY_STYLE.medium}`}>{task.priority}</span>
-        {(task.tags || []).map(tag => (
-          <span key={tag} className={`rounded px-1.5 py-0.5 text-[10px] ${tag === 'blocked' ? 'bg-red-900 text-red-300' : 'bg-zinc-800 text-zinc-400'}`}>{tag}</span>
-        ))}
-        {queued && <span className="rounded bg-violet-900 px-1.5 py-0.5 text-[10px] text-violet-300">na fila</span>}
-        <select value={task.model || ''} disabled={running || queued}
-          onPointerDown={e => e.stopPropagation()}
-          onChange={e => onModel(task.id, e.target.value || null)}
-          title="Modelo desta task (vazio: default do projeto → default do claude-code)"
-          className={`ml-auto rounded bg-zinc-800 px-1 py-0.5 text-[10px] outline-none disabled:opacity-50 ${task.model ? 'text-teal-300' : 'text-zinc-500'}`}>
-          <option value="">{defaultModel ? `↳ ${defaultModel}` : '↳ auto'}</option>
-          {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
-        </select>
-      </div>
-      {(task.run?.cost_usd != null || task.run?.duration_ms != null) && (
-        <div className="mt-1.5 text-[11px] text-zinc-500">
-          {task.run.cost_usd != null && <>${Number(task.run.cost_usd).toFixed(3)} · </>}
-          {task.run.duration_ms != null && <>{(task.run.duration_ms / 1000).toFixed(0)}s · </>}
-          {task.run.num_turns != null && <>{task.run.num_turns} turnos</>}
-        </div>
-      )}
-      <div className="mt-2 flex gap-2 opacity-0 transition group-hover:opacity-100">
-        {['backlog', 'todo'].includes(task.status) && !queued && !running && (
-          <ActionBtn onClick={() => onRun(task.id)} label="▶ Executar" cls="text-emerald-400" />
-        )}
-        {(running || task.run?.session_id || (task.run?.attempts ?? 0) > 0) && (
-          <ActionBtn onClick={() => onLog(task.id)} label="Ver log" cls="text-sky-400" />
-        )}
-        {task.run?.has_diff && !running && (
-          <ActionBtn onClick={() => onDiff(task)} label="Ver diff" cls="text-violet-400" />
-        )}
-        {running && <ActionBtn onClick={() => api.kill(task.id)} label="Matar" cls="text-red-400" />}
-        {task.status !== 'archived' && !running && <ActionBtn onClick={() => onArchive(task.id)} label="Arquivar" cls="text-zinc-500" />}
-      </div>
+
+      <RunStrip task={task} running={running} openPending={openPending}
+        onRun={onRun ? () => onRun(task.id) : null} />
     </div>
   )
 }
-const ActionBtn = ({ onClick, label, cls }) => (
-  <button onPointerDown={e => e.stopPropagation()} onClick={onClick} className={`text-xs hover:underline ${cls}`}>{label}</button>
-)
 
-function TaskModal({ task, onClose, onSave }) {
-  const [title, setTitle] = useState(task?.title || '')
-  const [priority, setPriority] = useState(task?.priority || 'medium')
-  const [tags, setTags] = useState((task?.tags || []).join(', '))
-  const [model, setModel] = useState(task?.model || '')
-  const [body, setBody] = useState(task?.body ?? '')
-  const [preview, setPreview] = useState(false)
+// Assinatura da UI: bloco inset com o estado do run — vivo enquanto executa,
+// pós-mortem quando termina.
+function RunStrip({ task, running, openPending, onRun }) {
+  const run = task.run || {}
+  const idle = !running && !run.completed_at && !run.started_at
+  if (idle) {
+    if (!onRun || !['backlog', 'todo'].includes(task.status)) return null
+    return (
+      <button onPointerDown={e => e.stopPropagation()}
+        onClick={e => { e.stopPropagation(); onRun() }}
+        className="mt-3 w-full rounded-[6px] bg-subtle px-2.5 py-1.5 text-left text-meta text-ink-2 hover:bg-hover">
+        ▶ Executar
+      </button>
+    )
+  }
+  const failed = !running && run.exit_code != null && run.exit_code !== 0
   return (
-    <Modal onClose={onClose} title={task ? `Editar task — ${task.id}` : 'Nova task'}>
+    <div className="mt-3 rounded-[6px] bg-subtle px-2.5 py-2 text-meta">
+      {openPending > 0 && (
+        <div className="mb-1.5 border-b border-warning/60 pb-1.5 text-warning">
+          {openPending} ação manual pendente{openPending > 1 ? 's' : ''}
+        </div>
+      )}
+      {running ? (
+        <div className="flex items-center gap-2 text-ink-2">
+          <span className="flex gap-0.5">
+            {[0, 1, 2].map(i => <Dot key={i} className="ck-dot size-1.5 bg-st-doing" />)}
+          </span>
+          <span>rodando</span>
+          <LiveTimer since={run.started_at} />
+          {run.cost_usd != null && <span className="font-mono">· {fmtCost(run.cost_usd)}</span>}
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-x-1.5 text-ink-2">
+          <Dot className={`size-1.5 ${failed ? 'bg-danger' : 'bg-success'}`} />
+          <span>{failed ? `exit ${run.exit_code}` : 'concluído'}</span>
+          {run.completed_at && <span className="text-muted">· {ago(run.completed_at)}</span>}
+          {run.cost_usd != null && <span className="font-mono text-muted">· {fmtCost(run.cost_usd)}</span>}
+          {run.duration_ms != null && <span className="text-muted">· {fmtDur(run.duration_ms)}</span>}
+          {run.num_turns != null && <span className="text-muted">· {run.num_turns} turns</span>}
+          {(run.attempts ?? 0) > 1 && <span className="text-muted">· {run.attempts} attempts</span>}
+        </div>
+      )}
+      {run.branch && (
+        <div className="mt-1 truncate font-mono text-[11px] text-muted">{run.branch}{run.has_diff ? ' · diff' : ''}</div>
+      )}
+    </div>
+  )
+}
+
+function LiveTimer({ since }) {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => tick(n => n + 1), 1000)
+    return () => clearInterval(t)
+  }, [])
+  if (!since) return null
+  return <span className="font-mono">· {fmtDur(Date.now() - new Date(since).getTime())}</span>
+}
+
+/* ------------------------------------------------------- drawer de detalhe */
+
+function Section({ title, badge, action, children }) {
+  const [open, setOpen] = useState(true)
+  return (
+    <section className="border-t border-line py-3">
+      <div className="flex items-center gap-2">
+        <button onClick={() => setOpen(v => !v)}
+          className="flex flex-1 items-center gap-1.5 text-left text-meta font-semibold uppercase tracking-wide text-muted hover:text-ink-2">
+          <span>{open ? '▾' : '▸'}</span>{title}
+          {badge ? <span className="rounded-full bg-warning px-1.5 text-[10px] font-semibold text-white">{badge}</span> : null}
+        </button>
+        {action}
+      </div>
+      {open && <div className="mt-2.5">{children}</div>}
+    </section>
+  )
+}
+
+const Empty = ({ children }) => <div className="text-body text-muted">{children}</div>
+
+function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, onKill, onLog, onDiff, onArchive, onResolve }) {
+  const [editing, setEditing] = useState(false)
+  const [title, setTitle] = useState(task.title)
+  const [body, setBody] = useState(task.body ?? '')
+
+  useEffect(() => { setTitle(task.title); setBody(task.body ?? ''); setEditing(false) }, [task.id])
+
+  const running = queue.actives?.some(a => a.taskId === task.id)
+  const queued = queue.queue?.some(q => q.taskId === task.id)
+  const run = task.run || {}
+  const col = COLUMNS.find(c => c.key === task.status) || COLUMNS[0]
+  const prio = PRIORITY[task.priority] || PRIORITY.medium
+  const desc = section(body, 'Descrição')
+  const result = section(body, 'Resultado')
+  const openPending = pending.filter(a => a.status === 'pending')
+
+  return (
+    <aside className="flex w-[var(--detail-w)] shrink-0 flex-col overflow-y-auto border-l border-line px-4 py-3">
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-key uppercase text-muted">{task.id}</span>
+        <div className="flex-1" />
+        <Menu items={[
+          { label: running ? 'Matar sessão' : 'Executar agora', onClick: running ? onKill : onRun, disabled: queued },
+          { label: 'Ver log', onClick: onLog },
+          { label: 'Ver diff', onClick: onDiff, disabled: !run.has_diff },
+          { label: 'Arquivar', onClick: onArchive, danger: true, disabled: task.status === 'archived' },
+        ]} />
+        <button onClick={onClose} title="Fechar (esc)" className="rounded-[6px] px-2 py-1 text-muted hover:bg-hover hover:text-ink">✕</button>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        <select value={task.status} onChange={e => onPatch({ status: e.target.value })}
+          className="rounded-[6px] bg-chip px-2 py-1 text-meta text-chip-ink outline-none">
+          {COLUMNS.map(c => <option key={c.key} value={c.key}>{c.label}</option>)}
+        </select>
+        <select value={task.priority} onChange={e => onPatch({ priority: e.target.value })}
+          className={`rounded-[6px] bg-chip px-2 py-1 text-meta outline-none ${prio.cls}`}>
+          {Object.entries(PRIORITY).map(([k, p]) => <option key={k} value={k}>{p.arrow} {p.label}</option>)}
+        </select>
+        <select value={task.model || ''} disabled={running || queued}
+          onChange={e => onPatch({ model: e.target.value || null })}
+          title="Modelo desta task (vazio: default do projeto)"
+          className="rounded-[6px] bg-chip px-2 py-1 font-mono text-meta text-chip-ink outline-none disabled:opacity-40">
+          <option value="">{project.defaultModel ? `↳ ${project.defaultModel}` : '↳ auto'}</option>
+          {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+        </select>
+        {(task.tags || []).map(t => <TagChip key={t} tag={t} />)}
+      </div>
+
+      {editing ? (
+        <div className="mt-3 space-y-2">
+          <input value={title} onChange={e => setTitle(e.target.value)}
+            className="w-full rounded-[6px] border border-line px-2 py-1.5 text-card font-semibold outline-none focus:border-accent" />
+          <textarea value={body} onChange={e => setBody(e.target.value)} spellCheck={false}
+            className="h-64 w-full resize-none rounded-[6px] bg-subtle p-3 font-mono text-body outline-none" />
+          <div className="flex justify-end gap-2">
+            <Btn variant="quiet" onClick={() => { setTitle(task.title); setBody(task.body ?? ''); setEditing(false) }}>Cancelar</Btn>
+            <Btn variant="primary" disabled={!title.trim()}
+              onClick={() => { onPatch({ title: title.trim(), body }); setEditing(false) }}>Salvar</Btn>
+          </div>
+        </div>
+      ) : (
+        <>
+          <h2 className="mt-3 text-[17px] font-semibold leading-snug">{task.title}</h2>
+          <div className="mt-1.5 whitespace-pre-wrap text-body text-ink-2">{desc || <Empty>Sem descrição.</Empty>}</div>
+          <button onClick={() => setEditing(true)} className="mt-2 self-start text-meta text-accent hover:underline">Editar</button>
+        </>
+      )}
+
+      <Section title="Execuções"
+        action={running
+          ? <button onClick={onKill} className="text-meta text-danger hover:underline">Matar sessão</button>
+          : run.has_diff ? <button onClick={onDiff} className="text-meta text-accent hover:underline">Ver diff</button> : null}>
+        {!run.started_at && !running ? (
+          <Empty>Nenhuma execução ainda.</Empty>
+        ) : (
+          <div className="rounded-[6px] border border-line p-2.5 text-meta">
+            <div className="flex items-center gap-2">
+              <Dot className={running ? 'animate-pulse bg-success' : run.exit_code ? 'bg-danger' : 'bg-muted'} />
+              <span className="text-ink-2">
+                {running ? 'Ativa' : run.exit_code ? `Falhou (exit ${run.exit_code})` : 'Concluída'}
+              </span>
+              <div className="flex-1" />
+              <button onClick={onLog} className="text-accent hover:underline">
+                {running ? 'Ver log ao vivo' : 'Ver log'}
+              </button>
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-x-2 text-muted">
+              {run.duration_ms != null && <span>{fmtDur(run.duration_ms)}</span>}
+              {run.cost_usd != null && <span className="font-mono">{fmtCost(run.cost_usd)}</span>}
+              {run.num_turns != null && <span>{run.num_turns} turns</span>}
+              {(run.attempts ?? 0) > 0 && <span>{run.attempts} attempt(s)</span>}
+              {run.session_id && <span className="font-mono">{String(run.session_id).slice(0, 8)}</span>}
+            </div>
+            {run.branch && <div className="mt-1 truncate font-mono text-[11px] text-muted">{run.branch}</div>}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Ações manuais" badge={openPending.length || null}>
+        {openPending.length === 0 ? <Empty>Nenhuma ação pendente.</Empty> : (
+          <div className="space-y-2">
+            {openPending.map(a => (
+              <div key={a.id} className="rounded-[6px] border border-line p-2.5">
+                <div className="flex items-start gap-2">
+                  <span className="flex-1 text-body text-ink-2">{a.label}</span>
+                  <button onClick={() => onResolve(a.id)} className="text-meta text-accent hover:underline">Resolvido</button>
+                </div>
+                {a.command && (
+                  <code className="mt-1.5 block overflow-x-auto rounded-[4px] bg-subtle p-2 font-mono text-[11px] text-ink-2">{a.command}</code>
+                )}
+                <div className="mt-1 font-mono text-[11px] text-muted">{a.id}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Resultado">
+        {result
+          ? <div className="whitespace-pre-wrap text-body text-ink-2">{result}</div>
+          : <Empty>O Claude preenche esta seção ao concluir a task.</Empty>}
+      </Section>
+    </aside>
+  )
+}
+
+/* -------------------------------------------------------------------- modais */
+
+function TaskModal({ onClose, onSave }) {
+  const [title, setTitle] = useState('')
+  const [priority, setPriority] = useState('medium')
+  const [tags, setTags] = useState('')
+  const [model, setModel] = useState('')
+  const [description, setDescription] = useState('')
+  return (
+    <Modal onClose={onClose} title="Nova task">
       <div className="space-y-3">
         <input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="Título"
-          className="w-full rounded-md bg-zinc-800/80 px-3 py-2 outline-none ring-1 ring-inset ring-zinc-700/60 placeholder:text-zinc-600 focus:ring-sky-600" />
-        <div className="flex gap-3">
-          <select value={priority} onChange={e => setPriority(e.target.value)} className="rounded bg-zinc-800 px-2 py-2 text-sm">
-            {['low', 'medium', 'high', 'urgent'].map(p => <option key={p} value={p}>{p}</option>)}
+          className="w-full rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
+        <div className="flex gap-2">
+          <select value={priority} onChange={e => setPriority(e.target.value)}
+            className="rounded-[6px] border border-line px-2 py-2 text-body outline-none">
+            {Object.entries(PRIORITY).map(([k, p]) => <option key={k} value={k}>{p.label}</option>)}
           </select>
           <select value={model} onChange={e => setModel(e.target.value)} title="Modelo (vazio: default do projeto)"
-            className="rounded bg-zinc-800 px-2 py-2 text-sm">
+            className="rounded-[6px] border border-line px-2 py-2 text-body outline-none">
             <option value="">modelo: default</option>
             {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
           <input value={tags} onChange={e => setTags(e.target.value)} placeholder="tags, separadas, por vírgula"
-            className="flex-1 rounded bg-zinc-800 px-3 py-2 text-sm outline-none" />
-          <button onClick={() => setPreview(v => !v)} className="rounded bg-zinc-800 px-3 text-sm text-zinc-400">{preview ? 'Editar' : 'Preview'}</button>
+            className="flex-1 rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
         </div>
-        {preview ? (
-          <pre className="h-64 overflow-auto whitespace-pre-wrap rounded bg-zinc-950 p-3 text-sm text-zinc-300">{task ? body : (body || '(descrição)')}</pre>
-        ) : (
-          <textarea value={body} onChange={e => setBody(e.target.value)}
-            placeholder={task ? '' : 'Descrição (markdown)'} spellCheck={false}
-            className="h-64 w-full resize-none rounded bg-zinc-950 p-3 font-mono text-sm outline-none" />
-        )}
+        <textarea value={description} onChange={e => setDescription(e.target.value)}
+          placeholder="Descrição (markdown)" spellCheck={false}
+          className="h-56 w-full resize-none rounded-[6px] bg-subtle p-3 font-mono text-body outline-none placeholder:text-muted" />
         <div className="flex justify-end gap-2">
-          <button onClick={onClose} className="rounded-md px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200">Cancelar</button>
-          <button disabled={!title.trim()}
-            onClick={() => onSave(task
-              ? { title, priority, tags: splitTags(tags), model: model || null, body }
-              : { title, priority, tags: splitTags(tags), model: model || null, description: body })}
-            className="rounded-md bg-sky-500 px-4 py-2 text-sm font-semibold text-sky-950 hover:bg-sky-400 disabled:opacity-40">Salvar</button>
+          <Btn variant="quiet" onClick={onClose}>Cancelar</Btn>
+          <Btn variant="primary" disabled={!title.trim()}
+            onClick={() => onSave({ title, priority, tags: splitTags(tags), model: model || null, description })}>
+            Criar task
+          </Btn>
         </div>
       </div>
     </Modal>
   )
 }
 const splitTags = s => s.split(',').map(t => t.trim()).filter(Boolean)
+
+function AddProjectModal({ onClose, onAdd }) {
+  const [name, setName] = useState('')
+  const [path, setPath] = useState('')
+  return (
+    <Modal onClose={onClose} title="Cadastrar projeto">
+      <form className="space-y-3"
+        onSubmit={e => { e.preventDefault(); if (name && path) onAdd(name, path) }}>
+        <input autoFocus value={name} onChange={e => setName(e.target.value)} placeholder="Nome do projeto"
+          className="w-full rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
+        <div className="flex gap-2">
+          <input value={path} onChange={e => setPath(e.target.value)} placeholder="/caminho/do/projeto"
+            className="flex-1 rounded-[6px] border border-line px-3 py-2 font-mono text-body outline-none placeholder:text-muted focus:border-accent" />
+          <Btn type="button" onClick={() => api.pickFolder().then(d => { if (d.path) setPath(d.path) }).catch(e => alert(e.message))}>
+            Buscar pasta
+          </Btn>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Btn variant="quiet" type="button" onClick={onClose}>Cancelar</Btn>
+          <Btn variant="primary" type="submit" disabled={!name || !path}>Cadastrar</Btn>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+function EmptyProjects({ onAdd }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3">
+      <div className="text-body text-muted">Nenhum projeto cadastrado ainda.</div>
+      <Btn variant="primary" onClick={onAdd}>Cadastrar projeto +</Btn>
+    </div>
+  )
+}
 
 const SUGGEST_TAG = 'sugerida' // tag fixa em toda task criada via análise, para filtrar no board
 
@@ -595,88 +1000,84 @@ function SuggestModal({ project, onClose, onCreated }) {
 
   return (
     <Modal onClose={phase === 'loading' ? () => {} : onClose} title={`Sugerir tasks — ${project.name}`}>
-      {error && <div className="mb-3 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">{error}</div>}
+      {error && <div className="mb-3 rounded-[6px] border border-line px-3 py-2 text-body text-danger">{error}</div>}
 
       {phase === 'pick' && (
         <div className="space-y-3">
-          <div className="text-sm text-zinc-400">
+          <div className="text-body text-ink-2">
             O Claude vai ler o projeto (somente leitura) e sugerir tasks dos tipos selecionados.
-            As criadas entram no Backlog com as tags <Tag>{SUGGEST_TAG}</Tag> + tipo.
+            As criadas entram no Backlog com as tags <Chip>{SUGGEST_TAG}</Chip> + tipo.
           </div>
           {types === null ? (
-            <div className="text-sm text-zinc-500">carregando…</div>
+            <div className="text-body text-muted">carregando…</div>
           ) : (
             <div className="grid grid-cols-2 gap-2">
               {Object.entries(types).map(([key, label]) => (
-                <label key={key} className={`flex cursor-pointer items-start gap-2 rounded border p-2.5 text-sm ${picked[key] ? 'border-violet-700 bg-violet-950/30' : 'border-zinc-800'}`}>
-                  <input type="checkbox" checked={!!picked[key]} className="mt-0.5"
+                <label key={key} className={`flex cursor-pointer items-start gap-2 rounded-[8px] border p-2.5 text-body ${picked[key] ? 'border-accent bg-accent-soft' : 'border-line'}`}>
+                  <input type="checkbox" checked={!!picked[key]} className="mt-0.5 accent-[var(--color-accent)]"
                     onChange={e => setPicked(p => ({ ...p, [key]: e.target.checked }))} />
                   <span>
-                    <span className="font-medium text-zinc-200">{key}</span>
-                    <span className="mt-0.5 block text-xs text-zinc-500">{label}</span>
+                    <span className="font-medium">{key}</span>
+                    <span className="mt-0.5 block text-meta text-muted">{label}</span>
                   </span>
                 </label>
               ))}
             </div>
           )}
           <div className="flex justify-end gap-2">
-            <button onClick={onClose} className="rounded px-4 py-2 text-sm text-zinc-400">Cancelar</button>
-            <button onClick={analyze} disabled={!pickedKeys.length}
-              className="rounded bg-violet-700 px-4 py-2 text-sm font-medium disabled:opacity-40">Analisar projeto</button>
+            <Btn variant="quiet" onClick={onClose}>Cancelar</Btn>
+            <Btn variant="primary" onClick={analyze} disabled={!pickedKeys.length}>Analisar projeto</Btn>
           </div>
         </div>
       )}
 
       {phase === 'loading' && (
-        <div className="flex flex-col items-center gap-3 py-10 text-sm text-zinc-400">
-          <span className="size-6 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" />
+        <div className="flex flex-col items-center gap-3 py-10 text-body text-ink-2">
+          <span className="size-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
           Analisando o projeto… isso pode levar alguns minutos.
         </div>
       )}
 
       {(phase === 'results' || phase === 'creating') && (
         <div className="space-y-3">
-          <div className="flex items-center text-sm text-zinc-400">
+          <div className="flex items-center text-body text-ink-2">
             <span>{suggestions.length} sugestão(ões){costUsd != null ? ` · $${Number(costUsd).toFixed(3)}` : ''}</span>
             <div className="flex-1" />
             <button onClick={() => setSelected(Object.fromEntries(suggestions.map((_, i) => [i, selectedCount < suggestions.length])))}
-              className="text-xs text-violet-400 hover:underline">
+              className="text-meta text-accent hover:underline">
               {selectedCount < suggestions.length ? 'selecionar todas' : 'desmarcar todas'}
             </button>
           </div>
           <div className="max-h-[55vh] space-y-2 overflow-y-auto">
-            {suggestions.length === 0 && <div className="text-sm text-zinc-500">Nenhuma sugestão retornada.</div>}
+            {suggestions.length === 0 && <Empty>Nenhuma sugestão retornada.</Empty>}
             {suggestions.map((s, i) => (
-              <label key={i} className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm ${selected[i] ? 'border-violet-800 bg-violet-950/20' : 'border-zinc-800 opacity-60'}`}>
-                <input type="checkbox" checked={!!selected[i]} className="mt-1"
+              <label key={i} className={`flex cursor-pointer items-start gap-3 rounded-[8px] border p-3 text-body ${selected[i] ? 'border-accent' : 'border-line opacity-60'}`}>
+                <input type="checkbox" checked={!!selected[i]} className="mt-1 accent-[var(--color-accent)]"
                   onChange={e => setSelected(sel => ({ ...sel, [i]: e.target.checked }))} />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2">
-                    <span className="font-medium text-zinc-200">{s.title}</span>
-                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${PRIORITY_STYLE[s.priority] || PRIORITY_STYLE.medium}`}>{s.priority}</span>
-                    <Tag>{s.type}</Tag>
+                    <span className="font-medium">{s.title}</span>
+                    <span className={`text-body ${(PRIORITY[s.priority] || PRIORITY.medium).cls}`}>{(PRIORITY[s.priority] || PRIORITY.medium).arrow}</span>
+                    <Chip>{s.type}</Chip>
                   </span>
-                  {s.description && <span className="mt-1 block whitespace-pre-wrap text-xs text-zinc-500">{s.description}</span>}
+                  {s.description && <span className="mt-1 block whitespace-pre-wrap text-meta text-muted">{s.description}</span>}
                 </span>
               </label>
             ))}
           </div>
           <div className="flex justify-end gap-2">
-            <button onClick={() => setPhase('pick')} disabled={phase === 'creating'}
-              className="rounded px-4 py-2 text-sm text-zinc-400 disabled:opacity-40">← Refazer</button>
-            <button onClick={create} disabled={!selectedCount || phase === 'creating'}
-              className="rounded bg-violet-700 px-4 py-2 text-sm font-medium disabled:opacity-40">
+            <Btn variant="quiet" onClick={() => setPhase('pick')} disabled={phase === 'creating'}>← Refazer</Btn>
+            <Btn variant="primary" onClick={create} disabled={!selectedCount || phase === 'creating'}>
               {phase === 'creating' ? 'criando…' : `Criar ${selectedCount} no Backlog`}
-            </button>
+            </Btn>
           </div>
         </div>
       )}
     </Modal>
   )
 }
-const Tag = ({ children }) => (
-  <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{children}</span>
-)
+
+/* ------------------------------------------------------------------- drawers */
 
 function LogDrawer({ projectId, taskId, events, onClose, active, onKill }) {
   const [debug, setDebug] = useState(false)
@@ -704,20 +1105,20 @@ function LogDrawer({ projectId, taskId, events, onClose, active, onKill }) {
   const all = history ? [...history, ...events.slice(baseRef.current)] : events
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [all.length])
   return (
-    <div className="fixed inset-y-0 right-0 z-40 flex w-[560px] flex-col border-l border-zinc-800 bg-zinc-950 shadow-2xl">
-      <div className="flex items-center gap-3 border-b border-zinc-800 px-4 py-3">
-        <span className="text-sm font-semibold">Log — {taskId}</span>
-        {active && <span className="size-2 animate-pulse rounded-full bg-emerald-400" />}
+    <div className="fixed inset-y-0 right-0 z-40 flex w-[560px] flex-col border-l border-line bg-bg">
+      <div className="flex items-center gap-3 border-b border-line px-4 py-3">
+        <span className="text-body font-semibold">Log — <span className="font-mono uppercase">{taskId}</span></span>
+        {active && <Dot className="animate-pulse bg-success" />}
         <div className="flex-1" />
-        <label className="flex items-center gap-1.5 text-xs text-zinc-500">
-          <input type="checkbox" checked={debug} onChange={e => setDebug(e.target.checked)} /> JSON bruto
+        <label className="flex items-center gap-1.5 text-meta text-muted">
+          <input type="checkbox" checked={debug} onChange={e => setDebug(e.target.checked)} className="accent-[var(--color-accent)]" /> JSON bruto
         </label>
-        {active && <button onClick={onKill} className="rounded bg-red-900 px-2 py-1 text-xs text-red-200">Matar sessão</button>}
-        <button onClick={onClose} className="text-zinc-500 hover:text-white">✕</button>
+        {active && <Btn variant="danger" onClick={onKill}>Matar sessão</Btn>}
+        <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
       </div>
-      <div className="flex-1 space-y-2 overflow-y-auto p-4 font-mono text-xs">
-        {history === null && all.length === 0 && <div className="text-zinc-600">Carregando log…</div>}
-        {history !== null && all.length === 0 && <div className="text-zinc-600">Sem eventos ainda…</div>}
+      <div className="flex-1 space-y-2 overflow-y-auto p-4 font-mono text-[12px]">
+        {history === null && all.length === 0 && <Empty>Carregando log…</Empty>}
+        {history !== null && all.length === 0 && <Empty>Sem eventos ainda…</Empty>}
         {all.map((e, i) => <LogEvent key={i} event={e} debug={debug} />)}
         <div ref={endRef} />
       </div>
@@ -726,26 +1127,34 @@ function LogDrawer({ projectId, taskId, events, onClose, active, onKill }) {
 }
 
 function LogEvent({ event, debug }) {
-  if (debug) return <pre className="whitespace-pre-wrap break-all text-zinc-500">{JSON.stringify(event)}</pre>
+  if (debug) return <pre className="whitespace-pre-wrap break-all text-muted">{JSON.stringify(event)}</pre>
   const deny = JSON.stringify(event).includes('"deny"')
   if (event.type === 'assistant' || event.type === 'user') {
     const content = event.message?.content || []
     return content.map((c, i) => {
-      if (c.type === 'text') return <div key={i} className="whitespace-pre-wrap text-zinc-300">{c.text}</div>
-      if (c.type === 'tool_use') return <div key={i} className="text-violet-400">⚙ {c.name} {summarize(c.input)}</div>
+      if (c.type === 'text') return <div key={i} className="whitespace-pre-wrap text-ink">{c.text}</div>
+      if (c.type === 'tool_use') return <div key={i} className="text-info">⚙ {c.name} {summarize(c.input)}</div>
       if (c.type === 'tool_result') {
         const txt = typeof c.content === 'string' ? c.content : JSON.stringify(c.content)
         const isDeny = /permissionDecision.{1,4}deny|blocked|bloquead/i.test(txt)
-        return <div key={i} className={`whitespace-pre-wrap ${isDeny ? 'rounded bg-red-950/60 p-1.5 text-red-300' : 'text-zinc-600'}`}>{txt.slice(0, 400)}</div>
+        return (
+          <div key={i} className={`whitespace-pre-wrap ${isDeny ? 'border-l-2 border-danger pl-2 text-danger' : 'text-muted'}`}>
+            {txt.slice(0, 400)}
+          </div>
+        )
       }
       return null
     })
   }
   if (event.type === 'result') {
-    return <div className="rounded bg-zinc-900 p-2 text-emerald-400">✓ fim — ${event.total_cost_usd?.toFixed?.(3)} · {(event.duration_ms / 1000).toFixed(0)}s · {event.num_turns} turnos</div>
+    return (
+      <div className="rounded-[6px] bg-subtle p-2 text-success">
+        ✓ fim — ${event.total_cost_usd?.toFixed?.(3)} · {(event.duration_ms / 1000).toFixed(0)}s · {event.num_turns} turnos
+      </div>
+    )
   }
-  if (event.type === 'system') return <div className="text-zinc-600">[{event.subtype}] sessão {event.session_id?.slice(0, 8)}</div>
-  return <div className={deny ? 'text-red-400' : 'text-zinc-600'}>{JSON.stringify(event).slice(0, 200)}</div>
+  if (event.type === 'system') return <div className="text-muted">[{event.subtype}] sessão {event.session_id?.slice(0, 8)}</div>
+  return <div className={deny ? 'border-l-2 border-danger pl-2 text-danger' : 'text-muted'}>{JSON.stringify(event).slice(0, 200)}</div>
 }
 const summarize = input => {
   if (!input) return ''
@@ -759,18 +1168,20 @@ function PendingPanel({ actions, onClose, onResolve }) {
   return (
     <Modal onClose={onClose} title="Ações manuais pendentes">
       <div className="max-h-[60vh] space-y-3 overflow-y-auto">
-        {pend.length === 0 && <div className="text-sm text-zinc-500">Nenhuma ação pendente. 🎉</div>}
+        {pend.length === 0 && <Empty>Nenhuma ação pendente.</Empty>}
         {pend.map(a => (
-          <div key={a.id} className="rounded-md border border-amber-800/60 bg-amber-950/30 p-3 text-sm">
-            <div className="flex items-center justify-between">
-              <span className="font-medium text-amber-300">{a.label}</span>
-              <button onClick={() => onResolve(a.id)} className="rounded bg-amber-600 px-2 py-1 text-xs font-medium text-black">Marcar como resolvido</button>
+          <div key={a.id} className="rounded-[8px] border border-line p-3 text-body">
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-2 font-medium">
+                <Dot className="bg-warning" />{a.label}
+              </span>
+              <Btn onClick={() => onResolve(a.id)}>Marcar como resolvido</Btn>
             </div>
-            {a.command && <code className="mt-2 block overflow-x-auto rounded bg-zinc-950 p-2 text-xs text-zinc-300">{a.command}</code>}
-            <div className="mt-1.5 text-xs text-zinc-500">{a.timestamp}{a.taskId ? ` · task ${a.taskId}` : ''} · {a.id}</div>
+            {a.command && <code className="mt-2 block overflow-x-auto rounded-[4px] bg-subtle p-2 font-mono text-[11px] text-ink-2">{a.command}</code>}
+            <div className="mt-1.5 font-mono text-[11px] text-muted">{a.timestamp}{a.taskId ? ` · task ${a.taskId}` : ''} · {a.id}</div>
           </div>
         ))}
-        {done.length > 0 && <div className="pt-2 text-xs text-zinc-600">{done.length} resolvida(s)</div>}
+        {done.length > 0 && <div className="pt-2 text-meta text-muted">{done.length} resolvida(s)</div>}
       </div>
     </Modal>
   )
@@ -780,10 +1191,10 @@ function GitCheck({ label, desc, checked, disabled, onChange }) {
   return (
     <label className={`flex items-start gap-3 ${disabled ? 'opacity-40' : ''}`}>
       <input type="checkbox" checked={checked} disabled={disabled}
-        onChange={e => onChange(e.target.checked)} className="mt-0.5" />
+        onChange={e => onChange(e.target.checked)} className="mt-0.5 accent-[var(--color-accent)]" />
       <span>
-        <span className="text-zinc-200">{label}</span>
-        {desc && <span className="mt-0.5 block text-xs text-zinc-500">{desc}</span>}
+        <span className="text-ink">{label}</span>
+        {desc && <span className="mt-0.5 block text-meta text-muted">{desc}</span>}
       </span>
     </label>
   )
@@ -795,21 +1206,21 @@ function DevServerSettings({ project, onPatch }) {
   const [url, setUrl] = useState(d.url || '')
   const save = () => onPatch({ devServer: { command: command.trim(), url: url.trim() } })
   return (
-    <div className="space-y-3 rounded-md border border-zinc-800 p-3">
-      <div className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Dev server</div>
+    <div className="space-y-3 rounded-[8px] border border-line p-3">
+      <div className="text-meta font-semibold uppercase tracking-wide text-muted">Dev server</div>
       <label className="block">
-        <span className="text-zinc-200">Comando</span>
+        <span className="text-ink">Comando</span>
         <input value={command} onChange={e => setCommand(e.target.value)} onBlur={save}
           placeholder="npm run dev"
-          className="mt-1 w-full rounded bg-zinc-800 px-2 py-1.5 font-mono text-sm outline-none placeholder:text-zinc-600" />
-        <span className="mt-1 block text-xs text-zinc-500">roda no diretório do projeto ({project.path})</span>
+          className="mt-1 w-full rounded-[6px] bg-subtle px-2 py-1.5 font-mono text-body outline-none placeholder:text-muted" />
+        <span className="mt-1 block text-meta text-muted">roda no diretório do projeto ({project.path})</span>
       </label>
       <label className="block">
-        <span className="text-zinc-200">URL</span>
+        <span className="text-ink">URL</span>
         <input value={url} onChange={e => setUrl(e.target.value)} onBlur={save}
           placeholder="http://localhost:3000"
-          className="mt-1 w-full rounded bg-zinc-800 px-2 py-1.5 font-mono text-sm outline-none placeholder:text-zinc-600" />
-        <span className="mt-1 block text-xs text-zinc-500">aberta no Chrome ~2,5s após iniciar o comando</span>
+          className="mt-1 w-full rounded-[6px] bg-subtle px-2 py-1.5 font-mono text-body outline-none placeholder:text-muted" />
+        <span className="mt-1 block text-meta text-muted">aberta no Chrome ~2,5s após iniciar o comando</span>
       </label>
     </div>
   )
@@ -863,27 +1274,27 @@ function ClaudeConfigModal({ project, onClose }) {
 
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-black/60" onMouseDown={onClose} />
-      <div className="fixed inset-y-0 right-0 z-40 flex w-[900px] max-w-full flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl">
-        <div className="flex items-center gap-3 border-b border-zinc-800 px-5 py-3">
+      <div className="fixed inset-0 z-40 bg-ink/10" onMouseDown={onClose} />
+      <div className="fixed inset-y-0 right-0 z-40 flex w-[900px] max-w-full flex-col border-l border-line bg-bg">
+        <div className="flex items-center gap-3 border-b border-line px-5 py-3">
           <h2 className="font-semibold">Config do Claude — {project.name}</h2>
-          <span className="text-xs text-zinc-500">settings · mcp · hooks · skills · agents · commands</span>
+          <span className="text-meta text-muted">settings · mcp · hooks · skills · agents · commands</span>
           <div className="flex-1" />
-          <button onClick={onClose} className="text-zinc-500 hover:text-white">✕</button>
+          <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
         </div>
         <div className="flex min-h-0 flex-1">
-          <div className="w-72 shrink-0 overflow-y-auto border-r border-zinc-800 py-2">
-            {files === null && <div className="px-4 py-2 text-xs text-zinc-500">carregando…</div>}
-            {files?.length === 0 && <div className="px-4 py-2 text-xs text-zinc-500">Nenhum arquivo de config encontrado. Rode o bootstrap para criar .claude/settings.json.</div>}
+          <div className="w-72 shrink-0 overflow-y-auto border-r border-line py-2">
+            {files === null && <div className="px-4 py-2 text-meta text-muted">carregando…</div>}
+            {files?.length === 0 && <div className="px-4 py-2 text-meta text-muted">Nenhum arquivo de config encontrado. Rode o bootstrap para criar .claude/settings.json.</div>}
             {grouped.map(g => (
               <div key={g.key} className="mb-1">
-                <div className="px-4 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-600">{g.label}</div>
+                <div className="px-4 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted">{g.label}</div>
                 {g.items.map(f => (
                   <button key={f.path} onClick={() => open(f.path)}
-                    className={`block w-full truncate px-4 py-1.5 text-left font-mono text-xs ${selected === f.path ? 'bg-zinc-800 text-sky-300' : 'text-zinc-400 hover:bg-zinc-800/50'}`}
+                    className={`block w-full truncate px-4 py-1.5 text-left font-mono text-meta ${selected === f.path ? 'bg-hover text-accent' : 'text-ink-2 hover:bg-hover'}`}
                     title={f.path}>
                     {f.path.replace(/^\.claude\//, '')}
-                    {selected === f.path && dirty && <span className="ml-1 text-amber-400">•</span>}
+                    {selected === f.path && dirty && <span className="ml-1 text-warning">•</span>}
                   </button>
                 ))}
               </div>
@@ -891,22 +1302,21 @@ function ClaudeConfigModal({ project, onClose }) {
           </div>
           <div className="flex min-w-0 flex-1 flex-col">
             {!selected ? (
-              <div className="flex flex-1 items-center justify-center text-sm text-zinc-600">Selecione um arquivo para ver/editar.</div>
+              <div className="flex flex-1 items-center justify-center text-body text-muted">Selecione um arquivo para ver/editar.</div>
             ) : (
               <>
-                <div className="flex items-center gap-3 border-b border-zinc-800 px-4 py-2">
-                  <span className="truncate font-mono text-xs text-zinc-400">{selected}</span>
+                <div className="flex items-center gap-3 border-b border-line px-4 py-2">
+                  <span className="truncate font-mono text-meta text-ink-2">{selected}</span>
                   <div className="flex-1" />
-                  {savedAt > 0 && !dirty && <span className="text-xs text-emerald-400">salvo ✓</span>}
-                  <button onClick={save} disabled={!dirty || saving}
-                    className="rounded bg-sky-600 px-3 py-1 text-sm font-medium disabled:opacity-40">{saving ? 'salvando…' : 'Salvar'}</button>
+                  {savedAt > 0 && !dirty && <span className="text-meta text-success">salvo ✓</span>}
+                  <Btn variant="primary" onClick={save} disabled={!dirty || saving}>{saving ? 'salvando…' : 'Salvar'}</Btn>
                 </div>
-                {error && <div className="border-b border-red-900 bg-red-950/40 px-4 py-2 text-xs text-red-300">{error}</div>}
+                {error && <div className="border-b border-line px-4 py-2 text-meta text-danger">{error}</div>}
                 {loading ? (
-                  <div className="flex flex-1 items-center justify-center text-sm text-zinc-600">carregando…</div>
+                  <div className="flex flex-1 items-center justify-center text-body text-muted">carregando…</div>
                 ) : (
                   <textarea value={content} onChange={e => setContent(e.target.value)} spellCheck={false}
-                    className="flex-1 resize-none bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-200 outline-none" />
+                    className="flex-1 resize-none bg-subtle p-4 font-mono text-meta leading-relaxed text-ink outline-none" />
                 )}
               </>
             )}
@@ -935,60 +1345,60 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
   }
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-black/60" onMouseDown={onClose} />
-      <div className="fixed inset-y-0 right-0 z-40 flex w-[560px] max-w-full flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl">
-        <div className="flex items-center gap-3 border-b border-zinc-800 px-5 py-3">
+      <div className="fixed inset-0 z-40 bg-ink/10" onMouseDown={onClose} />
+      <div className="fixed inset-y-0 right-0 z-40 flex w-[560px] max-w-full flex-col border-l border-line bg-bg">
+        <div className="flex items-center gap-3 border-b border-line px-5 py-3">
           <h2 className="font-semibold">Configurações — {project.name}</h2>
           <div className="flex-1" />
-          <button onClick={onClose} className="text-zinc-500 hover:text-white">✕</button>
+          <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
         </div>
-        <div className="flex-1 space-y-4 overflow-y-auto p-5 text-sm">
-        <div className="text-xs text-zinc-500">{project.path}</div>
+        <div className="flex-1 space-y-4 overflow-y-auto p-5 text-body">
+        <div className="font-mono text-meta text-muted">{project.path}</div>
 
         <label className="flex items-center gap-3">
-          <span className="text-zinc-200">Modelo default</span>
+          <span>Modelo default</span>
           <select value={project.defaultModel || ''} onChange={e => onPatch({ defaultModel: e.target.value || null })}
-            className="rounded bg-zinc-800 px-2 py-1 text-sm outline-none">
+            className="rounded-[6px] border border-line px-2 py-1 text-body outline-none">
             <option value="">default do claude-code</option>
-            {['fable', 'opus', 'sonnet', 'haiku'].map(m => <option key={m} value={m}>{m}</option>)}
+            {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
-          <span className="text-xs text-zinc-500">tasks sem modelo próprio usam este</span>
+          <span className="text-meta text-muted">tasks sem modelo próprio usam este</span>
         </label>
 
         <div className="flex items-center gap-3">
-          <span className="text-zinc-200">Tasks simultâneas</span>
-          <div className="flex items-center gap-1 rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">
+          <span>Tasks simultâneas</span>
+          <div className="flex items-center gap-1 rounded-[6px] border border-line px-1.5 py-0.5 text-meta">
             <button onClick={() => onConcurrency(maxConc - 1)} disabled={maxConc <= 1}
-              className="px-1 text-zinc-500 hover:text-white disabled:opacity-30">−</button>
-            <span className="font-mono text-zinc-200">{maxConc}×</span>
+              className="px-1 text-muted hover:text-ink disabled:opacity-30">−</button>
+            <span className="font-mono text-ink">{maxConc}×</span>
             <button onClick={() => onConcurrency(maxConc + 1)} disabled={maxConc >= 8}
-              className="px-1 text-zinc-500 hover:text-white disabled:opacity-30">+</button>
+              className="px-1 text-muted hover:text-ink disabled:opacity-30">+</button>
           </div>
-          <span className="text-xs text-zinc-500">execuções em paralelo (global). Projetos sem worktree isolado ficam limitados a 1 por vez.</span>
+          <span className="text-meta text-muted">execuções em paralelo (global). Projetos sem worktree isolado ficam limitados a 1 por vez.</span>
         </div>
 
         <label className="flex items-center gap-3">
-          <span className="text-zinc-200">Timeout da execução (minutos)</span>
+          <span>Timeout da execução (minutos)</span>
           <input type="number" min={1} max={240} value={timeoutMin}
             onChange={e => setTimeoutMin(e.target.value)}
             onBlur={commitTimeout}
             onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
-            className="w-20 rounded bg-zinc-800 px-2 py-1 text-sm outline-none ring-1 ring-inset ring-zinc-700/60 focus:ring-sky-600" />
-          <span className="text-xs text-zinc-500">entre 1 e 240 min. Vale a partir do próximo run.</span>
+            className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
+          <span className="text-meta text-muted">entre 1 e 240 min. Vale a partir do próximo run.</span>
         </label>
 
         <DevServerSettings project={project} onPatch={onPatch} />
 
-        <div className="space-y-3 rounded-md border border-zinc-800 p-3">
-          <div className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Git</div>
+        <div className="space-y-3 rounded-[8px] border border-line p-3">
+          <div className="text-meta font-semibold uppercase tracking-wide text-muted">Git</div>
           <label className={`flex items-center gap-3 ${g.useCurrentBranch ? 'opacity-40' : ''}`}>
-            <span className="text-zinc-200">Branch principal</span>
+            <span>Branch principal</span>
             <input value={baseBranch} disabled={!!g.useCurrentBranch}
               onChange={e => setBaseBranch(e.target.value)}
               onBlur={() => patchGit({ baseBranch: baseBranch.trim() || 'main' })}
               placeholder="main"
-              className="w-40 rounded bg-zinc-800 px-2 py-1 text-sm outline-none" />
-            <span className="text-xs text-zinc-500">o desenvolvimento parte dela</span>
+              className="w-40 rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
+            <span className="text-meta text-muted">o desenvolvimento parte dela</span>
           </label>
           <GitCheck label="Dar pull na branch principal antes de iniciar cada task"
             checked={!!g.pullBeforeStart} disabled={!!g.useCurrentBranch}
@@ -1020,42 +1430,42 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
             checked={!!g.autoPRDescription} disabled={!g.autoPush || !g.autoPR}
             onChange={v => patchGit({ autoPRDescription: v })} />
         </div>
-        <label className="flex items-start gap-3 rounded-md border border-red-900/50 bg-red-950/20 p-3">
+        <label className="flex items-start gap-3 rounded-[8px] border border-line p-3">
           <input type="checkbox" checked={!!project.skipPermissions}
-            onChange={e => onPatch({ skipPermissions: e.target.checked })} className="mt-0.5" />
+            onChange={e => onPatch({ skipPermissions: e.target.checked })} className="mt-0.5 accent-[var(--color-accent)]" />
           <span>
-            <span className="font-medium text-red-300">Skip permissions (--dangerously-skip-permissions)</span>
-            <span className="mt-1 block text-xs text-zinc-400">
+            <span className="font-medium text-danger">Skip permissions (--dangerously-skip-permissions)</span>
+            <span className="mt-1 block text-meta text-muted">
               Suprime os prompts de permissão nas próximas sessões deste projeto. Os guardrails determinísticos
               (não ler .env, não commitar em main, não deletar branches/arquivos externos) continuam ativos.
               Sessões já em execução não são afetadas.
             </span>
           </span>
         </label>
-        <button onClick={() => api.rebootstrap(project.id).then(() => onPatch({}))}
-          className="rounded bg-zinc-800 px-3 py-2 text-zinc-300">Re-rodar bootstrap (atualizar guardrails/skill)</button>
-        <div className="border-t border-zinc-800 pt-4">
+        <Btn onClick={() => api.rebootstrap(project.id).then(() => onPatch({}))}>Re-rodar bootstrap (atualizar guardrails/skill)</Btn>
+        <div className="border-t border-line pt-4">
           {confirmRemove === 0 && (
             <div className="flex gap-3">
-              <button onClick={() => onRemove(false)} className="rounded bg-zinc-800 px-3 py-2 text-zinc-300">Remover projeto do app</button>
-              <button onClick={() => setConfirmRemove(1)} className="rounded bg-red-950 px-3 py-2 text-red-300">Remover + desinstalar guardrails</button>
+              <Btn onClick={() => onRemove(false)}>Remover projeto do app</Btn>
+              <Btn variant="danger" onClick={() => setConfirmRemove(1)}>Remover + desinstalar guardrails</Btn>
             </div>
           )}
           {confirmRemove === 1 && (
-            <div className="space-y-2 rounded border border-red-900 bg-red-950/30 p-3">
-              <div className="text-red-300">Isso reverte o merge no settings.json e apaga .claude/claude-kanban/ (incluindo as tasks). Confirma?</div>
+            <div className="space-y-2 rounded-[8px] border border-danger p-3">
+              <div className="text-danger">Isso reverte o merge no settings.json e apaga .claude/claude-kanban/ (incluindo as tasks). Confirma?</div>
               <div className="flex gap-2">
-                <button onClick={() => setConfirmRemove(2)} className="rounded bg-red-800 px-3 py-1.5 text-xs">Sim, continuar</button>
-                <button onClick={() => setConfirmRemove(0)} className="rounded bg-zinc-800 px-3 py-1.5 text-xs">Cancelar</button>
+                <Btn variant="danger" onClick={() => setConfirmRemove(2)}>Sim, continuar</Btn>
+                <Btn variant="quiet" onClick={() => setConfirmRemove(0)}>Cancelar</Btn>
               </div>
             </div>
           )}
           {confirmRemove === 2 && (
-            <div className="space-y-2 rounded border border-red-700 bg-red-950/50 p-3">
-              <div className="font-medium text-red-200">Última confirmação: desinstalar guardrails e remover o projeto?</div>
+            <div className="space-y-2 rounded-[8px] border border-danger p-3">
+              <div className="font-medium text-danger">Última confirmação: desinstalar guardrails e remover o projeto?</div>
               <div className="flex gap-2">
-                <button onClick={() => onRemove(true)} className="rounded bg-red-600 px-3 py-1.5 text-xs font-semibold">DESINSTALAR</button>
-                <button onClick={() => setConfirmRemove(0)} className="rounded bg-zinc-800 px-3 py-1.5 text-xs">Cancelar</button>
+                <button onClick={() => onRemove(true)}
+                  className="rounded-[6px] bg-danger px-3 py-1.5 text-meta font-semibold text-white">DESINSTALAR</button>
+                <Btn variant="quiet" onClick={() => setConfirmRemove(0)}>Cancelar</Btn>
               </div>
             </div>
           )}
@@ -1082,19 +1492,19 @@ function QueueBar({ queue, tasks, projects, onKill, onReorder }) {
     onReorder(ids)
   }
   return (
-    <footer className="flex items-center gap-3 overflow-x-auto border-t border-zinc-800/80 bg-zinc-950/70 px-4 py-2 text-sm backdrop-blur">
+    <footer className="flex items-center gap-2 overflow-x-auto border-t border-line px-4 py-2 text-meta">
       {(queue.actives || []).map(a => (
-        <div key={a.taskId} className="flex shrink-0 items-center gap-2 rounded bg-emerald-950/60 px-3 py-1.5">
-          <span className="size-2 animate-pulse rounded-full bg-emerald-400" />
-          <span className="text-emerald-300">{label(a)}</span>
-          <button onClick={() => onKill(a.taskId)} className="ml-1 text-xs text-red-400 hover:underline">matar</button>
+        <div key={a.taskId} className="flex shrink-0 items-center gap-2 rounded-[6px] bg-subtle px-3 py-1.5">
+          <Dot className="animate-pulse bg-st-doing" />
+          <span className="text-ink-2">{label(a)}</span>
+          <button onClick={() => onKill(a.taskId)} className="text-danger hover:underline">matar</button>
         </div>
       ))}
       {items.map((q, i) => (
-        <div key={q.taskId} className="flex shrink-0 items-center gap-1.5 rounded bg-zinc-800 px-3 py-1.5 text-zinc-400">
-          <span className="text-xs text-zinc-600">#{i + 1}</span> {label(q)}
-          <button onClick={() => move(i, -1)} className="px-0.5 text-zinc-600 hover:text-white">◂</button>
-          <button onClick={() => move(i, 1)} className="px-0.5 text-zinc-600 hover:text-white">▸</button>
+        <div key={q.taskId} className="flex shrink-0 items-center gap-1.5 rounded-[6px] bg-subtle px-3 py-1.5 text-ink-2">
+          <span className="font-mono text-muted">#{i + 1}</span> {label(q)}
+          <button onClick={() => move(i, -1)} className="px-0.5 text-muted hover:text-ink">◂</button>
+          <button onClick={() => move(i, 1)} className="px-0.5 text-muted hover:text-ink">▸</button>
         </div>
       ))}
     </footer>
@@ -1103,11 +1513,12 @@ function QueueBar({ queue, tasks, projects, onKill, onReorder }) {
 
 function Modal({ title, onClose, children }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={e => e.target === e.currentTarget && onClose()}>
-      <div className="w-full max-w-2xl rounded-xl border border-zinc-700/60 bg-zinc-900 p-5 shadow-2xl shadow-black/50">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/10 p-4"
+      onMouseDown={e => e.target === e.currentTarget && onClose()}>
+      <div className="w-full max-w-2xl rounded-[8px] border border-line bg-bg p-5">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="font-semibold">{title}</h2>
-          <button onClick={onClose} className="text-zinc-500 hover:text-white">✕</button>
+          <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
         </div>
         {children}
       </div>
