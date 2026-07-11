@@ -3,6 +3,7 @@ import path from 'node:path'
 import matter from 'gray-matter'
 import { customAlphabet } from 'nanoid'
 import { STATUSES, tasksDir } from './paths.js'
+import { normalizeModel } from './models.js'
 
 export const newId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6)
 
@@ -99,6 +100,13 @@ export function loadTask(projectPath, filePath) {
   if (!fm.priority) { fm.priority = 'medium'; dirty = true }
   if (!fm.run) { fm.run = { ...DEFAULT_RUN }; dirty = true }
 
+  // Migra o apelido legado ("opus") para o slug oficial ("claude-opus-4-8");
+  // apaga o que não for um modelo conhecido, para não quebrar o spawn.
+  if (fm.model) {
+    const normalized = normalizeModel(fm.model)
+    if (normalized !== fm.model) { fm.model = normalized; dirty = true }
+  }
+
   if (dirty) {
     fm.updated_at = new Date().toISOString()
     markSelfWrite(filePath)
@@ -114,7 +122,7 @@ export function findTask(projectPath, taskId) {
 export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null }) {
   if (!STATUSES.includes(status)) status = 'backlog'
   const now = new Date().toISOString()
-  const task = { id: newId(), title, status, priority, tags, model, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
+  const task = { id: newId(), title, status, priority, tags, model: normalizeModel(model), created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
   const dir = tasksDir(projectPath, status)
   fs.mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, taskFileName(task))

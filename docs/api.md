@@ -120,7 +120,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | Método | Path | Body | Resposta |
 | --- | --- | --- | --- |
 | `GET` | `/api/projects/:projectId/tasks` | — | `{ tasks: [task] }` |
-| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. |
+| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. `model` (aqui, no PATCH da task e no `defaultModel` do projeto) tem que ser o **slug exato** de um modelo do catálogo (`server/src/lib/models.js`): `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` — é ele que vai para `claude --model`. Apelidos legados (`opus`, `sonnet`…) são convertidos no slug; qualquer outro valor dá **400**. |
 | `GET` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }` — **404** se não existe. |
 | `PATCH` | `/api/projects/:projectId/tasks/:taskId` | subconjunto do frontmatter (`title`, `status`, `priority`, `tags`, `model`, `run`, `body`…) | `{ task }`. Mudar `status` move o arquivo de pasta e emite `task.moved`. |
 | `DELETE` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }`. **Não apaga o arquivo**: move para `archived/`. |

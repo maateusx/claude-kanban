@@ -20,10 +20,13 @@ import { analyzeProject, SUGGESTION_TYPES } from './lib/analyzer.js'
 import { DevServers } from './lib/devservers.js'
 import { DEFAULT_GIT, gitSettings, projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty } from './lib/git.js'
 import { getUsage } from './lib/usage.js'
+import { MODEL_IDS, normalizeModel } from './lib/models.js'
 
 const PORT = Number(process.env.PORT || 4400)
 const MIN_TIMEOUT_MS = 60_000
 const MAX_TIMEOUT_MS = 240 * 60_000
+
+const invalidModelMsg = (v) => `modelo inválido: "${v}". Use um destes: ${MODEL_IDS.join(', ')}`
 
 // ---- lockfile (única instância) ----
 fs.mkdirSync(HOME_DIR, { recursive: true })
@@ -189,7 +192,12 @@ app.patch('/api/projects/:projectId', (req, reply) => {
       p.timeoutMs = Math.round(ms)
     }
   }
-  if (defaultModel !== undefined) p.defaultModel = String(defaultModel || '').trim() || null
+  if (defaultModel !== undefined) {
+    if (defaultModel && !normalizeModel(defaultModel)) {
+      return reply.code(400).send({ error: invalidModelMsg(defaultModel) })
+    }
+    p.defaultModel = normalizeModel(defaultModel)
+  }
   if (devServer !== undefined && typeof devServer === 'object') {
     const next = { ...(p.devServer || {}) }
     if (devServer.command !== undefined) next.command = String(devServer.command || '').trim()
@@ -310,7 +318,8 @@ app.post('/api/projects/:projectId/tasks', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
   const { title, description, priority, tags, status, model } = req.body || {}
   if (!title) return reply.code(400).send({ error: 'title é obrigatório' })
-  const task = createTask(p.path, { title, description, priority, tags, status, model })
+  if (model && !normalizeModel(model)) return reply.code(400).send({ error: invalidModelMsg(model) })
+  const task = createTask(p.path, { title, description, priority, tags, status, model: normalizeModel(model) })
   emit('task.upserted', { projectId: p.id, task })
   return { task }
 })
@@ -326,7 +335,14 @@ app.patch('/api/projects/:projectId/tasks/:taskId', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
   const before = findTask(p.path, req.params.taskId)
   if (!before) return reply.code(404).send({ error: 'task não encontrada' })
-  const task = updateTask(p.path, req.params.taskId, req.body || {})
+  const patch = { ...(req.body || {}) }
+  if (patch.model !== undefined) {
+    if (patch.model && !normalizeModel(patch.model)) {
+      return reply.code(400).send({ error: invalidModelMsg(patch.model) })
+    }
+    patch.model = normalizeModel(patch.model)
+  }
+  const task = updateTask(p.path, req.params.taskId, patch)
   if (before.status !== task.status) {
     emit('task.moved', { projectId: p.id, taskId: task.id, from: before.status, to: task.status })
   }

@@ -4,6 +4,7 @@ import { api, connectWS } from './api.js'
 import { reducer, effectsFor, initialState } from './events.js'
 import { DiffDrawer } from './Diff.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
+import { MODELS, modelLabel } from './models.js'
 
 const COLUMNS = [
   { key: 'backlog', label: 'Backlog', dot: 'bg-st-backlog' },
@@ -12,7 +13,6 @@ const COLUMNS = [
   { key: 'done', label: 'Done', dot: 'bg-st-done' },
   { key: 'archived', label: 'Archived', dot: 'bg-st-archived' },
 ]
-const MODELS = ['fable', 'opus', 'sonnet', 'haiku']
 
 // Cada view escolhe as colunas visíveis. Archived nunca aparece por padrão.
 const VIEWS = [
@@ -860,7 +860,7 @@ function CardBody({ task, queue, onRun, onOpen, selected, pending = [], innerRef
         {(task.tags || []).map(tag => <TagChip key={tag} tag={tag} />)}
         <div className="flex-1" />
         {queued && <Chip className="text-info">na fila</Chip>}
-        {task.model && <Chip className="font-mono">{task.model}</Chip>}
+        {task.model && <Chip className="font-mono" title={modelLabel(task.model)}>{task.model}</Chip>}
       </div>
 
       <RunStrip task={task} running={running} openPending={openPending}
@@ -994,7 +994,7 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           title="Modelo desta task (vazio: default do projeto)"
           className="rounded-[6px] bg-chip px-2 py-1 font-mono text-meta text-chip-ink outline-none disabled:opacity-40">
           <option value="">{project.defaultModel ? `↳ ${project.defaultModel}` : '↳ auto'}</option>
-          {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+          {MODELS.map(m => <option key={m.id} value={m.id}>{m.id} ({m.label})</option>)}
         </select>
         {(task.tags || []).map(t => <TagChip key={t} tag={t} />)}
       </div>
@@ -1098,7 +1098,7 @@ function TaskModal({ onClose, onSave }) {
           <select value={model} onChange={e => setModel(e.target.value)} title="Modelo (vazio: default do projeto)"
             className="rounded-[6px] border border-line px-2 py-2 text-body outline-none">
             <option value="">modelo: default</option>
-            {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+            {MODELS.map(m => <option key={m.id} value={m.id}>{m.id} ({m.label})</option>)}
           </select>
           <input value={tags} onChange={e => setTags(e.target.value)} placeholder="tags, separadas, por vírgula"
             className="flex-1 rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
@@ -1563,7 +1563,7 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
           <select value={project.defaultModel || ''} onChange={e => onPatch({ defaultModel: e.target.value || null })}
             className="rounded-[6px] border border-line px-2 py-1 text-body outline-none">
             <option value="">default do claude-code</option>
-            {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+            {MODELS.map(m => <option key={m.id} value={m.id}>{m.id} ({m.label})</option>)}
           </select>
           <span className="text-meta text-muted">tasks sem modelo próprio usam este</span>
         </label>
