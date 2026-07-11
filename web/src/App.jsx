@@ -397,9 +397,35 @@ function usageResetLabel(iso) {
   return `reseta ${d.toLocaleDateString('pt-BR', { weekday: 'short' })} ${time}`
 }
 
-// No rail cabe só o essencial: a barra mais crítica, com o detalhe no tooltip.
+// "reseta em 2h 13min" — mais acionável que a hora absoluta quando o reset está perto.
+function usageResetIn(iso) {
+  if (!iso) return ''
+  const ms = new Date(iso).getTime() - Date.now()
+  if (!Number.isFinite(ms) || ms <= 0) return 'a qualquer momento'
+  const mins = Math.round(ms / 60_000)
+  const d = Math.floor(mins / 1440)
+  const h = Math.floor((mins % 1440) / 60)
+  const m = mins % 60
+  if (d) return `em ${d}d ${h}h`
+  if (h) return `em ${h}h ${m}min`
+  return `em ${m}min`
+}
+
+function usageBarColor(l) {
+  const pct = usagePct(l)
+  return pct >= 90 || (l.severity && l.severity !== 'normal') ? 'bg-danger' : pct >= 70 ? 'bg-warning' : 'bg-success'
+}
+
+const usagePct = l => Math.min(100, Math.max(0, l?.percent ?? 0))
+const usageName = l => `${USAGE_LABEL[l.kind] || l.kind}${l.model ? ` · ${l.model}` : ''}`
+
+// No rail cabe só o essencial: a barra mais crítica. O detalhe de todos os
+// limites vive num popover — o tooltip nativo não cabia (e não dava pra copiar).
 function UsageRail() {
   const [usage, setUsage] = useState(null)
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+
   useEffect(() => {
     let alive = true
     const load = () => api.usage().then(d => { if (alive) setUsage(d) }).catch(() => {})
@@ -408,19 +434,56 @@ function UsageRail() {
     return () => { alive = false; clearInterval(t) }
   }, [])
 
+  useEffect(() => {
+    if (!open) return
+    const onDoc = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    const onKey = e => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey) }
+  }, [open])
+
   if (!usage?.available || !usage.limits?.length) return null
-  const worst = usage.limits.reduce((a, b) => (b.percent ?? 0) > (a.percent ?? 0) ? b : a)
-  const pct = Math.min(100, Math.max(0, worst.percent ?? 0))
-  const bar = pct >= 90 || worst.severity !== 'normal' ? 'bg-danger' : pct >= 70 ? 'bg-warning' : 'bg-success'
-  const title = usage.limits
-    .map(l => `${USAGE_LABEL[l.kind] || l.kind}${l.model ? ` · ${l.model}` : ''}: ${l.percent ?? 0}% (${usageResetLabel(l.resetsAt)})`)
-    .join('\n')
+  const worst = usage.limits.reduce((a, b) => usagePct(b) > usagePct(a) ? b : a)
+  const pct = usagePct(worst)
+
   return (
-    <div title={title} className="flex w-8 flex-col items-center gap-1 pb-1">
-      <div className="h-1 w-full overflow-hidden rounded-full bg-line">
-        <div className={`h-full ${bar}`} style={{ width: `${pct}%` }} />
-      </div>
-      <span className="font-mono text-[10px] text-muted">{pct}%</span>
+    <div className="relative" ref={ref}>
+      <button onClick={() => setOpen(v => !v)} title="Ver detalhes do uso"
+        className="flex w-8 flex-col items-center gap-1 rounded-[6px] pb-1 pt-1 hover:bg-hover">
+        <div className="h-1 w-full overflow-hidden rounded-full bg-line">
+          <div className={`h-full ${usageBarColor(worst)}`} style={{ width: `${pct}%` }} />
+        </div>
+        <span className="font-mono text-[10px] text-muted">{pct}%</span>
+      </button>
+      {open && (
+        <div className="absolute bottom-0 left-full z-30 ml-2 w-72 rounded-[8px] border border-line bg-bg p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-meta font-semibold text-ink">Uso do plano Claude</h3>
+            <button onClick={() => setOpen(false)} className="text-muted hover:text-ink">✕</button>
+          </div>
+          <div className="flex flex-col gap-3">
+            {usage.limits.map((l, i) => (
+              <div key={`${l.kind}-${l.model || i}`}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-body text-ink-2">{usageName(l)}</span>
+                  <span className="font-mono text-meta text-ink">{usagePct(l)}%</span>
+                </div>
+                <div className="my-1 h-1 overflow-hidden rounded-full bg-line">
+                  <div className={`h-full ${usageBarColor(l)}`} style={{ width: `${usagePct(l)}%` }} />
+                </div>
+                <div className="flex items-center justify-between gap-2 text-[10px] text-muted">
+                  <span>{usageResetLabel(l.resetsAt)}</span>
+                  <span>{usageResetIn(l.resetsAt)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 border-t border-line pt-2 text-[10px] text-muted">
+            Percentual da janela consumido. Atualiza a cada 60s.
+          </p>
+        </div>
+      )}
     </div>
   )
 }
