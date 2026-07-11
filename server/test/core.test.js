@@ -9,6 +9,7 @@ import { listPendingActions, resolvePendingAction } from '../src/lib/pending.js'
 import { tasksDir, pendingFile, loadState } from '../src/lib/paths.js'
 import { Runner } from '../src/lib/runner.js'
 import { markSucceeded, wasSucceeded, getExecuted, clearExecuted } from '../src/lib/ledger.js'
+import { sortTasks } from '../src/lib/sort.js'
 
 const proj = () => mkdtempSync(path.join(tmpdir(), 'ck-core-'))
 // Isola o ledger num tmp dir por invocação da suíte (paths.js lê a env na hora).
@@ -207,9 +208,44 @@ test('dropProject limpa a fila do projeto removido e emite atualização', () =>
 
   delete projects.p1
   assert.equal(runner.dropProject('p1'), 1)
-  assert.deepEqual(runner.queue, [{ projectId: 'p2', taskId: b.id }])
+  assert.deepEqual(runner.queue, [{ projectId: 'p2', taskId: b.id, priority: 'medium' }])
   assert.ok(emitted.some(e => e.type === 'run.queue'), 'emite atualização da fila para a UI')
 
   // fila persistida também fica sem o projeto removido
   assert.ok(!loadState().queue.some(q => q.projectId === 'p1'))
+})
+
+test('sortTasks: default é prioridade desc, empate pela mais antiga', () => {
+  const t = (id, priority, created_at) => ({ id, priority, created_at, title: id })
+  const tasks = [
+    t('a', 'medium', '2026-01-02T00:00:00Z'),
+    t('b', 'urgent', '2026-01-03T00:00:00Z'),
+    t('c', 'medium', '2026-01-01T00:00:00Z'),
+    t('d', 'low', '2026-01-01T00:00:00Z'),
+    t('e', 'high', '2026-01-05T00:00:00Z'),
+  ]
+  assert.deepEqual(sortTasks(tasks).map(x => x.id), ['b', 'e', 'c', 'a', 'd'])
+  assert.deepEqual(sortTasks(tasks, 'created').map(x => x.id), ['c', 'd', 'a', 'b', 'e'])
+  assert.deepEqual(sortTasks(tasks, 'recent').map(x => x.id), ['e', 'b', 'a', 'c', 'd'])
+  assert.deepEqual(sortTasks(tasks, 'inexistente').map(x => x.id), sortTasks(tasks).map(x => x.id))
+})
+
+test('fila: task de prioridade mais alta entra na frente das menores', () => {
+  const root = proj()
+  bootstrapProject(root)
+  const low = createTask(root, { title: 'Low', priority: 'low', status: 'todo' })
+  const med = createTask(root, { title: 'Med', priority: 'medium', status: 'todo' })
+  const urgent = createTask(root, { title: 'Urgent', priority: 'urgent', status: 'todo' })
+
+  const runner = new Runner(() => ({ id: 'p1', path: root }), () => {})
+  runner.tick = () => {}
+  runner.queue = []
+  for (const t of [low, med, urgent]) runner.enqueue('p1', t.id, { auto: true })
+
+  assert.deepEqual(runner.queue.map(q => q.taskId), [urgent.id, med.id, low.id])
+
+  // empate de prioridade mantém FIFO
+  const med2 = createTask(root, { title: 'Med 2', priority: 'medium', status: 'todo' })
+  runner.enqueue('p1', med2.id, { auto: true })
+  assert.deepEqual(runner.queue.map(q => q.taskId), [urgent.id, med.id, med2.id, low.id])
 })
