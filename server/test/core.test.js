@@ -6,7 +6,7 @@ import path from 'node:path'
 import { createTask, updateTask, listTasks, loadTask, reconcileProject, findTask } from '../src/lib/tasks.js'
 import { bootstrapProject, mergeSettings, uninstallFromSettings, bootstrapStatus } from '../src/lib/bootstrap.js'
 import { listPendingActions, resolvePendingAction } from '../src/lib/pending.js'
-import { tasksDir, pendingFile } from '../src/lib/paths.js'
+import { tasksDir, pendingFile, loadState } from '../src/lib/paths.js'
 import { Runner } from '../src/lib/runner.js'
 import { markSucceeded, wasSucceeded, getExecuted, clearExecuted } from '../src/lib/ledger.js'
 
@@ -167,4 +167,35 @@ test('ledger: recover reconcilia doing concluído para done, não para todo', ()
 
   assert.equal(findTask(root, done.id).status, 'done')
   assert.equal(findTask(root, fail.id).status, 'todo')
+})
+
+test('enqueue com projeto inexistente retorna false, sem quebrar', () => {
+  const runner = new Runner(() => null, () => {})
+  runner.tick = () => {}
+  runner.queue = [] // ignora fila persistida por testes anteriores
+  assert.equal(runner.enqueue('inexistente', 'abc123'), false)
+  assert.equal(runner.queue.length, 0)
+})
+
+test('dropProject limpa a fila do projeto removido e emite atualização', () => {
+  const root = proj(); bootstrapProject(root)
+  const a = createTask(root, { title: 'A', status: 'todo' })
+  const b = createTask(root, { title: 'B', status: 'todo' })
+  const emitted = []
+  const projects = { p1: { id: 'p1', path: root }, p2: { id: 'p2', path: root } }
+  const runner = new Runner(id => projects[id] || null, (type, p) => emitted.push({ type, ...p }))
+  runner.tick = () => {}
+  runner.queue = [] // ignora fila persistida por testes anteriores
+
+  assert.equal(runner.enqueue('p1', a.id), true)
+  assert.equal(runner.enqueue('p2', b.id), true)
+  assert.equal(runner.queue.length, 2)
+
+  delete projects.p1
+  assert.equal(runner.dropProject('p1'), 1)
+  assert.deepEqual(runner.queue, [{ projectId: 'p2', taskId: b.id }])
+  assert.ok(emitted.some(e => e.type === 'run.queue'), 'emite atualização da fila para a UI')
+
+  // fila persistida também fica sem o projeto removido
+  assert.ok(!loadState().queue.some(q => q.projectId === 'p1'))
 })

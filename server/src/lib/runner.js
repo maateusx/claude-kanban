@@ -35,6 +35,7 @@ export class Runner {
   enqueue(projectId, taskId, { auto = false } = {}) {
     if (this.queue.some(q => q.taskId === taskId) || this.actives.has(taskId)) return false
     const project = this.getProject(projectId)
+    if (!project) return false
     const task = findTask(project.path, taskId)
     if (!task) return false
 
@@ -57,6 +58,21 @@ export class Runner {
     this.emit('run.queued', { projectId, taskId, position: this.queue.length - 1 })
     this.tick()
     return true
+  }
+
+  // Projeto removido: a fila persistida em state.json não pode continuar
+  // referenciando um projeto que não existe mais (start() descartaria os itens
+  // silenciosamente, sem evento algum).
+  dropProject(projectId) {
+    const dropped = this.queue.filter(q => q.projectId === projectId)
+    this.queue = this.queue.filter(q => q.projectId !== projectId)
+    for (const a of [...this.actives.values()]) {
+      if (a.projectId === projectId) this.kill(a.taskId)
+    }
+    this.persist()
+    this.emit('run.queue', this.getQueueView())
+    this.tick()
+    return dropped.length
   }
 
   reorder(taskIds) {

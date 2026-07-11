@@ -73,6 +73,7 @@ export default function App() {
         refreshProjects()
         break
       case 'run.queued':
+      case 'run.queue':
       case 'run.started':
       case 'run.killed':
         api.queue().then(setQueue)

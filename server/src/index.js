@@ -232,6 +232,7 @@ app.delete('/api/projects/:projectId', (req, reply) => {
   if (idx === -1) return reply.code(404).send({ error: 'projeto não encontrado' })
   const [p] = db.projects.splice(idx, 1)
   saveProjects(db)
+  runner.dropProject(p.id)
   devServers.stop(p.id)
   watchers.get(p.id)?.close()
   watchers.delete(p.id)
