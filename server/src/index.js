@@ -506,6 +506,23 @@ app.post('/api/run/kill', (req, reply) => {
   return { ok: true }
 })
 
+// Cancela uma task que está esperando na fila (ainda não começou a rodar).
+// Com autoRun ligado, tudo que está em todo/ volta para a fila sozinho — então
+// cancelar de verdade significa devolver o card para backlog/. Sem autoRun, o
+// card fica em todo/ mesmo, e sair da fila já basta.
+app.post('/api/run/dequeue', (req, reply) => {
+  const taskId = req.body?.taskId
+  const removed = taskId ? runner.dequeue(taskId) : null
+  if (!removed) return reply.code(409).send({ error: 'task não está na fila (se já está rodando, use matar sessão)' })
+
+  const p = getProject(removed.projectId)
+  const task = p && findTask(p.path, taskId)
+  if (p?.autoRun && task?.status === 'todo') {
+    emit('task.upserted', { projectId: p.id, task: updateTask(p.path, taskId, { status: 'backlog' }) })
+  }
+  return runner.getQueueView()
+})
+
 // ---- agendamento da fila (adiar tudo de um projeto para X) ----
 app.post('/api/projects/:projectId/queue/pause', (req, reply) => {
   const p = getProject(req.params.projectId)

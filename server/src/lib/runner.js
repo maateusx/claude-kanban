@@ -111,6 +111,19 @@ export class Runner {
     return dropped.length
   }
 
+  // Cancela uma task que ainda não começou: tira da fila sem tocar no status.
+  // Quem cuida do "não voltar sozinha para a fila" é o chamador (index.js), que
+  // conhece o autoRun do projeto. Task já rodando não sai por aqui — é kill().
+  dequeue(taskId) {
+    const idx = this.queue.findIndex(q => q.taskId === taskId)
+    if (idx === -1) return null
+    const [removed] = this.queue.splice(idx, 1)
+    this.persist()
+    this.emit('run.dequeued', { projectId: removed.projectId, taskId })
+    this.emit('run.queue', this.getQueueView())
+    return removed
+  }
+
   reorder(taskIds) {
     const byId = new Map(this.queue.map(q => [q.taskId, q]))
     const next = taskIds.map(id => byId.get(id)).filter(Boolean)

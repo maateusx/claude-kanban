@@ -12,6 +12,7 @@ export function effectsFor(evt, currentProjectId) {
     case 'pending.updated':
       return ['projects']
     case 'run.queued':
+    case 'run.dequeued':
     case 'run.queue':
     case 'run.started':
     case 'run.killed':
