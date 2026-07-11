@@ -39,6 +39,7 @@ export const api = {
   pending: pid => fetch(`/api/projects/${pid}/pending-actions`).then(j),
   resolvePending: (pid, aid) => fetch(`/api/projects/${pid}/pending-actions/${aid}/resolve`, opts({})).then(j),
   run: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}/run`, opts({})).then(j),
+  decompose: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}/decompose`, opts({})).then(j),
   pauseQueue: (pid, until) => fetch(`/api/projects/${pid}/queue/pause`, opts({ until })).then(j),
   resumeQueue: pid => fetch(`/api/projects/${pid}/queue/resume`, opts({})).then(j),
   kill: taskId => fetch('/api/run/kill', opts(taskId ? { taskId } : {})).then(j),

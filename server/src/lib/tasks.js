@@ -47,6 +47,7 @@ export function serializeTask(task, body) {
     priority: task.priority || 'medium',
     tags: task.tags || [],
     model: task.model || null,
+    decompose: task.decompose ?? null,
     scheduled_at: task.scheduled_at || null,
     created_at: task.created_at,
     updated_at: task.updated_at,
@@ -116,10 +117,10 @@ export function findTask(projectPath, taskId) {
   return listTasks(projectPath).find(t => t.id === taskId) || null
 }
 
-export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, scheduled_at = null }) {
+export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, decompose = null, scheduled_at = null }) {
   if (!STATUSES.includes(status)) status = 'backlog'
   const now = new Date().toISOString()
-  const task = { id: newId(), title, status, priority, tags, model, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
+  const task = { id: newId(), title, status, priority, tags, model, decompose, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
   const dir = tasksDir(projectPath, status)
   fs.mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, taskFileName(task))
@@ -135,7 +136,7 @@ export function updateTask(projectPath, taskId, patch) {
   const { frontmatter: fm, body } = parseTaskFile(task.filePath)
 
   const newBody = patch.body !== undefined ? patch.body : body
-  for (const k of ['title', 'priority', 'tags', 'status', 'model', 'scheduled_at']) {
+  for (const k of ['title', 'priority', 'tags', 'status', 'model', 'decompose', 'scheduled_at']) {
     if (patch[k] !== undefined) fm[k] = patch[k]
   }
   if (patch.run) fm.run = { ...DEFAULT_RUN, ...fm.run, ...patch.run }

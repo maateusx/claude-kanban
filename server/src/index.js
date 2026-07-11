@@ -183,7 +183,7 @@ app.post('/api/projects', (req, reply) => {
 app.patch('/api/projects/:projectId', (req, reply) => {
   const p = getProject(req.params.projectId)
   if (!p) return reply.code(404).send({ error: 'projeto não encontrado' })
-  const { name, skipPermissions, git, defaultModel, autoRun, devServer, timeoutMs } = req.body || {}
+  const { name, skipPermissions, git, defaultModel, autoRun, autoDecompose, devServer, timeoutMs } = req.body || {}
   if (name !== undefined) p.name = name
   if (skipPermissions !== undefined) p.skipPermissions = !!skipPermissions
   if (timeoutMs !== undefined) {
@@ -204,6 +204,7 @@ app.patch('/api/projects/:projectId', (req, reply) => {
     if (devServer.url !== undefined) next.url = String(devServer.url || '').trim()
     p.devServer = next
   }
+  if (autoDecompose !== undefined) p.autoDecompose = !!autoDecompose
   if (autoRun !== undefined) {
     p.autoRun = !!autoRun
     if (p.autoRun) autoEnqueue(p)
@@ -316,11 +317,11 @@ app.get('/api/projects/:projectId/tasks', (req, reply) => {
 
 app.post('/api/projects/:projectId/tasks', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
-  const { title, description, priority, tags, status, model, scheduled_at } = req.body || {}
+  const { title, description, priority, tags, status, model, decompose, scheduled_at } = req.body || {}
   if (!title) return reply.code(400).send({ error: 'title é obrigatório' })
   const when = scheduled_at ? parseWhen(scheduled_at) : null
   if (scheduled_at && !when) return reply.code(400).send({ error: 'scheduled_at inválido (use uma data ISO)' })
-  const task = createTask(p.path, { title, description, priority, tags, status, model, scheduled_at: when })
+  const task = createTask(p.path, { title, description, priority, tags, status, model, decompose, scheduled_at: when })
   emit('task.upserted', { projectId: p.id, task })
   return { task }
 })
@@ -437,6 +438,15 @@ app.post('/api/projects/:projectId/tasks/:taskId/run', (req, reply) => {
   if (!claudeAvailable) return reply.code(409).send({ error: 'CLI `claude` não encontrado no PATH' })
   const ok = runner.enqueue(p.id, req.params.taskId)
   if (!ok) return reply.code(409).send({ error: 'task já está na fila ou não existe' })
+  return runner.getQueueView()
+})
+
+// Desmembrar agora: roda a sessão de decomposição imediatamente (fora da fila).
+app.post('/api/projects/:projectId/tasks/:taskId/decompose', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  if (!claudeAvailable) return reply.code(409).send({ error: 'CLI `claude` não encontrado no PATH' })
+  const ok = runner.decomposeNow(p.id, req.params.taskId)
+  if (!ok) return reply.code(409).send({ error: 'task já está na fila/rodando ou não existe' })
   return runner.getQueueView()
 })
 

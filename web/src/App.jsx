@@ -183,6 +183,7 @@ export default function App() {
   }
 
   const runTask = tid => api.run(project.id, tid).then(setQueue).catch(e => alert(e.message))
+  const decomposeNow = tid => api.decompose(project.id, tid).then(setQueue).catch(e => alert(e.message))
   const pendingCount = pending.filter(a => a.status === 'pending').length
   const detail = tasks.find(t => t.id === detailId) || null
 
@@ -274,6 +275,7 @@ export default function App() {
                   onClose={() => setDetailId(null)}
                   onPatch={patch => patchTask(detail.id, patch)}
                   onRun={() => runTask(detail.id)}
+                  onDecompose={() => decomposeNow(detail.id)}
                   onKill={() => api.kill(detail.id)}
                   onLog={() => setLogTask(detail.id)}
                   onDiff={() => setDiffTask(detail)}
@@ -909,6 +911,7 @@ function CardBody({ task, queue, onRun, onOpen, selected, pending = [], innerRef
           </Chip>
         )}
         {queued && <Chip className="text-info">na fila</Chip>}
+        {task.decompose === true && <Chip title="Ao executar, esta task será quebrada em subtasks">✂ quebrar</Chip>}
         {task.model && <Chip className="font-mono">{task.model}</Chip>}
       </div>
 
@@ -999,7 +1002,7 @@ function Section({ title, badge, action, children }) {
 
 const Empty = ({ children }) => <div className="text-body text-muted">{children}</div>
 
-function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, onKill, onLog, onDiff, onArchive, onResolve }) {
+function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, onDecompose, onKill, onLog, onDiff, onArchive, onResolve }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(task.title)
   const [body, setBody] = useState(task.body ?? '')
@@ -1022,6 +1025,7 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
         <div className="flex-1" />
         <Menu items={[
           { label: running ? 'Matar sessão' : 'Executar agora', onClick: running ? onKill : onRun, disabled: queued },
+          { label: 'Quebrar em subtasks agora', onClick: onDecompose, disabled: running || queued },
           { label: 'Ver log', onClick: onLog },
           { label: 'Ver diff', onClick: onDiff, disabled: !run.has_diff },
           { label: 'Arquivar', onClick: onArchive, danger: true, disabled: task.status === 'archived' },
@@ -1044,6 +1048,15 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           className="rounded-[6px] bg-chip px-2 py-1 font-mono text-meta text-chip-ink outline-none disabled:opacity-40">
           <option value="">{project.defaultModel ? `↳ ${project.defaultModel}` : '↳ auto'}</option>
           {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+        </select>
+        <select value={task.decompose === true ? 'on' : task.decompose === false ? 'off' : ''}
+          disabled={running || queued}
+          onChange={e => onPatch({ decompose: e.target.value === 'on' ? true : e.target.value === 'off' ? false : null })}
+          title="Ao executar: quebrar esta task em subtasks menores em vez de rodá-la"
+          className="rounded-[6px] bg-chip px-2 py-1 text-meta text-chip-ink outline-none disabled:opacity-40">
+          <option value="">quebrar: {project.autoDecompose ? '↳ auto' : '↳ não'}</option>
+          <option value="on">quebrar: sim</option>
+          <option value="off">quebrar: não</option>
         </select>
         {(task.tags || []).map(t => <TagChip key={t} tag={t} />)}
       </div>
@@ -1243,6 +1256,7 @@ function TaskModal({ onClose, onSave }) {
   const [priority, setPriority] = useState('medium')
   const [tags, setTags] = useState('')
   const [model, setModel] = useState('')
+  const [decompose, setDecompose] = useState(false)
   const [description, setDescription] = useState('')
   const [when, setWhen] = useState('')
   return (
@@ -1269,10 +1283,16 @@ function TaskModal({ onClose, onSave }) {
         <textarea value={description} onChange={e => setDescription(e.target.value)}
           placeholder="Descrição (markdown)" spellCheck={false}
           className="h-56 w-full resize-none rounded-[6px] bg-subtle p-3 font-mono text-body outline-none placeholder:text-muted" />
+        <label className="flex items-center gap-2 text-body text-ink-2">
+          <input type="checkbox" checked={decompose} onChange={e => setDecompose(e.target.checked)}
+            className="accent-[var(--color-accent)]" />
+          Quebrar em subtasks menores ao executar (em vez de rodar a task inteira)
+        </label>
         <div className="flex justify-end gap-2">
           <Btn variant="quiet" onClick={onClose}>Cancelar</Btn>
           <Btn variant="primary" disabled={!title.trim()}
-            onClick={() => onSave({ title, priority, tags: splitTags(tags), model: model || null, description, scheduled_at: fromLocalInput(when) })}>
+            onClick={() => onSave({ title, priority, tags: splitTags(tags), model: model || null, decompose: decompose || null, description, scheduled_at: fromLocalInput(when) })}>
+
             Criar task
           </Btn>
         </div>
@@ -1752,6 +1772,13 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
             className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
           <span className="text-meta text-muted">entre 1 e 240 min. Vale a partir do próximo run.</span>
         </label>
+
+        <div className="rounded-[8px] border border-line p-3">
+          <GitCheck label="Desmembrar tasks automaticamente"
+            desc="Antes de executar, o Claude avalia cada task sem opção própria de quebra: se ela for grande demais, é desmembrada em subtasks menores em vez de rodar inteira."
+            checked={!!project.autoDecompose}
+            onChange={v => onPatch({ autoDecompose: v })} />
+        </div>
 
         <DevServerSettings project={project} onPatch={onPatch} />
 
