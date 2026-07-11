@@ -7,6 +7,7 @@ import { decomposeTask } from './decomposer.js'
 import { prepareWorkspace, cleanupWorkspace, captureDiff, gitSettings, isGitRepo } from './git.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
 import { PRIORITY_RANK } from './sort.js'
+import { normalizeModel } from './models.js'
 import { isFuture } from './scheduler.js'
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
@@ -170,8 +171,10 @@ export class Runner {
       return
     }
 
-    // Modelo: task > default do projeto > default do claude-code (sem --model)
-    const model = task.model || project.defaultModel || null
+    // Modelo: task > default do projeto > default do claude-code (sem --model).
+    // normalizeModel converte apelidos legados ("opus") no slug oficial, que é o
+    // que de fato vai para `claude --model` — a sessão roda no modelo escolhido.
+    const model = normalizeModel(task.model) || normalizeModel(project.defaultModel) || null
 
     task = updateTask(project.path, taskId, {
       status: 'doing',

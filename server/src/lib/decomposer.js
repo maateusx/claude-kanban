@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { normalizeModel } from './models.js'
 
 const TIMEOUT_MS = 5 * 60 * 1000
 const PRIORITIES = ['low', 'medium', 'high', 'urgent']
@@ -60,7 +61,7 @@ export function parseDecomposition(text) {
 // Sessão headless somente leitura que devolve a decomposição da task.
 // Retorna { child, promise } para o runner poder registrar/matar o processo.
 export function decomposeTask(project, task, mode) {
-  const model = task.model || project.defaultModel || null
+  const model = normalizeModel(task.model) || normalizeModel(project.defaultModel) || null
   const args = [
     '-p', buildPrompt(task, mode),
     '--output-format', 'json',
