@@ -34,10 +34,17 @@ if (fs.existsSync(LOCK_FILE)) {
   }
 }
 fs.writeFileSync(LOCK_FILE, String(process.pid))
-const cleanup = () => { try { devServers?.stopAll() } catch {}; try { fs.unlinkSync(LOCK_FILE) } catch {} }
+// 'exit' é síncrono: timers não rodam, então matamos os grupos na marra.
+const cleanup = () => { try { devServers?.killAll() } catch {}; try { fs.unlinkSync(LOCK_FILE) } catch {} }
 process.on('exit', cleanup)
-process.on('SIGINT', () => { cleanup(); process.exit(0) })
-process.on('SIGTERM', () => { cleanup(); process.exit(0) })
+// Em sinais temos tempo: SIGTERM no grupo de cada dev server, pequena janela para
+// eles encerrarem sozinhos, e o handler de 'exit' garante o SIGKILL do que sobrar.
+const shutdown = () => {
+  try { devServers?.stopAll() } catch {}
+  setTimeout(() => process.exit(0), 1500).unref()
+}
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)
 
 // ---- estado ----
 const db = loadProjects()
