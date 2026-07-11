@@ -349,33 +349,90 @@ function Menu({ items, label = '···' }) {
 
 /* --------------------------------------------------------------------- rail */
 
-function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue }) {
+const RAIL_KEY = 'ck.rail.expanded'
+
+// Default é colapsado: o rail só mostra as iniciais. A preferência de expansão
+// é de UI, então vive no localStorage (mesma política do sort das colunas).
+function useRailExpanded() {
+  const [expanded, setExpanded] = useState(() => {
+    try { return localStorage.getItem(RAIL_KEY) === '1' } catch { return false }
+  })
+  const toggle = () => setExpanded(v => {
+    try { localStorage.setItem(RAIL_KEY, v ? '0' : '1') } catch { /* storage indisponível */ }
+    return !v
+  })
+  return [expanded, toggle]
+}
+
+// O rail tem overflow-y, o que recorta um tooltip absoluto — daí o position: fixed
+// ancorado no rect do gatilho.
+function HoverTip({ label, disabled, children, className }) {
+  const [rect, setRect] = useState(null)
+  const show = e => !disabled && setRect(e.currentTarget.getBoundingClientRect())
   return (
-    <aside className="flex w-[var(--rail-w)] shrink-0 flex-col items-center gap-2 border-r border-line py-3">
-      <span title="claude-kanban"
-        className="flex size-8 items-center justify-center rounded-[8px] bg-accent text-meta font-bold text-white">K</span>
-      <div className="mt-2 flex flex-1 flex-col items-center gap-2 overflow-y-auto">
+    <div className={`relative ${className || ''}`}
+      onMouseEnter={show} onMouseLeave={() => setRect(null)} onFocus={show} onBlur={() => setRect(null)}>
+      {children}
+      {rect && (
+        <div role="tooltip" style={{ position: 'fixed', left: rect.right + 8, top: rect.top + rect.height / 2 }}
+          className="pointer-events-none z-50 -translate-y-1/2 whitespace-nowrap rounded-[6px] border border-line bg-ink px-2 py-1 text-meta text-white">
+          {label}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue }) {
+  const [expanded, toggle] = useRailExpanded()
+  return (
+    <aside style={{ width: expanded ? 'var(--rail-w-open)' : 'var(--rail-w)' }}
+      className={`flex shrink-0 flex-col gap-2 border-r border-line py-3 ${expanded ? 'items-stretch px-2' : 'items-center'}`}>
+      <div className={`flex items-center gap-2 ${expanded ? 'justify-between px-1' : 'flex-col'}`}>
+        <span title="claude-kanban"
+          className="flex size-8 shrink-0 items-center justify-center rounded-[8px] bg-accent text-meta font-bold text-white">K</span>
+        <button onClick={toggle} aria-expanded={expanded}
+          title={expanded ? 'Colapsar sidebar' : 'Expandir sidebar'}
+          className="rounded-[6px] p-1.5 text-muted hover:bg-hover hover:text-ink-2">{expanded ? '«' : '»'}</button>
+      </div>
+      <div className={`mt-2 flex flex-1 flex-col gap-2 overflow-y-auto ${expanded ? '' : 'items-center'}`}>
         {projects.map(p => {
           const running = queue.actives?.some(a => a.projectId === p.id)
           return (
-            <button key={p.id} onClick={() => onSelect(p.id)} title={p.name}
-              className={`relative flex size-9 items-center justify-center rounded-[8px] text-meta font-semibold ${p.id === selectedId ? 'ring-2 ring-accent' : ''}`}
-              style={{ background: avatarBg(p.name), color: avatarInk(p.name) }}>
-              {initials(p.name)}
-              {!p.available && <span title="diretório indisponível" className="absolute -left-1 -top-1 text-danger">!</span>}
-              {p.pendingCount > 0 && (
-                <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-warning px-1 text-[10px] font-semibold leading-4 text-white">{p.pendingCount}</span>
-              )}
-              {running && <Dot className="absolute -bottom-0.5 -right-0.5 animate-pulse bg-st-doing" />}
-            </button>
+            <HoverTip key={p.id} label={p.name} disabled={expanded}>
+              <button onClick={() => onSelect(p.id)}
+                className={`flex w-full items-center gap-2 rounded-[8px] ${expanded ? 'px-1.5 py-1 hover:bg-hover' : 'justify-center'} ${p.id === selectedId ? (expanded ? 'bg-hover' : '') : ''}`}>
+                <span
+                  className={`relative flex size-9 shrink-0 items-center justify-center rounded-[8px] text-meta font-semibold ${p.id === selectedId ? 'ring-2 ring-accent' : ''}`}
+                  style={{ background: avatarBg(p.name), color: avatarInk(p.name) }}>
+                  {initials(p.name)}
+                  {!p.available && <span title="diretório indisponível" className="absolute -left-1 -top-1 text-danger">!</span>}
+                  {p.pendingCount > 0 && (
+                    <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-warning px-1 text-[10px] font-semibold leading-4 text-white">{p.pendingCount}</span>
+                  )}
+                  {running && <Dot className="absolute -bottom-0.5 -right-0.5 animate-pulse bg-st-doing" />}
+                </span>
+                {expanded && (
+                  <span className={`truncate text-body ${p.id === selectedId ? 'font-semibold text-ink' : 'text-ink-2'}`}>{p.name}</span>
+                )}
+              </button>
+            </HoverTip>
           )
         })}
-        <button onClick={onAdd} title="Cadastrar projeto"
-          className="flex size-9 items-center justify-center rounded-[8px] border border-dashed border-line-strong text-muted hover:bg-hover hover:text-ink-2">+</button>
+        <HoverTip label="Cadastrar projeto" disabled={expanded}>
+          <button onClick={onAdd}
+            className={`flex items-center gap-2 rounded-[8px] text-muted hover:bg-hover hover:text-ink-2 ${expanded ? 'w-full px-1.5 py-1' : 'size-9 justify-center border border-dashed border-line-strong'}`}>
+            <span className={expanded ? 'flex size-9 shrink-0 items-center justify-center rounded-[8px] border border-dashed border-line-strong' : ''}>+</span>
+            {expanded && <span className="truncate text-body">Cadastrar projeto</span>}
+          </button>
+        </HoverTip>
       </div>
       <QueueIndicator queue={queue} />
       <button onClick={onSettings} title="Configurações do projeto"
-        className="rounded-[6px] p-1.5 text-muted hover:bg-hover hover:text-ink-2">⚙</button>
+        className={`rounded-[6px] p-1.5 text-muted hover:bg-hover hover:text-ink-2 ${expanded ? 'flex items-center gap-2 text-left' : ''}`}>
+        <span>⚙</span>
+        {expanded && <span className="text-body">Configurações</span>}
+      </button>
       <UsageRail />
     </aside>
   )
