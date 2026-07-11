@@ -47,6 +47,7 @@ export function serializeTask(task, body) {
     priority: task.priority || 'medium',
     tags: task.tags || [],
     model: task.model || null,
+    scheduled_at: task.scheduled_at || null,
     created_at: task.created_at,
     updated_at: task.updated_at,
     run: { ...DEFAULT_RUN, ...(task.run || {}) },
@@ -98,6 +99,10 @@ export function loadTask(projectPath, filePath) {
   if (!STATUSES.includes(fm.status)) { fm.status = folderStatus || 'backlog'; dirty = true }
   if (!fm.priority) { fm.priority = 'medium'; dirty = true }
   if (!fm.run) { fm.run = { ...DEFAULT_RUN }; dirty = true }
+  // O YAML resolve um timestamp sem aspas (o humano editando o .md na mão) como
+  // Date; o resto do sistema — e o JSON da API — só fala ISO string.
+  if (fm.scheduled_at instanceof Date) fm.scheduled_at = fm.scheduled_at.toISOString()
+  if (fm.scheduled_at === undefined) fm.scheduled_at = null
 
   if (dirty) {
     fm.updated_at = new Date().toISOString()
@@ -111,10 +116,10 @@ export function findTask(projectPath, taskId) {
   return listTasks(projectPath).find(t => t.id === taskId) || null
 }
 
-export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null }) {
+export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, scheduled_at = null }) {
   if (!STATUSES.includes(status)) status = 'backlog'
   const now = new Date().toISOString()
-  const task = { id: newId(), title, status, priority, tags, model, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
+  const task = { id: newId(), title, status, priority, tags, model, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
   const dir = tasksDir(projectPath, status)
   fs.mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, taskFileName(task))
@@ -130,7 +135,7 @@ export function updateTask(projectPath, taskId, patch) {
   const { frontmatter: fm, body } = parseTaskFile(task.filePath)
 
   const newBody = patch.body !== undefined ? patch.body : body
-  for (const k of ['title', 'priority', 'tags', 'status', 'model']) {
+  for (const k of ['title', 'priority', 'tags', 'status', 'model', 'scheduled_at']) {
     if (patch[k] !== undefined) fm[k] = patch[k]
   }
   if (patch.run) fm.run = { ...DEFAULT_RUN, ...fm.run, ...patch.run }

@@ -20,6 +20,7 @@ import { analyzeProject, SUGGESTION_TYPES } from './lib/analyzer.js'
 import { DevServers } from './lib/devservers.js'
 import { DEFAULT_GIT, gitSettings, projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty } from './lib/git.js'
 import { getUsage } from './lib/usage.js'
+import { Scheduler, parseWhen, isFuture } from './lib/scheduler.js'
 
 const PORT = Number(process.env.PORT || 4400)
 const MIN_TIMEOUT_MS = 60_000
@@ -64,8 +65,11 @@ function emit(type, payload) {
 // Auto-executar: com o modo ligado, tudo que está (ou entra) em todo/ vai para a fila.
 function autoEnqueue(project, excludeTaskId) {
   if (!project?.autoRun || !claudeAvailable || !fs.existsSync(project.path)) return
+  // Task com horário marcado no futuro não entra na fila agora — quem a coloca
+  // lá é o Scheduler, quando a hora chegar.
   const todo = listTasks(project.path).filter(t =>
-    t.status === 'todo' && t.id !== excludeTaskId && !(t.tags || []).includes('blocked'))
+    t.status === 'todo' && t.id !== excludeTaskId && !(t.tags || []).includes('blocked')
+    && !isFuture(t.scheduled_at))
   // A ordem de entrada na fila é a mesma que o board mostra por default:
   // prioridade mais alta primeiro, empate pela mais antiga.
   for (const t of sortTasks(todo)) runner.enqueue(project.id, t.id, { auto: true })
@@ -84,6 +88,7 @@ function maybeAutoRun(type, payload) {
 const getProject = id => db.projects.find(p => p.id === id) || null
 const runner = new Runner(getProject, emit)
 const devServers = new DevServers(emit)
+const scheduler = new Scheduler({ db, saveProjects, runner, emit })
 
 function projectView(p) {
   const available = fs.existsSync(p.path)
@@ -115,6 +120,9 @@ for (const p of db.projects) {
 }
 runner.recover(db.projects.filter(p => fs.existsSync(p.path)))
 for (const p of db.projects) autoEnqueue(p)
+// Depois do recover/autoEnqueue: o primeiro tick já solta o que venceu enquanto
+// o servidor estava fora do ar.
+scheduler.start()
 
 // ---- app ----
 const app = Fastify()
@@ -308,9 +316,11 @@ app.get('/api/projects/:projectId/tasks', (req, reply) => {
 
 app.post('/api/projects/:projectId/tasks', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
-  const { title, description, priority, tags, status, model } = req.body || {}
+  const { title, description, priority, tags, status, model, scheduled_at } = req.body || {}
   if (!title) return reply.code(400).send({ error: 'title é obrigatório' })
-  const task = createTask(p.path, { title, description, priority, tags, status, model })
+  const when = scheduled_at ? parseWhen(scheduled_at) : null
+  if (scheduled_at && !when) return reply.code(400).send({ error: 'scheduled_at inválido (use uma data ISO)' })
+  const task = createTask(p.path, { title, description, priority, tags, status, model, scheduled_at: when })
   emit('task.upserted', { projectId: p.id, task })
   return { task }
 })
@@ -326,7 +336,18 @@ app.patch('/api/projects/:projectId/tasks/:taskId', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
   const before = findTask(p.path, req.params.taskId)
   if (!before) return reply.code(404).send({ error: 'task não encontrada' })
-  const task = updateTask(p.path, req.params.taskId, req.body || {})
+  const patch = { ...(req.body || {}) }
+  // scheduled_at: '' / null desagenda; qualquer outra coisa precisa ser uma data.
+  if (patch.scheduled_at !== undefined) {
+    if (!patch.scheduled_at) {
+      patch.scheduled_at = null
+    } else {
+      const iso = parseWhen(patch.scheduled_at)
+      if (!iso) return reply.code(400).send({ error: 'scheduled_at inválido (use uma data ISO)' })
+      patch.scheduled_at = iso
+    }
+  }
+  const task = updateTask(p.path, req.params.taskId, patch)
   if (before.status !== task.status) {
     emit('task.moved', { projectId: p.id, taskId: task.id, from: before.status, to: task.status })
   }
@@ -424,6 +445,29 @@ app.post('/api/run/kill', (req, reply) => {
     return reply.code(409).send({ error: 'nenhuma sessão ativa correspondente (com mais de uma ativa, informe taskId)' })
   }
   return { ok: true }
+})
+
+// ---- agendamento da fila (adiar tudo de um projeto para X) ----
+app.post('/api/projects/:projectId/queue/pause', (req, reply) => {
+  const p = getProject(req.params.projectId)
+  if (!p) return reply.code(404).send({ error: 'projeto não encontrado' })
+  const until = parseWhen(req.body?.until)
+  if (!until) return reply.code(400).send({ error: 'until inválido (use uma data ISO)' })
+  if (!isFuture(until)) return reply.code(400).send({ error: 'until precisa estar no futuro' })
+  p.queuePausedUntil = until
+  saveProjects(db)
+  emit('project.updated', { projectId: p.id })
+  return { project: projectView(p) }
+})
+
+app.post('/api/projects/:projectId/queue/resume', (req, reply) => {
+  const p = getProject(req.params.projectId)
+  if (!p) return reply.code(404).send({ error: 'projeto não encontrado' })
+  p.queuePausedUntil = null
+  saveProjects(db)
+  emit('project.updated', { projectId: p.id })
+  runner.tick()
+  return { project: projectView(p) }
 })
 
 app.post('/api/run/concurrency', req => {
