@@ -339,6 +339,14 @@ app.get('/api/projects/:projectId/tasks/:taskId/diff', (req, reply) => {
   return { diff: fs.readFileSync(file, 'utf8') }
 })
 
+app.get('/api/projects/:projectId/tasks/:taskId/log', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  const task = findTask(p.path, req.params.taskId)
+  if (!task) return reply.code(404).send({ error: 'task não encontrada' })
+  const events = runner.readLog(p.path, task.id)
+  return { events: events || [] }
+})
+
 // ---- análise do projeto (sugestão de tasks) ----
 app.get('/api/suggestion-types', () => ({ types: SUGGESTION_TYPES }))
 

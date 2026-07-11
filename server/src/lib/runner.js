@@ -1,13 +1,20 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { loadState, saveState, diffFile } from './paths.js'
+import { loadState, saveState, diffFile, logFile } from './paths.js'
 import { findTask, updateTask, appendToSection, listTasks } from './tasks.js'
 import { prepareWorkspace, cleanupWorkspace, captureDiff, gitSettings, isGitRepo } from './git.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 const MAX_CONCURRENCY = 8
+
+// Teto do log persistido por task. Um run longo com tool_results grandes passa
+// fácil de dezenas de MB; acima do teto paramos de gravar e registramos um
+// evento marcando o truncamento (o WS continua entregando tudo ao vivo).
+const MAX_LOG_BYTES = 8 * 1024 * 1024
+// Teto do que o replay devolve ao cliente — o drawer só renderiza os últimos.
+const MAX_LOG_EVENTS = 2000
 
 // Fila global FIFO. Concorrência configurável (default 1); projetos sem
 // worktree isolado nunca rodam mais de uma task ao mesmo tempo.
@@ -180,7 +187,20 @@ export class Runner {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
-    const a = { projectId, taskId, child, timer: null, result: null, stderr: '', workspace, taskRelPath }
+    const a = {
+      projectId, taskId, child, timer: null, result: null, stderr: '', workspace, taskRelPath,
+      logStream: null, logBytes: 0, logEvents: [],
+    }
+
+    // Log persistido: cada run recomeça o arquivo do zero (o drawer mostra a
+    // última execução da task, não o acumulado de todas as tentativas).
+    try {
+      const logPath = logFile(project.path, taskId)
+      fs.mkdirSync(path.dirname(logPath), { recursive: true })
+      a.logStream = fs.createWriteStream(logPath, { flags: 'w' })
+      a.logStream.on('error', () => { a.logStream = null })
+    } catch { /* log é best-effort: nunca derruba o run */ }
+
     const timeoutMs = project.timeoutMs || DEFAULT_TIMEOUT_MS
     a.timer = setTimeout(() => {
       a.timedOut = true
@@ -201,6 +221,7 @@ export class Runner {
         let event
         try { event = JSON.parse(line) } catch { event = { type: 'raw', text: line } }
         if (event.type === 'result') a.result = event
+        this.recordLog(a, event)
         this.emit('run.log', { projectId, taskId, event })
       }
     })
@@ -213,9 +234,44 @@ export class Runner {
     })
   }
 
+  // Guarda o evento no buffer em memória (fonte do replay enquanto o run está
+  // ativo) e no .jsonl. O buffer é sempre superconjunto do que já foi ao WS —
+  // o push acontece antes do emit — então o cliente pode substituir o que tem
+  // pelo histórico sem perder eventos nem duplicar.
+  recordLog(a, event) {
+    a.logEvents.push(event)
+    if (a.logEvents.length > MAX_LOG_EVENTS) a.logEvents.shift()
+    if (!a.logStream || a.logTruncated) return
+    const line = JSON.stringify(event) + '\n'
+    a.logBytes += Buffer.byteLength(line)
+    if (a.logBytes > MAX_LOG_BYTES) {
+      a.logTruncated = true
+      a.logStream.write(JSON.stringify({ type: 'raw', text: `[log truncado: passou de ${MAX_LOG_BYTES} bytes]` }) + '\n')
+      return
+    }
+    a.logStream.write(line)
+  }
+
+  // Replay do log de uma task: buffer em memória se ela está rodando agora,
+  // senão o .jsonl da última execução.
+  readLog(projectPath, taskId) {
+    const active = this.actives.get(taskId)
+    if (active) return active.logEvents
+
+    let raw
+    try { raw = fs.readFileSync(logFile(projectPath, taskId), 'utf8') } catch { return null }
+    const events = []
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue
+      try { events.push(JSON.parse(line)) } catch { events.push({ type: 'raw', text: line }) }
+    }
+    return events.slice(-MAX_LOG_EVENTS)
+  }
+
   finish(a, exitCode) {
     if (!this.actives.delete(a.taskId)) return
     clearTimeout(a.timer)
+    try { a.logStream?.end() } catch {}
     const project = this.getProject(a.projectId)
     if (!project) return this.tick()
 

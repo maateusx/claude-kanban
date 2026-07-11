@@ -19,6 +19,9 @@ export function tasksDir(projectPath, status = '') {
 export function diffFile(projectPath, taskId) {
   return path.join(kanbanDir(projectPath), 'diffs', `${taskId}.diff`)
 }
+export function logFile(projectPath, taskId) {
+  return path.join(kanbanDir(projectPath), 'logs', `${taskId}.jsonl`)
+}
 export function pendingFile(projectPath) {
   return path.join(kanbanDir(projectPath), 'pending-actions.md')
 }

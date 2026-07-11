@@ -37,6 +37,7 @@ export function isGitRepo(dir) {
 const KANBAN_EXCLUDES = [
   '.claude/claude-kanban/tasks/',
   '.claude/claude-kanban/diffs/',
+  '.claude/claude-kanban/logs/',
   '.claude/claude-kanban/pending-actions.md',
   '.claude/claude-kanban/meta.json',
 ]

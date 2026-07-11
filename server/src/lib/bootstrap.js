@@ -93,6 +93,7 @@ export function bootstrapProject(projectPath) {
       '.claude/claude-kanban/meta.json',
       '.claude/claude-kanban/tasks/',
       '.claude/claude-kanban/diffs/',
+      '.claude/claude-kanban/logs/',
     ]
       .filter(l => !existing.split('\n').includes(l))
     if (lines.length) fs.writeFileSync(gi, existing + (existing.endsWith('\n') || existing === '' ? '' : '\n') + lines.join('\n') + '\n')

@@ -30,6 +30,7 @@ export const api = {
   patchTask: (pid, tid, patch) => fetch(`/api/projects/${pid}/tasks/${tid}`, { ...opts(patch), method: 'PATCH' }).then(j),
   archiveTask: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}`, { method: 'DELETE' }).then(j),
   taskDiff: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}/diff`).then(j),
+  taskLog: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}/log`).then(j),
   claudeConfig: pid => fetch(`/api/projects/${pid}/claude-config`).then(j),
   claudeConfigFile: (pid, path) => fetch(`/api/projects/${pid}/claude-config/file?path=${encodeURIComponent(path)}`).then(j),
   saveClaudeConfigFile: (pid, path, content) => fetch(`/api/projects/${pid}/claude-config/file`, { ...opts({ path, content }), method: 'PUT' }).then(j),
