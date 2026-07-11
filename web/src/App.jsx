@@ -259,6 +259,8 @@ function Sidebar({ projects, selectedId, onSelect, onAdd, queue }) {
   )
 }
 
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
+
 const USAGE_LABEL = {
   session: 'Sessão (5h)',
   weekly_all: 'Semanal',
@@ -925,8 +927,18 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
   const [confirmRemove, setConfirmRemove] = useState(0)
   const g = project.git || {}
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
+  const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
   const maxConc = queue?.maxConcurrency || 1
   const patchGit = patch => onPatch({ git: patch })
+
+  const commitTimeout = () => {
+    const min = Number(timeoutMin)
+    if (!Number.isFinite(min) || min < 1 || min > 240) {
+      setTimeoutMin(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
+      return
+    }
+    onPatch({ timeoutMs: Math.round(min) * 60000 })
+  }
   return (
     <>
       <div className="fixed inset-0 z-40 bg-black/60" onMouseDown={onClose} />
@@ -960,6 +972,16 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
           </div>
           <span className="text-xs text-zinc-500">execuções em paralelo (global). Projetos sem worktree isolado ficam limitados a 1 por vez.</span>
         </div>
+
+        <label className="flex items-center gap-3">
+          <span className="text-zinc-200">Timeout da execução (minutos)</span>
+          <input type="number" min={1} max={240} value={timeoutMin}
+            onChange={e => setTimeoutMin(e.target.value)}
+            onBlur={commitTimeout}
+            onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+            className="w-20 rounded bg-zinc-800 px-2 py-1 text-sm outline-none ring-1 ring-inset ring-zinc-700/60 focus:ring-sky-600" />
+          <span className="text-xs text-zinc-500">entre 1 e 240 min. Vale a partir do próximo run.</span>
+        </label>
 
         <DevServerSettings project={project} onPatch={onPatch} />
 
