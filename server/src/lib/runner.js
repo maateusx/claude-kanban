@@ -7,6 +7,7 @@ import { decomposeTask } from './decomposer.js'
 import { prepareWorkspace, cleanupWorkspace, captureDiff, gitSettings, isGitRepo } from './git.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
 import { PRIORITY_RANK } from './sort.js'
+import { isFuture } from './scheduler.js'
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 const MAX_CONCURRENCY = 8
@@ -128,6 +129,8 @@ export class Runner {
   eligible(projectId) {
     const project = this.getProject(projectId)
     if (!project) return true // start() descarta e segue
+    // Fila adiada: os itens ficam na fila, na ordem, mas nada sai dela até a hora.
+    if (isFuture(project.queuePausedUntil)) return false
     const busy = [...this.actives.values()].some(a => a.projectId === projectId)
     return !busy || this.canRunConcurrently(project)
   }
