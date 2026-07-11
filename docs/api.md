@@ -96,7 +96,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | --- | --- | --- | --- |
 | `GET` | `/api/projects` | — | `{ projects: [project] }` |
 | `POST` | `/api/projects` | `{ name, path }` | `{ project }`. Roda o bootstrap (pastas, `guard.mjs`, skill, hooks) e inicia o watcher. **400** se falta campo, o diretório não existe ou não é gravável. Falha de bootstrap **não** falha a rota: aparece em `bootstrap: "failed"` + `bootstrapError`. |
-| `PATCH` | `/api/projects/:projectId` | qualquer subconjunto de `{ name, skipPermissions, defaultModel, autoRun, devServer: { command, url }, git: {…} }` | `{ project }`. `devServer` e `git` são merges rasos. Ligar `autoRun` enfileira imediatamente tudo que está em `todo/` (exceto tasks com a tag `blocked`). |
+| `PATCH` | `/api/projects/:projectId` | qualquer subconjunto de `{ name, skipPermissions, defaultModel, autoRun, enrichMode, devServer: { command, url }, git: {…} }` | `{ project }`. `devServer` e `git` são merges rasos. `enrichMode`: `"off" | "auto" | "always"` — política de enriquecimento da descrição na hora do run (**400** fora desses valores). Ligar `autoRun` enfileira imediatamente tudo que está em `todo/` (exceto tasks com as tags `blocked` ou `human-request`). |
 | `POST` | `/api/projects/:projectId/bootstrap` | — | `{ project }`. Re-roda o bootstrap (idempotente). |
 | `DELETE` | `/api/projects/:projectId?uninstallGuardrails=true` | — | `{ ok: true }`. Remove o projeto do app, esvazia a fila dele, para o dev server e o watcher. Com a query, também desinstala os hooks/guard do projeto. Não apaga tasks nem código. |
 
@@ -120,10 +120,11 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | Método | Path | Body | Resposta |
 | --- | --- | --- | --- |
 | `GET` | `/api/projects/:projectId/tasks` | — | `{ tasks: [task] }` |
-| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. |
+| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model?, enrich? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. |
 | `GET` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }` — **404** se não existe. |
-| `PATCH` | `/api/projects/:projectId/tasks/:taskId` | subconjunto do frontmatter (`title`, `status`, `priority`, `tags`, `model`, `run`, `body`…) | `{ task }`. Mudar `status` move o arquivo de pasta e emite `task.moved`. |
+| `PATCH` | `/api/projects/:projectId/tasks/:taskId` | subconjunto do frontmatter (`title`, `status`, `priority`, `tags`, `model`, `enrich`, `run`, `body`…) | `{ task }`. Mudar `status` move o arquivo de pasta e emite `task.moved`. |
 | `DELETE` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }`. **Não apaga o arquivo**: move para `archived/`. |
+| `POST` | `/api/projects/:projectId/tasks/:taskId/enrich` | `{ auto? }` | `{ enriched, reason, costUsd, task }`. Sessão headless read-only que reescreve a `## Descrição` (e possivelmente o título) para ficar mais clara e com contexto do código. Com `auto: true` o modelo só reescreve se julgar necessário (`enriched: false` caso contrário). **409** se a task está rodando ou o CLI `claude` não existe. |
 | `GET` | `/api/projects/:projectId/tasks/:taskId/diff` | — | `{ diff }` — o patch unificado capturado ao fim do último run. **404** se a task não gerou diff. |
 
 ### Ações manuais (guardrails)
@@ -171,7 +172,7 @@ Cada mensagem é uma linha JSON no formato `{ "type": "<evento>", ...payload }`.
 | `run.queued` | `{ projectId, taskId, position }` | Task entrou na fila. `position` é o índice no momento. |
 | `run.started` | `{ projectId, taskId, pid }` | Sessão `claude -p` iniciou. |
 | `run.log` | `{ projectId, taskId, event }` | Uma linha do `--output-format stream-json` da sessão. `event` é o objeto do próprio Claude Code (`assistant`, `user`, `result`…); linhas não-JSON viram `{ type: "raw", text }`. Este é o evento de alto volume. |
-| `run.finished` | `{ projectId, taskId, exitCode, costUsd, durationMs, numTurns, sessionId }` | Sessão terminou (sucesso, erro ou timeout). `exitCode: 0` ⇒ task foi para `done/` e registrada no ledger; qualquer outro valor ⇒ volta para `todo/` e o motivo é anexado ao "## Log de erros" da task. `exitCode: -1` também cobre falha ao preparar o workspace git. |
+| `run.finished` | `{ projectId, taskId, exitCode, humanRequest?, costUsd, durationMs, numTurns, sessionId }` | Sessão terminou (sucesso, erro ou timeout). `exitCode: 0` ⇒ task foi para `done/` e registrada no ledger — exceto se o agente deixou uma seção `## Human Request` preenchida: nesse caso `humanRequest: true`, a task volta para `todo/` com a tag `human-request` (fora do auto-pilot) e aguarda decisão do humano; qualquer outro valor ⇒ volta para `todo/` e o motivo é anexado ao "## Log de erros" da task. `exitCode: -1` também cobre falha ao preparar o workspace git. |
 | `run.killed` | `{ projectId, taskId }` | Sessão morta manualmente (`/api/run/kill`). A task volta para `todo/` e **não** re-entra sozinha na fila, mesmo com auto-run ligado. |
 | `run.queue` | `queueView` | A fila foi alterada por fora do fluxo normal (hoje: remoção de um projeto). |
 | `pending.updated` | `{ projectId, actions }` | `pending-actions.md` mudou (guardrail bloqueou algo, ou uma ação foi resolvida). |

@@ -17,6 +17,8 @@ import { listConfigFiles, readConfigFile, writeConfigFile } from './lib/claudeCo
 import { watchProject } from './lib/watcher.js'
 import { Runner } from './lib/runner.js'
 import { analyzeProject, SUGGESTION_TYPES } from './lib/analyzer.js'
+import { enrichTask } from './lib/enricher.js'
+import { replaceSection } from './lib/tasks.js'
 import { DevServers } from './lib/devservers.js'
 import { DEFAULT_GIT, gitSettings, projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty } from './lib/git.js'
 import { getUsage } from './lib/usage.js'
@@ -65,7 +67,8 @@ function emit(type, payload) {
 function autoEnqueue(project, excludeTaskId) {
   if (!project?.autoRun || !claudeAvailable || !fs.existsSync(project.path)) return
   const todo = listTasks(project.path).filter(t =>
-    t.status === 'todo' && t.id !== excludeTaskId && !(t.tags || []).includes('blocked'))
+    t.status === 'todo' && t.id !== excludeTaskId
+    && !(t.tags || []).includes('blocked') && !(t.tags || []).includes('human-request'))
   // A ordem de entrada na fila é a mesma que o board mostra por default:
   // prioridade mais alta primeiro, empate pela mais antiga.
   for (const t of sortTasks(todo)) runner.enqueue(project.id, t.id, { auto: true })
@@ -175,7 +178,7 @@ app.post('/api/projects', (req, reply) => {
 app.patch('/api/projects/:projectId', (req, reply) => {
   const p = getProject(req.params.projectId)
   if (!p) return reply.code(404).send({ error: 'projeto não encontrado' })
-  const { name, skipPermissions, git, defaultModel, autoRun, devServer, timeoutMs } = req.body || {}
+  const { name, skipPermissions, git, defaultModel, autoRun, devServer, timeoutMs, enrichMode } = req.body || {}
   if (name !== undefined) p.name = name
   if (skipPermissions !== undefined) p.skipPermissions = !!skipPermissions
   if (timeoutMs !== undefined) {
@@ -190,6 +193,12 @@ app.patch('/api/projects/:projectId', (req, reply) => {
     }
   }
   if (defaultModel !== undefined) p.defaultModel = String(defaultModel || '').trim() || null
+  if (enrichMode !== undefined) {
+    if (!['off', 'auto', 'always'].includes(enrichMode)) {
+      return reply.code(400).send({ error: 'enrichMode deve ser off, auto ou always' })
+    }
+    p.enrichMode = enrichMode
+  }
   if (devServer !== undefined && typeof devServer === 'object') {
     const next = { ...(p.devServer || {}) }
     if (devServer.command !== undefined) next.command = String(devServer.command || '').trim()
@@ -308,9 +317,9 @@ app.get('/api/projects/:projectId/tasks', (req, reply) => {
 
 app.post('/api/projects/:projectId/tasks', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
-  const { title, description, priority, tags, status, model } = req.body || {}
+  const { title, description, priority, tags, status, model, enrich } = req.body || {}
   if (!title) return reply.code(400).send({ error: 'title é obrigatório' })
-  const task = createTask(p.path, { title, description, priority, tags, status, model })
+  const task = createTask(p.path, { title, description, priority, tags, status, model, enrich })
   emit('task.upserted', { projectId: p.id, task })
   return { task }
 })
@@ -369,6 +378,31 @@ app.post('/api/projects/:projectId/analyze', async (req, reply) => {
   if (!claudeAvailable) return reply.code(409).send({ error: 'CLI `claude` não encontrado no PATH' })
   try {
     return await analyzeProject(p, req.body?.types)
+  } catch (e) {
+    return reply.code(500).send({ error: e.message })
+  }
+})
+
+// ---- enriquecer/reescrever a descrição de uma task (sob demanda) ----
+app.post('/api/projects/:projectId/tasks/:taskId/enrich', async (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  if (!claudeAvailable) return reply.code(409).send({ error: 'CLI `claude` não encontrado no PATH' })
+  const task = findTask(p.path, req.params.taskId)
+  if (!task) return reply.code(404).send({ error: 'task não encontrada' })
+  if (runner.getQueueView().actives.some(a => a.taskId === task.id)) {
+    return reply.code(409).send({ error: 'task está em execução — aguarde terminar' })
+  }
+  try {
+    const res = await enrichTask(p, task, { auto: !!req.body?.auto })
+    let updated = task
+    if (res.enrich) {
+      updated = updateTask(p.path, task.id, {
+        ...(res.title ? { title: res.title } : {}),
+        body: replaceSection(task.body, 'Descrição', res.description),
+      })
+      emit('task.upserted', { projectId: p.id, task: updated })
+    }
+    return { enriched: res.enrich, reason: res.reason, costUsd: res.costUsd, task: updated }
   } catch (e) {
     return reply.code(500).send({ error: e.message })
   }

@@ -13,6 +13,8 @@ const COLUMNS = [
   { key: 'archived', label: 'Archived', dot: 'bg-st-archived' },
 ]
 const MODELS = ['fable', 'opus', 'sonnet', 'haiku']
+const HUMAN_REQUEST_TAG = 'human-request'
+const ENRICH_LABEL = { off: 'não enriquecer', auto: 'Claude decide', always: 'sempre enriquecer' }
 
 // Cada view escolhe as colunas visíveis. Archived nunca aparece por padrão.
 const VIEWS = [
@@ -140,6 +142,17 @@ export default function App() {
   }
 
   const runTask = tid => api.run(project.id, tid).then(setQueue).catch(e => alert(e.message))
+  const [enriching, setEnriching] = useState(null) // taskId em enriquecimento
+  const enrichNow = tid => {
+    setEnriching(tid)
+    api.enrichTask(project.id, tid)
+      .then(d => {
+        if (!d.enriched) alert(`Nada alterado${d.reason ? `: ${d.reason}` : '.'}`)
+        return api.tasks(project.id).then(x => setTasks(x.tasks))
+      })
+      .catch(e => alert(e.message))
+      .finally(() => setEnriching(null))
+  }
   const pendingCount = pending.filter(a => a.status === 'pending').length
   const detail = tasks.find(t => t.id === detailId) || null
 
@@ -231,6 +244,8 @@ export default function App() {
                   onClose={() => setDetailId(null)}
                   onPatch={patch => patchTask(detail.id, patch)}
                   onRun={() => runTask(detail.id)}
+                  onEnrich={() => enrichNow(detail.id)}
+                  enriching={enriching === detail.id}
                   onKill={() => api.kill(detail.id)}
                   onLog={() => setLogTask(detail.id)}
                   onDiff={() => setDiffTask(detail)}
@@ -857,7 +872,12 @@ function CardBody({ task, queue, onRun, onOpen, selected, pending = [], innerRef
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
         <span title={prio.label} className={`text-body ${prio.cls}`}>{prio.arrow}</span>
-        {(task.tags || []).map(tag => <TagChip key={tag} tag={tag} />)}
+        {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG).map(tag => <TagChip key={tag} tag={tag} />)}
+        {(task.tags || []).includes(HUMAN_REQUEST_TAG) && (
+          <Chip className="text-warning" title="O agente precisa de uma decisão sua — veja a seção Human Request no detalhe.">
+            ⚑ decisão humana
+          </Chip>
+        )}
         <div className="flex-1" />
         {queued && <Chip className="text-info">na fila</Chip>}
         {task.model && <Chip className="font-mono">{task.model}</Chip>}
@@ -950,7 +970,7 @@ function Section({ title, badge, action, children }) {
 
 const Empty = ({ children }) => <div className="text-body text-muted">{children}</div>
 
-function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, onKill, onLog, onDiff, onArchive, onResolve }) {
+function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, onKill, onLog, onDiff, onArchive, onResolve, onEnrich, enriching }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(task.title)
   const [body, setBody] = useState(task.body ?? '')
@@ -964,6 +984,7 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
   const prio = PRIORITY[task.priority] || PRIORITY.medium
   const desc = section(body, 'Descrição')
   const result = section(body, 'Resultado')
+  const humanRequest = section(body, 'Human Request')
   const openPending = pending.filter(a => a.status === 'pending')
 
   return (
@@ -973,6 +994,7 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
         <div className="flex-1" />
         <Menu items={[
           { label: running ? 'Matar sessão' : 'Executar agora', onClick: running ? onKill : onRun, disabled: queued },
+          { label: enriching ? '✦ Enriquecendo…' : '✦ Enriquecer descrição (Claude)', onClick: onEnrich, disabled: running || queued || enriching },
           { label: 'Ver log', onClick: onLog },
           { label: 'Ver diff', onClick: onDiff, disabled: !run.has_diff },
           { label: 'Arquivar', onClick: onArchive, danger: true, disabled: task.status === 'archived' },
@@ -996,7 +1018,17 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           <option value="">{project.defaultModel ? `↳ ${project.defaultModel}` : '↳ auto'}</option>
           {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
         </select>
-        {(task.tags || []).map(t => <TagChip key={t} tag={t} />)}
+        <select value={task.enrich === true ? 'on' : task.enrich === false ? 'off' : ''}
+          disabled={running || queued}
+          onChange={e => onPatch({ enrich: e.target.value === 'on' ? true : e.target.value === 'off' ? false : null })}
+          title="Enriquecer a descrição na hora do run (vazio: herda a configuração do projeto)"
+          className="rounded-[6px] bg-chip px-2 py-1 text-meta text-chip-ink outline-none disabled:opacity-40">
+          <option value="">✦ ↳ {ENRICH_LABEL[project.enrichMode || 'off']}</option>
+          <option value="on">✦ enriquecer</option>
+          <option value="off">✦ não enriquecer</option>
+        </select>
+        {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG).map(t => <TagChip key={t} tag={t} />)}
+        {(task.tags || []).includes(HUMAN_REQUEST_TAG) && <Chip className="text-warning">aguardando decisão humana</Chip>}
       </div>
 
       {editing ? (
@@ -1017,6 +1049,16 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           <div className="mt-1.5 whitespace-pre-wrap text-body text-ink-2">{desc || <Empty>Sem descrição.</Empty>}</div>
           <button onClick={() => setEditing(true)} className="mt-2 self-start text-meta text-accent hover:underline">Editar</button>
         </>
+      )}
+
+      {humanRequest && (
+        <div className="mt-3 rounded-[8px] border border-warning p-3">
+          <div className="text-meta font-semibold uppercase tracking-wide text-warning">Decisão humana necessária</div>
+          <div className="mt-1.5 whitespace-pre-wrap text-body text-ink-2">{humanRequest}</div>
+          <div className="mt-2 text-meta text-muted">
+            Responda editando a "## Descrição" (ou removendo a seção "## Human Request") e execute de novo.
+          </div>
+        </div>
       )}
 
       <Section title="Execuções"
@@ -1566,6 +1608,21 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
             {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
           <span className="text-meta text-muted">tasks sem modelo próprio usam este</span>
+        </label>
+
+        <label className="flex items-start gap-3">
+          <span className="mt-1">Enriquecer descrição ao executar</span>
+          <span className="flex-1">
+            <select value={project.enrichMode || 'off'} onChange={e => onPatch({ enrichMode: e.target.value })}
+              className="rounded-[6px] border border-line px-2 py-1 text-body outline-none">
+              {Object.entries(ENRICH_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+            <span className="mt-1 block text-meta text-muted">
+              Antes de implementar, o agente reescreve a "## Descrição" para ficar mais clara e com contexto
+              do código. "Claude decide": só reescreve se julgar a descrição vaga. Cada task pode sobrescrever
+              isso no detalhe (seletor ✦).
+            </span>
+          </span>
         </label>
 
         <div className="flex items-center gap-3">
