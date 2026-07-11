@@ -2,7 +2,7 @@
 
 Gerenciador de tasks local (React + Node) para o Claude Code. O kanban é uma camada visual sobre arquivos `.md` em `.claude/claude-kanban/tasks/` de cada projeto; as tasks são executadas em sessões headless (`claude -p`), uma por vez, com log ao vivo no board.
 
-Spec completa: [`docs/initial-scope.spec`](docs/initial-scope.spec).
+Spec completa: [`docs/initial-scope.spec`](docs/initial-scope.spec). Rotas HTTP, eventos WebSocket e layout do estado: [`docs/api.md`](docs/api.md).
 
 ## Requisitos
 
@@ -44,6 +44,26 @@ O `guard.mjs` funciona por parsing/regex do comando — **não é sandbox**. Com
 ```
 server/   Fastify + watcher (chokidar) + runner (spawn claude -p) + templates (guard.mjs, SKILL.md)
 web/      React + Vite + Tailwind + dnd-kit
+docs/     spec inicial + docs/api.md (rotas HTTP, eventos WS)
 ```
 
-Estado do app: `~/.claude-kanban/` (`projects.json`, `state.json`, `lock`). Sem banco de dados — tudo é arquivo.
+Estado do app em `~/.claude-kanban/`. Sem banco de dados — tudo é arquivo:
+
+```
+projects.json                  projetos cadastrados (path, git, dev server, flags)
+state.json                     fila de execução + concorrência (sobrevive a restarts)
+ledger.json                    tasks que já rodaram com exit 0
+lock                           pid da instância viva (impede duas instâncias)
+worktrees/<projectId>/<taskId> worktree git isolado de cada run
+```
+
+O **ledger** existe porque o status da task vive na *pasta* do arquivo `.md`, e essas pastas são excluídas dos commits da sessão. Sem ele, uma task concluída cujo `done/` se perdesse (worktree descartado, troca de branch) reapareceria em `todo/` e, com auto-run ligado, re-executaria em loop. Regra: só sucesso entra no ledger; caminhos automáticos nunca re-executam algo registrado (apenas reconciliam o status para `done`); um run pedido explicitamente pelo humano limpa o registro e roda de novo.
+
+O que é do projeto — e não do app — vive em `<projeto>/.claude/claude-kanban/`: `tasks/<status>/*.md`, `diffs/`, `pending-actions.md`, a skill e o `guard.mjs`.
+
+### Variáveis de ambiente
+
+| Variável | Default | Efeito |
+| --- | --- | --- |
+| `PORT` | `4400` | Porta do backend (host fixo em `127.0.0.1`). |
+| `CLAUDE_KANBAN_HOME` | `~/.claude-kanban` | Raiz do estado acima. Aponte para outro diretório para rodar uma instância isolada. |
