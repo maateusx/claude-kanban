@@ -490,8 +490,8 @@ function usageBarColor(l) {
 const usagePct = l => Math.min(100, Math.max(0, l?.percent ?? 0))
 const usageName = l => `${USAGE_LABEL[l.kind] || l.kind}${l.model ? ` · ${l.model}` : ''}`
 
-// No rail cabe só o essencial: a barra mais crítica. O detalhe de todos os
-// limites vive num popover — o tooltip nativo não cabia (e não dava pra copiar).
+// No rail cabe só o essencial: a sessão de 5h, que é a janela que de fato
+// limita o trabalho do dia. Os limites semanais vivem no popover.
 function UsageRail() {
   const [usage, setUsage] = useState(null)
   const [open, setOpen] = useState(false)
@@ -515,15 +515,17 @@ function UsageRail() {
   }, [open])
 
   if (!usage?.available || !usage.limits?.length) return null
-  const worst = usage.limits.reduce((a, b) => usagePct(b) > usagePct(a) ? b : a)
-  const pct = usagePct(worst)
+  // Sem sessão (janela ainda não aberta), cai no limite mais crítico pra não sumir com o rail.
+  const session = usage.limits.find(l => l.kind === 'session')
+    || usage.limits.reduce((a, b) => usagePct(b) > usagePct(a) ? b : a)
+  const pct = usagePct(session)
 
   return (
     <div className="relative" ref={ref}>
-      <button onClick={() => setOpen(v => !v)} title="Ver detalhes do uso"
+      <button onClick={() => setOpen(v => !v)} title={`${usageName(session)}: ${pct}% — ver detalhes do uso`}
         className="flex w-8 flex-col items-center gap-1 rounded-[6px] pb-1 pt-1 hover:bg-hover">
         <div className="h-1 w-full overflow-hidden rounded-full bg-line">
-          <div className={`h-full ${usageBarColor(worst)}`} style={{ width: `${pct}%` }} />
+          <div className={`h-full ${usageBarColor(session)}`} style={{ width: `${pct}%` }} />
         </div>
         <span className="font-mono text-[10px] text-muted">{pct}%</span>
       </button>
