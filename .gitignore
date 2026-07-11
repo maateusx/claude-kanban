@@ -7,3 +7,4 @@ dist/
 .claude/claude-kanban/meta.json
 .claude/claude-kanban/tasks/
 .claude/claude-kanban/diffs/
+.claude/claude-kanban/logs/

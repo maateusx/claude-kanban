@@ -194,8 +194,8 @@ export default function App() {
       {diffTask && project && (
         <DiffDrawer projectId={project.id} task={diffTask} onClose={() => setDiffTask(null)} />
       )}
-      {logTask && (
-        <LogDrawer taskId={logTask} events={logs[logTask] || []} onClose={() => setLogTask(null)}
+      {logTask && project && (
+        <LogDrawer projectId={project.id} taskId={logTask} events={logs[logTask] || []} onClose={() => setLogTask(null)}
           active={queue.actives?.some(a => a.taskId === logTask)} onKill={() => api.kill(logTask)} />
       )}
       {showSuggest && project && (
@@ -706,10 +706,31 @@ const Tag = ({ children }) => (
   <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{children}</span>
 )
 
-function LogDrawer({ taskId, events, onClose, active, onKill }) {
+function LogDrawer({ projectId, taskId, events, onClose, active, onKill }) {
   const [debug, setDebug] = useState(false)
+  const [history, setHistory] = useState(null) // null = ainda carregando
   const endRef = useRef(null)
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [events])
+  // Quantos eventos do WS já estavam refletidos no histórico que o servidor
+  // devolveu — tudo além disso chegou depois e vai por cima.
+  const baseRef = useRef(0)
+  const eventsRef = useRef(events)
+  eventsRef.current = events
+
+  useEffect(() => {
+    let cancelled = false
+    setHistory(null)
+    api.taskLog(projectId, taskId)
+      .then(d => {
+        if (cancelled) return
+        baseRef.current = eventsRef.current.length
+        setHistory(d.events || [])
+      })
+      .catch(() => { if (!cancelled) { baseRef.current = 0; setHistory([]) } })
+    return () => { cancelled = true }
+  }, [projectId, taskId])
+
+  const all = history ? [...history, ...events.slice(baseRef.current)] : events
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [all.length])
   return (
     <div className="fixed inset-y-0 right-0 z-40 flex w-[560px] flex-col border-l border-zinc-800 bg-zinc-950 shadow-2xl">
       <div className="flex items-center gap-3 border-b border-zinc-800 px-4 py-3">
@@ -723,8 +744,9 @@ function LogDrawer({ taskId, events, onClose, active, onKill }) {
         <button onClick={onClose} className="text-zinc-500 hover:text-white">✕</button>
       </div>
       <div className="flex-1 space-y-2 overflow-y-auto p-4 font-mono text-xs">
-        {events.length === 0 && <div className="text-zinc-600">Sem eventos ainda…</div>}
-        {events.map((e, i) => <LogEvent key={i} event={e} debug={debug} />)}
+        {history === null && all.length === 0 && <div className="text-zinc-600">Carregando log…</div>}
+        {history !== null && all.length === 0 && <div className="text-zinc-600">Sem eventos ainda…</div>}
+        {all.map((e, i) => <LogEvent key={i} event={e} debug={debug} />)}
         <div ref={endRef} />
       </div>
     </div>
