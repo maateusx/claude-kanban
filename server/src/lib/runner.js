@@ -187,8 +187,9 @@ export class Runner {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
+    const timeoutMs = project.timeoutMs || DEFAULT_TIMEOUT_MS
     const a = {
-      projectId, taskId, child, timer: null, result: null, stderr: '', workspace, taskRelPath,
+      projectId, taskId, child, timer: null, result: null, stderr: '', workspace, taskRelPath, timeoutMs,
       logStream: null, logBytes: 0, logEvents: [],
     }
 
@@ -201,7 +202,6 @@ export class Runner {
       a.logStream.on('error', () => { a.logStream = null })
     } catch { /* log é best-effort: nunca derruba o run */ }
 
-    const timeoutMs = project.timeoutMs || DEFAULT_TIMEOUT_MS
     a.timer = setTimeout(() => {
       a.timedOut = true
       this.kill(taskId)
@@ -322,7 +322,9 @@ export class Runner {
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
       })
     } else {
-      const reason = a.timedOut ? 'Timeout da execução.' : `Exit code ${exitCode}.`
+      const reason = a.timedOut
+        ? `Timeout da execução. Limite configurado: ${Math.round((a.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)} min.`
+        : `Exit code ${exitCode}.`
       const patch = { status: 'todo', run: runMeta }
       if (attempts >= 3 && task && !task.tags?.includes('blocked')) {
         patch.tags = [...(task.tags || []), 'blocked']

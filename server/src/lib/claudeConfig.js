@@ -34,6 +34,7 @@ function walk(dir, projectPath, out, depth = 0) {
   try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
   for (const e of entries) {
     const full = path.join(dir, e.name)
+    if (e.isSymbolicLink()) continue // symlink pode apontar para fora do projeto
     if (e.isDirectory()) {
       const rel = path.relative(projectPath, full)
       if (rel === path.join('.claude', 'claude-kanban')) continue
@@ -57,6 +58,7 @@ export function listConfigFiles(projectPath) {
   if (fs.existsSync(claudeDir)) {
     try {
       for (const e of fs.readdirSync(claudeDir, { withFileTypes: true })) {
+        if (e.isSymbolicLink()) continue
         if (e.isDirectory() && CLAUDE_IGNORE.has(e.name)) continue
         const full = path.join(claudeDir, e.name)
         if (e.isDirectory()) walk(full, projectPath, files)
@@ -90,7 +92,35 @@ function resolveSafe(projectPath, relPath) {
   const full = path.resolve(projectPath, norm)
   const root = path.resolve(projectPath)
   if (full !== root && !full.startsWith(root + path.sep)) throw new Error('caminho fora do projeto')
+
+  // Validação textual não basta: um symlink dentro de .claude/ (arquivo ou diretório)
+  // pode apontar para fora do projeto. Resolvemos os symlinks de verdade e
+  // reconferimos o escopo com os caminhos reais.
+  const realRoot = realpathDeep(root)
+  const realFull = realpathDeep(full)
+  if (!isInside(realFull, realRoot)) throw new Error('caminho fora do projeto')
+  if (!ROOT_FILES.includes(norm) && !isInside(realFull, path.join(realRoot, '.claude'))) {
+    throw new Error('caminho fora do projeto')
+  }
   return full
+}
+
+function isInside(target, dir) {
+  return target === dir || target.startsWith(dir + path.sep)
+}
+
+// realpath tolerante a caminhos ainda inexistentes: resolve o ancestral existente
+// mais próximo e reanexa o restante (que, por não existir, não pode ser symlink).
+function realpathDeep(p) {
+  let cur = p
+  const rest = []
+  for (;;) {
+    try { return path.join(fs.realpathSync(cur), ...rest.reverse()) } catch {}
+    const parent = path.dirname(cur)
+    if (parent === cur) return p
+    rest.push(path.basename(cur))
+    cur = parent
+  }
 }
 
 export function readConfigFile(projectPath, relPath) {

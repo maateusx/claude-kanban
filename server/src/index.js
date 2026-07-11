@@ -21,6 +21,8 @@ import { DEFAULT_GIT, gitSettings, projectBranch, listBranches, checkoutBranch, 
 import { getUsage } from './lib/usage.js'
 
 const PORT = Number(process.env.PORT || 4400)
+const MIN_TIMEOUT_MS = 60_000
+const MAX_TIMEOUT_MS = 240 * 60_000
 
 // ---- lockfile (única instância) ----
 fs.mkdirSync(HOME_DIR, { recursive: true })
@@ -172,9 +174,20 @@ app.post('/api/projects', (req, reply) => {
 app.patch('/api/projects/:projectId', (req, reply) => {
   const p = getProject(req.params.projectId)
   if (!p) return reply.code(404).send({ error: 'projeto não encontrado' })
-  const { name, skipPermissions, git, defaultModel, autoRun, devServer } = req.body || {}
+  const { name, skipPermissions, git, defaultModel, autoRun, devServer, timeoutMs } = req.body || {}
   if (name !== undefined) p.name = name
   if (skipPermissions !== undefined) p.skipPermissions = !!skipPermissions
+  if (timeoutMs !== undefined) {
+    if (timeoutMs === null || timeoutMs === '') {
+      p.timeoutMs = null
+    } else {
+      const ms = Number(timeoutMs)
+      if (!Number.isFinite(ms) || ms < MIN_TIMEOUT_MS || ms > MAX_TIMEOUT_MS) {
+        return reply.code(400).send({ error: 'timeoutMs deve estar entre 1 e 240 minutos' })
+      }
+      p.timeoutMs = Math.round(ms)
+    }
+  }
   if (defaultModel !== undefined) p.defaultModel = String(defaultModel || '').trim() || null
   if (devServer !== undefined && typeof devServer === 'object') {
     const next = { ...(p.devServer || {}) }
