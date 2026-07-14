@@ -4,6 +4,7 @@ import matter from 'gray-matter'
 import { customAlphabet } from 'nanoid'
 import { STATUSES, tasksDir } from './paths.js'
 import { normalizeModel } from './models.js'
+import { findTemplate, bodyFromTemplate } from './templates.js'
 
 export const newId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6)
 
@@ -34,6 +35,7 @@ export function taskFileName(task) {
 const DEFAULT_RUN = {
   session_id: null, started_at: null, completed_at: null, exit_code: null,
   cost_usd: null, duration_ms: null, num_turns: null, attempts: 0, has_diff: false,
+  pr: null, // { url, number, state } quando a sessão abriu uma PR (autoPR)
 }
 
 export function defaultBody(description = '') {
@@ -160,15 +162,26 @@ export function findTask(projectPath, taskId) {
   return listTasks(projectPath).find(t => t.id === taskId) || null
 }
 
-export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, enrich = null, decompose = null, scheduled_at = null, depends_on = [] }) {
+export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, enrich = null, decompose = null, scheduled_at = null, template = null, depends_on = [] }) {
   if (!STATUSES.includes(status)) status = 'backlog'
+  // O template dá o corpo e os defaults de prioridade/tags/modelo; o que veio
+  // explícito no request sempre vence.
+  const tpl = template ? findTemplate(projectPath, template) : null
   const now = new Date().toISOString()
-  const task = { id: newId(), title, status, priority, tags, depends_on: normalizeDependsOn(depends_on), model: normalizeModel(model), enrich, decompose, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
+  const task = {
+    id: newId(), title, status,
+    priority: priority || tpl?.priority || 'medium',
+    tags: tags?.length ? tags : (tpl?.tags || []),
+    depends_on: normalizeDependsOn(depends_on),
+    model: normalizeModel(model || tpl?.model || null),
+    enrich, decompose, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN },
+  }
+  const body = tpl ? bodyFromTemplate(tpl, description) : defaultBody(description)
   const dir = tasksDir(projectPath, status)
   fs.mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, taskFileName(task))
   markSelfWrite(filePath)
-  fs.writeFileSync(filePath, serializeTask(task, defaultBody(description)))
+  fs.writeFileSync(filePath, serializeTask(task, body))
   return loadTask(projectPath, filePath)
 }
 

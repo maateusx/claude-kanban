@@ -20,7 +20,8 @@ Frontmatter YAML: `id` (imutável), `title`, `status`, `priority` (low|medium|hi
    - arquivos criados/alterados;
    - contexto útil para memória futura;
    - pendências que exigem ação humana, citando os ids (`pa-xxxxxx`) de `.claude/claude-kanban/pending-actions.md`.
-3. Para criar uma task nova quando o humano pedir "adiciona isso no backlog": crie um `.md` em `.claude/claude-kanban/tasks/backlog/` com um título descritivo no nome do arquivo e uma seção `## Descrição`. **Não invente frontmatter `id`** — o watcher do app adota o arquivo e completa o frontmatter.
+3. Se a task depender de uma escolha ou decisão humana que você não pode tomar com segurança (ambiguidade de produto, trade-off de negócio, credencial), **não decida nem invente**: adicione ao arquivo da task uma seção `## Human Request` descrevendo objetivamente a(s) pergunta(s) e as opções, registre em `## Resultado` o que já foi feito e encerre normalmente. O orquestrador devolve o card para revisão humana (tag `human-request`, fora do auto-pilot).
+4. Para criar uma task nova quando o humano pedir "adiciona isso no backlog": crie um `.md` em `.claude/claude-kanban/tasks/backlog/` com um título descritivo no nome do arquivo e uma seção `## Descrição`. **Não invente frontmatter `id`** — o watcher do app adota o arquivo e completa o frontmatter.
 
 ## Políticas do projeto (aplicadas por hooks determinísticos — nem tente)
 
