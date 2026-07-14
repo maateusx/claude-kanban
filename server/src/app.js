@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { bootstrapStatus } from './lib/bootstrap.js'
 import { listPendingActions } from './lib/pending.js'
 import { gitSettings, projectBranch } from './lib/git.js'
+import { retrySettings } from './lib/runner.js'
 import { getUsage } from './lib/usage.js'
 import projectRoutes from './routes/projects.js'
 import taskRoutes from './routes/tasks.js'
@@ -34,6 +35,7 @@ export async function buildApp(deps) {
     return {
       ...p,
       git: gitSettings(p),
+      retry: retrySettings(p),
       available,
       bootstrap: bootstrapErrors.has(p.id) ? 'failed' : (available ? bootstrapStatus(p.path) : 'unknown'),
       bootstrapError: bootstrapErrors.get(p.id) || null,

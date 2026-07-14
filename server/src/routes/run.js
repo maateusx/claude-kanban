@@ -1,5 +1,5 @@
 import { saveProjects } from '../lib/paths.js'
-import { findTask, updateTask } from '../lib/tasks.js'
+import { findTask, updateTask, replaceSection } from '../lib/tasks.js'
 import { parseWhen, isFuture } from '../lib/scheduler.js'
 import { withProject, withProjectRecord } from './helpers.js'
 
@@ -13,6 +13,25 @@ export default function runRoutes(app, ctx) {
     const ok = runner.enqueue(p.id, req.params.taskId)
     if (!ok) return reply.code(409).send({ error: 'task já está na fila ou não existe' })
     return runner.getQueueView()
+  })
+
+  app.post('/api/projects/:projectId/tasks/:taskId/human-response', (req, reply) => {
+    const p = withProject(ctx, req, reply); if (!p) return
+    if (!ctx.claudeAvailable()) return noClaude(reply)
+    const task = findTask(p.path, req.params.taskId)
+    if (!task) return reply.code(404).send({ error: 'task não encontrada' })
+    const response = String(req.body?.response ?? '').trim()
+    if (!response) return reply.code(400).send({ error: 'response é obrigatório' })
+    const view = runner.getQueueView()
+    if (view.actives.some(a => a.taskId === task.id) || view.queue.some(q => q.taskId === task.id)) {
+      return reply.code(409).send({ error: 'task já está na fila ou em execução — aguarde terminar' })
+    }
+    updateTask(p.path, task.id, { body: replaceSection(task.body, 'Human Response', response) })
+    // enqueue (auto: false) remove a tag human-request e devolve a task para a fila.
+    runner.enqueue(p.id, task.id)
+    const updated = findTask(p.path, task.id)
+    emit('task.upserted', { projectId: p.id, task: updated })
+    return { task: updated, queue: runner.getQueueView() }
   })
 
   // Desmembrar agora: roda a sessão de decomposição imediatamente (fora da fila).
@@ -68,6 +87,22 @@ export default function runRoutes(app, ctx) {
     runner.tick()
     return { project: projectView(p) }
   })
+
+  // ---- pausa global da fila (todos os projetos) ----
+  // Sempre em modo "drenar": nada novo sai da fila, mas as sessões já ativas
+  // terminam normalmente. Sem `until` a pausa é indefinida (até o resume).
+  app.post('/api/run/pause', (req, reply) => {
+    const raw = req.body?.until
+    let until = null
+    if (raw) {
+      until = parseWhen(raw)
+      if (!until) return reply.code(400).send({ error: 'until inválido (use uma data ISO)' })
+      if (!isFuture(until)) return reply.code(400).send({ error: 'until precisa estar no futuro' })
+    }
+    return runner.pause(until)
+  })
+
+  app.post('/api/run/resume', () => runner.resume())
 
   app.post('/api/run/concurrency', req => {
     runner.setConcurrency(req.body?.max)

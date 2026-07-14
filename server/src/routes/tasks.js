@@ -1,11 +1,33 @@
 import fs from 'node:fs'
-import { diffFile } from '../lib/paths.js'
-import { listTasks, findTask, createTask, updateTask, replaceSection } from '../lib/tasks.js'
+import { diffFile, STATUSES } from '../lib/paths.js'
+import {
+  listTasks, findTask, createTask, updateTask, replaceSection,
+  normalizeDependsOn, hasDependencyCycle,
+} from '../lib/tasks.js'
 import { analyzeProject, SUGGESTION_TYPES } from '../lib/analyzer.js'
 import { enrichTask } from '../lib/enricher.js'
+import { listTemplates, findTemplate } from '../lib/templates.js'
+import { listIssues, issueTag, issueDescription } from '../lib/github.js'
+import { computeStats } from '../lib/stats.js'
 import { normalizeModel } from '../lib/models.js'
 import { parseWhen } from '../lib/scheduler.js'
-import { invalidModelMsg, withProject } from './helpers.js'
+import { invalidModelMsg, withProject, PRIORITIES } from './helpers.js'
+
+// Valida depends_on: ids precisam existir no projeto, nada de auto-dependência e
+// nada de ciclo (A→B→A trava a fila para sempre). taskId é o id da própria task
+// (num POST ainda não existe: usamos um sentinel que nunca colide com um id real).
+function validateDeps(projectPath, taskId, value) {
+  const deps = normalizeDependsOn(value)
+  if (!deps.length) return { deps }
+  const known = new Set(listTasks(projectPath).map(t => t.id))
+  const missing = deps.filter(id => !known.has(id))
+  if (missing.length) return { error: `depends_on referencia task inexistente: ${missing.join(', ')}` }
+  if (deps.includes(taskId)) return { error: 'depends_on não pode referenciar a própria task' }
+  if (hasDependencyCycle(listTasks(projectPath), taskId, deps)) {
+    return { error: 'depends_on cria um ciclo de dependências' }
+  }
+  return { deps }
+}
 
 export default function taskRoutes(app, ctx) {
   const { emit, runner } = ctx
@@ -16,14 +38,31 @@ export default function taskRoutes(app, ctx) {
     return { tasks: listTasks(p.path) }
   })
 
+  app.get('/api/projects/:projectId/templates', (req, reply) => {
+    const p = withProject(ctx, req, reply); if (!p) return
+    return { templates: listTemplates(p.path) }
+  })
+
+  // Custos/histórico: agrega os blocos `run` dos .md por dia/modelo/status.
+  // ?days=0 (ou ausente de janela) = período inteiro.
+  app.get('/api/projects/:projectId/stats', (req, reply) => {
+    const p = withProject(ctx, req, reply); if (!p) return
+    const days = req.query.days === undefined ? 30 : Number(req.query.days)
+    if (!Number.isFinite(days) || days < 0) return reply.code(400).send({ error: 'days inválido' })
+    return computeStats(listTasks(p.path), { days, defaultModel: p.defaultModel || null })
+  })
+
   app.post('/api/projects/:projectId/tasks', (req, reply) => {
     const p = withProject(ctx, req, reply); if (!p) return
-    const { title, description, priority, tags, status, model, enrich, decompose, scheduled_at } = req.body || {}
+    const { title, description, priority, tags, status, model, enrich, decompose, scheduled_at, template, depends_on } = req.body || {}
     if (!title) return reply.code(400).send({ error: 'title é obrigatório' })
     if (model && !normalizeModel(model)) return reply.code(400).send({ error: invalidModelMsg(model) })
+    if (template && !findTemplate(p.path, template)) return reply.code(400).send({ error: `template não encontrado: ${template}` })
     const when = scheduled_at ? parseWhen(scheduled_at) : null
     if (scheduled_at && !when) return reply.code(400).send({ error: 'scheduled_at inválido (use uma data ISO)' })
-    const task = createTask(p.path, { title, description, priority, tags, status, model: normalizeModel(model), enrich, decompose, scheduled_at: when })
+    const { deps, error } = validateDeps(p.path, '__new__', depends_on)
+    if (error) return reply.code(400).send({ error })
+    const task = createTask(p.path, { title, description, priority, tags, status, model: normalizeModel(model), enrich, decompose, scheduled_at: when, depends_on: deps, template })
     emit('task.upserted', { projectId: p.id, task })
     return { task }
   })
@@ -55,6 +94,11 @@ export default function taskRoutes(app, ctx) {
         if (!iso) return reply.code(400).send({ error: 'scheduled_at inválido (use uma data ISO)' })
         patch.scheduled_at = iso
       }
+    }
+    if (patch.depends_on !== undefined) {
+      const { deps, error } = validateDeps(p.path, req.params.taskId, patch.depends_on)
+      if (error) return reply.code(400).send({ error })
+      patch.depends_on = deps
     }
     const task = updateTask(p.path, req.params.taskId, patch)
     if (before.status !== task.status) {
@@ -127,5 +171,55 @@ export default function taskRoutes(app, ctx) {
     } catch (e) {
       return reply.code(500).send({ error: e.message })
     }
+  })
+
+  // ---- importar issues do GitHub como tasks ----
+  // Toda task importada leva a tag `gh:<n>`: é ela (e não o título) que identifica a
+  // issue de origem, então reimportar a mesma issue não duplica card.
+  app.get('/api/projects/:projectId/issues', (req, reply) => {
+    const p = withProject(ctx, req, reply); if (!p) return
+    let issues
+    try {
+      issues = listIssues(p.path, { state: req.query.state === 'all' ? 'all' : 'open' })
+    } catch (e) {
+      return reply.code(e.code ? 409 : 500).send({ error: e.message })
+    }
+    const imported = new Set(listTasks(p.path).flatMap(t => (t.tags || []).filter(tag => tag.startsWith('gh:'))))
+    return { issues: issues.map(i => ({ ...i, imported: imported.has(issueTag(i.number)) })) }
+  })
+
+  app.post('/api/projects/:projectId/issues/import', (req, reply) => {
+    const p = withProject(ctx, req, reply); if (!p) return
+    const numbers = [...new Set((req.body?.numbers || []).map(Number).filter(Number.isInteger))]
+    if (!numbers.length) return reply.code(400).send({ error: 'numbers é obrigatório (issues a importar)' })
+    const { priority, status } = req.body || {}
+
+    let issues
+    try {
+      issues = listIssues(p.path, { state: 'all' })
+    } catch (e) {
+      return reply.code(e.code ? 409 : 500).send({ error: e.message })
+    }
+    const byNumber = new Map(issues.map(i => [i.number, i]))
+    const existing = new Set(listTasks(p.path).flatMap(t => t.tags || []))
+
+    const created = []
+    const skipped = []
+    for (const n of numbers) {
+      const issue = byNumber.get(n)
+      if (!issue) { skipped.push({ number: n, reason: 'issue não encontrada' }); continue }
+      if (existing.has(issueTag(n))) { skipped.push({ number: n, reason: 'já importada' }); continue }
+      const task = createTask(p.path, {
+        title: issue.title,
+        description: issueDescription(issue),
+        priority: PRIORITIES.includes(priority) ? priority : 'medium',
+        tags: ['issue', issueTag(n)],
+        status: STATUSES.includes(status) ? status : 'backlog',
+      })
+      existing.add(issueTag(n))
+      created.push(task)
+      emit('task.upserted', { projectId: p.id, task })
+    }
+    return { created, skipped }
   })
 }

@@ -3,6 +3,7 @@ import { MODEL_IDS } from '../lib/models.js'
 
 export const MIN_TIMEOUT_MS = 60_000
 export const MAX_TIMEOUT_MS = 240 * 60_000
+export const PRIORITIES = ['low', 'medium', 'high', 'urgent']
 
 export const invalidModelMsg = (v) => `modelo inválido: "${v}". Use um destes: ${MODEL_IDS.join(', ')}`
 
