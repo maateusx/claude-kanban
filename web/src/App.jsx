@@ -112,7 +112,8 @@ export default function App() {
   const [projects, setProjects] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [{ tasks, pending, logs }, dispatch] = useReducer(reducer, initialState)
-  const [queue, setQueue] = useState({ actives: [], queue: [], maxConcurrency: 1 })
+  const [queue, setQueue] = useState({ actives: [], queue: [], maxConcurrency: 1, paused: false, pausedUntil: null })
+  const usage = useUsage()
   const [logTask, setLogTask] = useState(null)
   const [diffTask, setDiffTask] = useState(null)
   const [detailId, setDetailId] = useState(null)   // task aberta no drawer
@@ -238,7 +239,7 @@ export default function App() {
   return (
     <div className="flex h-full bg-bg text-ink">
       <Rail
-        projects={projects} selectedId={selectedId} onSelect={setSelectedId} queue={queue}
+        projects={projects} selectedId={selectedId} onSelect={setSelectedId} queue={queue} usage={usage}
         onAdd={() => setShowAddProject(true)}
         onSettings={() => project && setShowSettings(true)}
       />
@@ -304,7 +305,7 @@ export default function App() {
         ) : (
           <EmptyProjects onAdd={() => setShowAddProject(true)} />
         )}
-        <QueueBar queue={queue} tasks={tasks} projects={projects}
+        <QueueBar queue={queue} tasks={tasks} projects={projects} usage={usage}
           onOpen={(q, withLog) => {
             if (q.projectId && q.projectId !== selectedId) setSelectedId(q.projectId)
             setDetailId(q.taskId)
@@ -312,7 +313,9 @@ export default function App() {
           }}
           onKill={tid => api.kill(tid).then(() => api.queue().then(setQueue))}
           onReorder={ids => api.reorderQueue(ids).then(setQueue)}
-          onDequeue={dequeueTask} />
+          onDequeue={dequeueTask}
+          onPause={until => api.pauseRuns(until).then(setQueue).catch(e => alert(e.message))}
+          onResume={() => api.resumeRuns().then(setQueue).catch(e => alert(e.message))} />
       </main>
 
       {showAddProject && (
@@ -460,7 +463,7 @@ function HoverTip({ label, disabled, children, className }) {
   )
 }
 
-function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue }) {
+function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue, usage }) {
   const [expanded, toggle] = useRailExpanded()
   return (
     <aside style={{ width: expanded ? 'var(--rail-w-open)' : 'var(--rail-w)' }}
@@ -510,7 +513,7 @@ function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue }) {
         <span>⚙</span>
         {expanded && <span className="text-body">Configurações</span>}
       </button>
-      <UsageRail />
+      <UsageRail usage={usage} />
     </aside>
   )
 }
@@ -567,13 +570,10 @@ function usageBarColor(l) {
 const usagePct = l => Math.min(100, Math.max(0, l?.percent ?? 0))
 const usageName = l => `${USAGE_LABEL[l.kind] || l.kind}${l.model ? ` · ${l.model}` : ''}`
 
-// No rail cabe só o essencial: a sessão de 5h, que é a janela que de fato
-// limita o trabalho do dia. Os limites semanais vivem no popover.
-function UsageRail() {
+// Um único poll do uso no App: o rail mostra o consumo e a QueueBar usa o mesmo
+// dado para sugerir a pausa global quando o limite fica crítico.
+function useUsage() {
   const [usage, setUsage] = useState(null)
-  const [open, setOpen] = useState(false)
-  const ref = useRef(null)
-
   useEffect(() => {
     let alive = true
     const load = () => api.usage().then(d => { if (alive) setUsage(d) }).catch(() => {})
@@ -581,6 +581,21 @@ function UsageRail() {
     const t = setInterval(load, 60_000)
     return () => { alive = false; clearInterval(t) }
   }, [])
+  return usage
+}
+
+// Limite em situação crítica: o próprio backend do Claude marca severity != normal;
+// o corte por percentual cobre o caso de a API não mandar severity.
+export function criticalLimit(usage) {
+  if (!usage?.available) return null
+  return (usage.limits || []).find(l => usagePct(l) >= 90 || (l.severity && l.severity !== 'normal')) || null
+}
+
+// No rail cabe só o essencial: a sessão de 5h, que é a janela que de fato
+// limita o trabalho do dia. Os limites semanais vivem no popover.
+function UsageRail({ usage }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
 
   useEffect(() => {
     if (!open) return
@@ -1934,9 +1949,72 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
   )
 }
 
-function QueueBar({ queue, tasks, projects, onOpen, onKill, onReorder, onDequeue }) {
+// Pausa global (todos os projetos), sempre em modo "drenar": as sessões ativas
+// terminam, nada novo sai da fila. Com um limite do plano em situação crítica,
+// o botão vira uma sugestão explícita de pausar.
+function GlobalPauseButton({ queue, usage, onPause, onResume }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  const paused = !!queue.paused
+  const critical = criticalLimit(usage)
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+
+  const pause = until => { setOpen(false); onPause(until) }
+
+  if (paused) {
+    return (
+      <div className="flex shrink-0 items-center overflow-hidden rounded-[6px] border border-warning">
+        <span className="px-2.5 py-1 text-meta text-warning"
+          title="Nada sai da fila; as sessões que já estavam rodando terminam normalmente.">
+          ⏸ Fila global pausada{queue.pausedUntil ? ` até ${fmtWhen(queue.pausedUntil)}` : ''}
+        </span>
+        <button onClick={onResume} title="Retomar a fila global agora"
+          className="border-l border-warning px-2 py-1 text-meta text-warning hover:bg-hover">Retomar</button>
+      </div>
+    )
+  }
+
+  const presets = [
+    { label: 'Pausar até eu retomar', at: () => null },
+    { label: 'Pausar por 1 hora', at: () => inHours(1) },
+    { label: 'Pausar por 4 horas', at: () => inHours(4) },
+    { label: 'Retomar amanhã às 9h', at: () => nextAt(9) },
+  ]
+
+  return (
+    <div className="relative shrink-0" ref={ref}>
+      <button onClick={() => setOpen(v => !v)}
+        title={critical
+          ? `${usageName(critical)} em ${usagePct(critical)}% — considere pausar a fila global.`
+          : 'Pausa global: nenhuma task de nenhum projeto sai da fila; as ativas terminam.'}
+        className={`rounded-[6px] border px-2.5 py-1 text-meta ${critical
+          ? 'border-danger text-danger hover:bg-hover'
+          : 'border-line text-ink-2 hover:bg-hover'}`}>
+        ⏸ {critical ? `Pausar tudo — uso em ${usagePct(critical)}%` : 'Pausar tudo'}
+      </button>
+      {open && (
+        <div className="absolute bottom-full left-0 z-30 mb-1 w-64 rounded-[8px] border border-line bg-bg py-1">
+          {presets.map(p => (
+            <button key={p.label} onClick={() => pause(p.at())}
+              className="block w-full px-3 py-1.5 text-left text-body text-ink-2 hover:bg-hover">{p.label}</button>
+          ))}
+          <p className="border-t border-line px-3 py-2 text-[10px] text-muted">
+            Modo drenar: as sessões em execução terminam, nada novo começa.
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function QueueBar({ queue, tasks, projects, usage, onOpen, onKill, onReorder, onDequeue, onPause, onResume }) {
   const items = queue.queue
-  if (!(queue.actives || []).length && items.length === 0) return null
   const label = q => {
     const t = tasks.find(x => x.id === q.taskId)
     const p = projects.find(x => x.id === q.projectId)
@@ -1951,6 +2029,7 @@ function QueueBar({ queue, tasks, projects, onOpen, onKill, onReorder, onDequeue
   }
   return (
     <footer className="flex items-center gap-2 overflow-x-auto border-t border-line px-4 py-2 text-meta">
+      <GlobalPauseButton queue={queue} usage={usage} onPause={onPause} onResume={onResume} />
       {(queue.actives || []).map(a => (
         <div key={a.taskId} className="flex shrink-0 items-center gap-2 rounded-[6px] bg-subtle px-3 py-1.5">
           <Dot className="animate-pulse bg-st-doing" />
