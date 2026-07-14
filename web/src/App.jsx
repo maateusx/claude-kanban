@@ -346,7 +346,7 @@ export default function App() {
                 <DragOverlay>
                   {activeId ? (
                     <CardBody task={tasks.find(t => t.id === activeId)} queue={queue} pending={pending}
-                      deps={depsBy.get(activeId)} dragging />
+                      deps={depsBy.get(activeId)} defaultModel={project.defaultModel} dragging />
                   ) : null}
                 </DragOverlay>
               </DndContext>
@@ -931,7 +931,7 @@ function SortMenu({ value, onChange }) {
   )
 }
 
-function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pending, sort, onSort, onArchiveAll, depsBy }) {
+function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pending, defaultModel, sort, onSort, onArchiveAll, depsBy }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key })
   const ordered = useMemo(() => sortTasks(tasks, sort), [tasks, sort])
   const [archiving, setArchiving] = useState(false)
@@ -964,7 +964,7 @@ function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pendi
       <div className="flex-1 space-y-3 overflow-y-auto px-3 pb-4">
         {ordered.map(t => (
           <Card key={t.id} task={t} queue={queue} onRun={onRun} onOpen={onOpen}
-            selected={t.id === selectedId} pending={pending} deps={depsBy?.get(t.id)} />
+            selected={t.id === selectedId} defaultModel={defaultModel} pending={pending} deps={depsBy?.get(t.id)} />
         ))}
         {tasks.length === 0 && (
           onAddTask ? (
@@ -992,7 +992,7 @@ function Card(props) {
   )
 }
 
-function CardBody({ task, queue, onRun, onOpen, selected, pending = [], deps = [], innerRef, handleProps, hidden, dragging }) {
+function CardBody({ task, queue, onRun, onOpen, selected, defaultModel, pending = [], deps = [], innerRef, handleProps, hidden, dragging }) {
   const waiting = deps.filter(d => !d.done)
   const running = queue.actives?.some(a => a.taskId === task.id)
   const queued = queue.queue?.some(q => q.taskId === task.id)
@@ -1039,7 +1039,9 @@ function CardBody({ task, queue, onRun, onOpen, selected, pending = [], deps = [
         )}
         {queued && <Chip className="text-info">na fila</Chip>}
         {task.decompose === true && <Chip title="Ao executar, esta task será quebrada em subtasks">✂ quebrar</Chip>}
-        {task.model && <Chip className="font-mono" title={modelLabel(task.model)}>{task.model}</Chip>}
+        {task.model && task.model !== defaultModel && (
+          <Chip className="font-mono" title={`${modelLabel(task.model)} — difere do default do projeto`}>{task.model}</Chip>
+        )}
       </div>
 
       <RunStrip task={task} running={running} openPending={openPending}
