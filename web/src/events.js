@@ -56,6 +56,46 @@ export function applyEvent(state, evt, currentProjectId) {
   }
 }
 
+// Traduz um evento do WS em notificações do sistema. Puro: o disparo em si mora
+// em notify.js. `ctx.tasks` só tem as tasks do projeto selecionado — para runs de
+// outros projetos o título da task não está carregado e caímos no id.
+// `ctx.seenPendingIds` são as pending-actions já notificadas; o App atualiza esse
+// conjunto depois de cada pending.updated.
+export function notificationsFor(evt, ctx) {
+  const { projects = [], tasks = [], seenPendingIds = new Set() } = ctx || {}
+  const projectName = projects.find(p => p.id === evt.projectId)?.name || 'claude-kanban'
+  const taskLabel = id => tasks.find(t => t.id === id)?.title || id
+
+  switch (evt.type) {
+    case 'run.finished': {
+      const body = evt.humanRequest
+        ? `⏸ Precisa de decisão humana: ${taskLabel(evt.taskId)}`
+        : evt.exitCode === 0
+          ? `✓ Concluída: ${taskLabel(evt.taskId)}`
+          : `✕ Falhou: ${taskLabel(evt.taskId)}`
+      return [{ key: `run.finished:${evt.taskId}`, title: projectName, body, projectId: evt.projectId, taskId: evt.taskId }]
+    }
+    case 'pending.updated':
+      return (evt.actions || [])
+        .filter(a => a.status === 'pending' && !seenPendingIds.has(a.id))
+        .map(a => ({
+          key: `pending:${a.id}`,
+          title: projectName,
+          body: `🔒 Ação bloqueada pelos guardrails: ${a.label}`,
+          projectId: evt.projectId,
+          taskId: a.taskId || null,
+        }))
+    default:
+      return []
+  }
+}
+
+// Ids das pending-actions de um evento pending.updated — o App usa para não
+// notificar duas vezes a mesma ação (o watcher reemite a lista inteira).
+export function pendingIds(evt) {
+  return (evt.actions || []).map(a => a.id)
+}
+
 // Reducer do App: envolve applyEvent e as escritas vindas das chamadas REST.
 export function reducer(state, action) {
   switch (action.type) {

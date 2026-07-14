@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback, useReducer } from 'react'
 import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors, useDroppable, useDraggable, closestCorners } from '@dnd-kit/core'
 import { api, connectWS } from './api.js'
-import { reducer, effectsFor, initialState } from './events.js'
+import { reducer, effectsFor, initialState, notificationsFor, pendingIds } from './events.js'
+import * as notifications from './notify.js'
 import { DiffDrawer } from './Diff.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
 import { MODELS, modelLabel } from './models.js'
@@ -127,14 +128,38 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [health, setHealth] = useState({ ok: true, claudeAvailable: true })
   const [activeId, setActiveId] = useState(null)
+  const [notifyOn, setNotifyOn] = useState(notifications.loadNotifyEnabled)
   const searchRef = useRef(null)
   const selectedIdRef = useRef(null)
   selectedIdRef.current = selectedId
+
+  // Refs para o handler do WS (que é montado uma vez) enxergar o estado atual
+  // sem reconectar a cada render.
+  const notifyRef = useRef(notifyOn)
+  notifyRef.current = notifyOn
+  const projectsRef = useRef(projects)
+  projectsRef.current = projects
+  const tasksRef = useRef(tasks)
+  tasksRef.current = tasks
+  // pending-actions já vistas + projetos já "semeados": o watcher reemite a lista
+  // inteira, então a primeira leitura de um projeto só registra os ids (senão o
+  // board notificaria tudo que já estava pendente ao abrir).
+  const seenPendingRef = useRef({ ids: new Set(), seeded: new Set() })
 
   const project = projects.find(p => p.id === selectedId) || null
 
   const setTasks = useCallback(ts => dispatch({ type: 'setTasks', tasks: ts }), [])
   const setPending = useCallback(p => dispatch({ type: 'setPending', pending: p }), [])
+
+  // Ligar o toggle pede a permissão do browser; se o usuário negar, o toggle
+  // volta para desligado (senão ficaria "ligado" sem nunca notificar).
+  const setNotifyEnabled = useCallback(async v => {
+    if (!v) { setNotifyOn(false); notifications.saveNotifyEnabled(false); return }
+    const perm = await notifications.ensurePermission()
+    const on = perm === 'granted'
+    setNotifyOn(on)
+    notifications.saveNotifyEnabled(on)
+  }, [])
 
   const refreshProjects = useCallback(() => api.projects().then(d => {
     setProjects(d.projects)
@@ -156,6 +181,26 @@ export default function App() {
       if (effect === 'projects') refreshProjects()
       if (effect === 'queue') api.queue().then(setQueue)
       if (effect === 'tasks') api.tasks(cur).then(d => setTasks(d.tasks))
+    }
+
+    const seen = seenPendingRef.current
+    const firstPending = evt.type === 'pending.updated' && !seen.seeded.has(evt.projectId)
+    if (notifyRef.current && !firstPending) {
+      const ns = notificationsFor(evt, {
+        projects: projectsRef.current,
+        tasks: tasksRef.current,
+        seenPendingIds: seen.ids,
+      })
+      for (const n of ns) {
+        notifications.notify(n, () => {
+          if (n.projectId) setSelectedId(n.projectId)
+          if (n.taskId) setDetailId(n.taskId)
+        })
+      }
+    }
+    if (evt.type === 'pending.updated') {
+      for (const id of pendingIds(evt)) seen.ids.add(id)
+      seen.seeded.add(evt.projectId)
     }
   }), [refreshProjects, setTasks])
 
@@ -348,6 +393,7 @@ export default function App() {
       {showSettings && project && (
         <SettingsModal project={project} onClose={() => setShowSettings(false)}
           queue={queue} onConcurrency={max => api.setConcurrency(max).then(setQueue)}
+          notifyOn={notifyOn} onNotify={setNotifyEnabled}
           onPatch={patch => api.patchProject(project.id, patch).then(refreshProjects)}
           onRemove={uninstall => {
             api.removeProject(project.id, uninstall).then(() => { setShowSettings(false); setSelectedId(null); refreshProjects() })
@@ -1763,7 +1809,7 @@ function ClaudeConfigModal({ project, onClose }) {
   )
 }
 
-function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurrency }) {
+function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurrency, notifyOn, onNotify }) {
   const [confirmRemove, setConfirmRemove] = useState(0)
   const g = project.git || {}
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
@@ -1837,6 +1883,8 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
             className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
           <span className="text-meta text-muted">entre 1 e 240 min. Vale a partir do próximo run.</span>
         </label>
+
+        <NotificationsSetting notifyOn={notifyOn} onNotify={onNotify} />
 
         <div className="rounded-[8px] border border-line p-3">
           <GitCheck label="Desmembrar tasks automaticamente"
@@ -1931,6 +1979,30 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
         </div>
       </div>
     </>
+  )
+}
+
+// Preferência global (localStorage), não por projeto — por isso mora aqui e não
+// no patch do projeto.
+function NotificationsSetting({ notifyOn, onNotify }) {
+  const [perm, setPerm] = useState(notifications.permission)
+  const supported = notifications.supported()
+  const toggle = async v => { await onNotify(v); setPerm(notifications.permission()) }
+  return (
+    <label className="flex items-start gap-3 rounded-[8px] border border-line p-3">
+      <input type="checkbox" checked={!!notifyOn} disabled={!supported || perm === 'denied'}
+        onChange={e => toggle(e.target.checked)} className="mt-0.5 accent-[var(--color-accent)]" />
+      <span>
+        <span className="font-medium">Notificações</span>
+        <span className="mt-1 block text-meta text-muted">
+          {!supported
+            ? 'Este navegador não suporta notificações do sistema.'
+            : perm === 'denied'
+              ? 'O navegador bloqueou as notificações deste site — libere nas permissões do site para ativar.'
+              : 'Avisa quando um run termina (sucesso, falha ou pedido de decisão humana) e quando uma ação é bloqueada pelos guardrails. Clicar na notificação abre a task. Vale para todos os projetos.'}
+        </span>
+      </span>
+    </label>
   )
 }
 
