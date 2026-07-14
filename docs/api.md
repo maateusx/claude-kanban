@@ -66,6 +66,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
   "priority": "medium",
   "tags": ["documentacao"],
   "model": null,
+  "depends_on": [],
   "scheduled_at": null,
   "created_at": "...",
   "updated_at": "...",
@@ -80,6 +81,10 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 ```
 
 `status` ∈ `backlog | todo | doing | done | archived` e é **derivado da pasta** do arquivo — a pasta vence o frontmatter em caso de divergência.
+
+`depends_on` (lista de ids de tasks) segura a task **na fila**: ela entra normalmente (respeitando prioridade), mas nenhum tick a inicia enquanto alguma dependência não estiver `done`/`archived` — ou registrada como concluída no ledger. Assim que a última dependência conclui, ela dispara no tick seguinte. Dependência apontando para um id inexistente é ignorada (um id morto travaria a fila para sempre). A decomposição encadeia as subtasks geradas em série, na ordem devolvida pelo modelo.
+
+**Human request/response.** Quando o agente termina com uma seção `## Human Request` preenchida, a task volta para `todo/` com a tag `human-request` e fica fora do auto-pilot. O humano responde pelo drawer (`POST .../human-response`), que grava a resposta em `## Human Response` e enfileira a task. No início do run seguinte, o runner **consome** o par: tira as duas seções do corpo, arquiva-as em `## Histórico de Human Requests` e — se a task tem `run.session_id` — invoca `claude --resume <session_id>` passando só a resposta como prompt, continuando a sessão anterior em vez de recomeçar do zero. Se o resume falhar (sessão expirada, id desconhecido), o runner cai automaticamente no run normal com o prompt completo (a pergunta e a resposta vão dentro dele) e registra o motivo em `## Log de erros`.
 
 `scheduled_at` (ISO ou `null`) agenda a task: quando o horário chega, o servidor a enfileira sozinho — mesmo com o auto-pilot desligado — e zera o campo. Só vale para tasks em `backlog`/`todo` e sem a tag `blocked`; enquanto o horário está no futuro, o auto-pilot **não** enfileira a task. A resolução é a do ticker (20s), então o disparo pode atrasar até esse tanto — nunca adiantar.
 
@@ -124,11 +129,12 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | Método | Path | Body | Resposta |
 | --- | --- | --- | --- |
 | `GET` | `/api/projects/:projectId/tasks` | — | `{ tasks: [task] }` |
-| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model?, enrich?, decompose?, scheduled_at? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. **400** se `scheduled_at` não é uma data ISO válida. `model` (aqui, no PATCH da task e no `defaultModel` do projeto) tem que ser o **slug exato** de um modelo do catálogo (`server/src/lib/models.js`): `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` — é ele que vai para `claude --model`. Apelidos legados (`opus`, `sonnet`…) são convertidos no slug; qualquer outro valor dá **400**. |
+| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model?, enrich?, decompose?, scheduled_at?, depends_on? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. **400** se `scheduled_at` não é uma data ISO válida. **400** se `depends_on` referencia uma task inexistente ou fecha um ciclo de dependências. `model` (aqui, no PATCH da task e no `defaultModel` do projeto) tem que ser o **slug exato** de um modelo do catálogo (`server/src/lib/models.js`): `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` — é ele que vai para `claude --model`. Apelidos legados (`opus`, `sonnet`…) são convertidos no slug; qualquer outro valor dá **400**. |
 | `GET` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }` — **404** se não existe. |
-| `PATCH` | `/api/projects/:projectId/tasks/:taskId` | subconjunto do frontmatter (`title`, `status`, `priority`, `tags`, `model`, `enrich`, `decompose`, `scheduled_at`, `run`, `body`…) | `{ task }`. Mudar `status` move o arquivo de pasta e emite `task.moved`. `scheduled_at`: ISO agenda, `null`/`""` desagenda, lixo dá **400**. |
+| `PATCH` | `/api/projects/:projectId/tasks/:taskId` | subconjunto do frontmatter (`title`, `status`, `priority`, `tags`, `model`, `enrich`, `decompose`, `scheduled_at`, `depends_on`, `run`, `body`…) | `{ task }`. Mudar `status` move o arquivo de pasta e emite `task.moved`. `scheduled_at`: ISO agenda, `null`/`""` desagenda, lixo dá **400**. `depends_on`: lista de ids (`[]` limpa); **400** para id inexistente, auto-dependência ou ciclo. |
 | `DELETE` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }`. **Não apaga o arquivo**: move para `archived/`. |
 | `POST` | `/api/projects/:projectId/tasks/:taskId/enrich` | `{ auto? }` | `{ enriched, reason, costUsd, task }`. Sessão headless read-only que reescreve a `## Descrição` (e possivelmente o título) para ficar mais clara e com contexto do código. Com `auto: true` o modelo só reescreve se julgar necessário (`enriched: false` caso contrário). **409** se a task está rodando ou o CLI `claude` não existe. |
+| `POST` | `/api/projects/:projectId/tasks/:taskId/human-response` | `{ response }` | `{ task, queue }`. Responde à seção `## Human Request` deixada pelo agente: grava a resposta na seção `## Human Response`, remove a tag `human-request` e enfileira a task. **400** com `response` vazio; **404** se a task não existe; **409** se ela já está rodando/na fila ou o CLI `claude` não existe. |
 | `GET` | `/api/projects/:projectId/tasks/:taskId/diff` | — | `{ diff }` — o patch unificado capturado ao fim do último run. **404** se a task não gerou diff. |
 
 ### Ações manuais (guardrails)
@@ -186,7 +192,7 @@ Cada mensagem é uma linha JSON no formato `{ "type": "<evento>", ...payload }`.
 | `task.moved` | `{ projectId, taskId, from, to }` | Mudança de status (pasta). `from`/`to` são status. Emitido antes do `task.upserted` correspondente. |
 | `task.removed` | `{ projectId, taskId }` | Arquivo da task sumiu do disco de verdade (não é um move). O watcher espera ~1s antes de concluir isso, para não confundir com `unlink`+`add` de um rename. |
 | `run.queued` | `{ projectId, taskId, position }` | Task entrou na fila. `position` é o índice no momento. |
-| `run.started` | `{ projectId, taskId, pid }` | Sessão `claude -p` iniciou. |
+| `run.started` | `{ projectId, taskId, pid, resumedFrom }` | Sessão `claude -p` iniciou. `resumedFrom` é o `session_id` continuado (`claude --resume`) quando o run está entregando uma resposta humana a uma sessão anterior; `null` num run normal. |
 | `run.log` | `{ projectId, taskId, event }` | Uma linha do `--output-format stream-json` da sessão. `event` é o objeto do próprio Claude Code (`assistant`, `user`, `result`…); linhas não-JSON viram `{ type: "raw", text }`. Este é o evento de alto volume. |
 | `run.finished` | `{ projectId, taskId, exitCode, humanRequest?, costUsd, durationMs, numTurns, sessionId }` | Sessão terminou (sucesso, erro ou timeout). `exitCode: 0` ⇒ task foi para `done/` e registrada no ledger — exceto se o agente deixou uma seção `## Human Request` preenchida: nesse caso `humanRequest: true`, a task volta para `todo/` com a tag `human-request` (fora do auto-pilot) e aguarda decisão do humano; qualquer outro valor ⇒ volta para `todo/` e o motivo é anexado ao "## Log de erros" da task. `exitCode: -1` também cobre falha ao preparar o workspace git. |
 | `run.killed` | `{ projectId, taskId }` | Sessão morta manualmente (`/api/run/kill`). A task volta para `todo/` e **não** re-entra sozinha na fila, mesmo com auto-run ligado. |

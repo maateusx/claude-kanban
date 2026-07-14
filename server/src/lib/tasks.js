@@ -47,6 +47,7 @@ export function serializeTask(task, body) {
     status: task.status,
     priority: task.priority || 'medium',
     tags: task.tags || [],
+    depends_on: normalizeDependsOn(task.depends_on),
     model: task.model || null,
     enrich: task.enrich ?? null,
     decompose: task.decompose ?? null,
@@ -56,6 +57,36 @@ export function serializeTask(task, body) {
     run: { ...DEFAULT_RUN, ...(task.run || {}) },
   }
   return matter.stringify(body ?? defaultBody(), fm)
+}
+
+// depends_on: lista de ids de tasks que precisam concluir antes desta rodar.
+// Aceita string solta (humano editando o .md na mão) e limpa duplicatas/vazios.
+export function normalizeDependsOn(value) {
+  const list = value == null ? [] : Array.isArray(value) ? value : [value]
+  const out = []
+  for (const v of list) {
+    const id = String(v ?? '').trim()
+    if (id && !out.includes(id)) out.push(id)
+  }
+  return out
+}
+
+// Detecta ciclo assumindo `deps` como as dependências de `taskId` (que pode ainda
+// não existir, no caso de um POST). Percorre o grafo a partir de cada dependência
+// procurando um caminho de volta para taskId.
+export function hasDependencyCycle(tasks, taskId, deps) {
+  const byId = new Map(tasks.map(t => [t.id, normalizeDependsOn(t.depends_on)]))
+  byId.set(taskId, normalizeDependsOn(deps))
+  const seen = new Set()
+  const stack = [...byId.get(taskId)]
+  while (stack.length) {
+    const id = stack.pop()
+    if (id === taskId) return true
+    if (seen.has(id)) continue
+    seen.add(id)
+    stack.push(...(byId.get(id) || []))
+  }
+  return false
 }
 
 export function parseTaskFile(filePath) {
@@ -107,6 +138,9 @@ export function loadTask(projectPath, filePath) {
   if (fm.scheduled_at instanceof Date) fm.scheduled_at = fm.scheduled_at.toISOString()
   if (fm.scheduled_at === undefined) fm.scheduled_at = null
 
+  const deps = normalizeDependsOn(fm.depends_on)
+  if (JSON.stringify(deps) !== JSON.stringify(fm.depends_on ?? [])) { fm.depends_on = deps; dirty = true }
+
   // Migra o apelido legado ("opus") para o slug oficial ("claude-opus-4-8");
   // apaga o que não for um modelo conhecido, para não quebrar o spawn.
   if (fm.model) {
@@ -126,10 +160,10 @@ export function findTask(projectPath, taskId) {
   return listTasks(projectPath).find(t => t.id === taskId) || null
 }
 
-export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, enrich = null, decompose = null, scheduled_at = null }) {
+export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, enrich = null, decompose = null, scheduled_at = null, depends_on = [] }) {
   if (!STATUSES.includes(status)) status = 'backlog'
   const now = new Date().toISOString()
-  const task = { id: newId(), title, status, priority, tags, model: normalizeModel(model), enrich, decompose, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
+  const task = { id: newId(), title, status, priority, tags, depends_on: normalizeDependsOn(depends_on), model: normalizeModel(model), enrich, decompose, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
   const dir = tasksDir(projectPath, status)
   fs.mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, taskFileName(task))
@@ -148,6 +182,7 @@ export function updateTask(projectPath, taskId, patch) {
   for (const k of ['title', 'priority', 'tags', 'status', 'model', 'enrich', 'decompose', 'scheduled_at']) {
     if (patch[k] !== undefined) fm[k] = patch[k]
   }
+  if (patch.depends_on !== undefined) fm.depends_on = normalizeDependsOn(patch.depends_on)
   if (patch.run) fm.run = { ...DEFAULT_RUN, ...fm.run, ...patch.run }
   fm.updated_at = new Date().toISOString()
 
@@ -189,6 +224,18 @@ export function replaceSection(body, header, text) {
   const next = /^##\s+/m.exec(rest)
   const tail = next ? rest.slice(next.index) : ''
   return `${body.slice(0, m.index)}## ${header}\n\n${text}\n\n${tail}`
+}
+
+// Remove a seção "## <header>" (cabeçalho e conteúdo) do corpo. Sem a seção,
+// devolve o corpo intacto.
+export function removeSection(body, header) {
+  const re = new RegExp(`^##\\s+${header}\\s*$`, 'im')
+  const m = re.exec(body || '')
+  if (!m) return body || ''
+  const rest = body.slice(m.index + m[0].length)
+  const next = /^##\s+/m.exec(rest)
+  const tail = next ? rest.slice(next.index) : ''
+  return `${body.slice(0, m.index)}${tail}`
 }
 
 export function appendToSection(projectPath, taskId, section, text) {

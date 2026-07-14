@@ -201,6 +201,19 @@ export default function App() {
   const pendingCount = pending.filter(a => a.status === 'pending').length
   const detail = tasks.find(t => t.id === detailId) || null
 
+  // depends_on resolvido: taskId -> [{ id, title, status, done }]. Uma dependência
+  // conta como cumprida quando está done/archived; id órfão (task apagada) some.
+  const depsBy = useMemo(() => {
+    const byId = new Map(tasks.map(t => [t.id, t]))
+    const map = new Map()
+    for (const t of tasks) {
+      const deps = (t.depends_on || []).map(id => byId.get(id)).filter(Boolean)
+        .map(d => ({ id: d.id, title: d.title, status: d.status, done: d.status === 'done' || d.status === 'archived' }))
+      if (deps.length) map.set(t.id, deps)
+    }
+    return map
+  }, [tasks])
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return tasks
@@ -270,7 +283,7 @@ export default function App() {
                 <div className="flex min-w-0 flex-1 overflow-x-auto">
                   {COLUMNS.filter(c => columns.includes(c.key)).map(col => (
                     <Column key={col.key} col={col} tasks={visible.filter(t => t.status === col.key)}
-                      queue={queue} onRun={runTask} onOpen={setDetailId} selectedId={detailId}
+                      queue={queue} onRun={runTask} onOpen={setDetailId} selectedId={detailId} depsBy={depsBy}
                       defaultModel={project.defaultModel} pending={pending}
                       sort={sorts[col.key] || DEFAULT_SORT} onSort={s => setSort(col.key, s)}
                       onAddTask={col.key !== 'archived' ? () => setNewTask({ status: col.key }) : null}
@@ -279,13 +292,15 @@ export default function App() {
                 </div>
                 <DragOverlay>
                   {activeId ? (
-                    <CardBody task={tasks.find(t => t.id === activeId)} queue={queue} pending={pending} dragging />
+                    <CardBody task={tasks.find(t => t.id === activeId)} queue={queue} pending={pending}
+                      deps={depsBy.get(activeId)} dragging />
                   ) : null}
                 </DragOverlay>
               </DndContext>
               {detail && (
                 <TaskDrawer task={detail} project={project} queue={queue}
                   pending={pending.filter(a => a.taskId === detail.id)}
+                  deps={depsBy.get(detail.id) || []}
                   onClose={() => setDetailId(null)}
                   onPatch={patch => patchTask(detail.id, patch)}
                   onRun={() => runTask(detail.id)}
@@ -295,6 +310,7 @@ export default function App() {
                   onDecompose={() => decomposeNow(detail.id)}
                   onKill={() => api.kill(detail.id)}
                   onLog={() => setLogTask(detail.id)}
+                  onAnswer={text => api.answerHumanRequest(project.id, detail.id, text)}
                   onDiff={() => setDiffTask(detail)}
                   onArchive={() => api.archiveTask(project.id, detail.id).then(() => setDetailId(null))}
                   onResolve={aid => api.resolvePending(project.id, aid).then(d => setPending(d.actions))} />
@@ -834,7 +850,7 @@ function SortMenu({ value, onChange }) {
   )
 }
 
-function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pending, sort, onSort, onArchiveAll }) {
+function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pending, sort, onSort, onArchiveAll, depsBy }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key })
   const ordered = useMemo(() => sortTasks(tasks, sort), [tasks, sort])
   const [archiving, setArchiving] = useState(false)
@@ -867,7 +883,7 @@ function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pendi
       <div className="flex-1 space-y-3 overflow-y-auto px-3 pb-4">
         {ordered.map(t => (
           <Card key={t.id} task={t} queue={queue} onRun={onRun} onOpen={onOpen}
-            selected={t.id === selectedId} pending={pending} />
+            selected={t.id === selectedId} pending={pending} deps={depsBy?.get(t.id)} />
         ))}
         {tasks.length === 0 && (
           onAddTask ? (
@@ -895,7 +911,8 @@ function Card(props) {
   )
 }
 
-function CardBody({ task, queue, onRun, onOpen, selected, pending = [], innerRef, handleProps, hidden, dragging }) {
+function CardBody({ task, queue, onRun, onOpen, selected, pending = [], deps = [], innerRef, handleProps, hidden, dragging }) {
+  const waiting = deps.filter(d => !d.done)
   const running = queue.actives?.some(a => a.taskId === task.id)
   const queued = queue.queue?.some(q => q.taskId === task.id)
   const desc = section(task.body, 'Descrição')
@@ -931,6 +948,12 @@ function CardBody({ task, queue, onRun, onOpen, selected, pending = [], innerRef
         {isFuture(task.scheduled_at) && (
           <Chip className="text-info" title={`Agendada para ${new Date(task.scheduled_at).toLocaleString('pt-BR')}`}>
             ⏱ {fmtWhen(task.scheduled_at)}
+          </Chip>
+        )}
+        {waiting.length > 0 && !running && (
+          <Chip className="text-warning"
+            title={`Só sai da fila quando concluir: ${waiting.map(d => `${d.id} — ${d.title}`).join(', ')}`}>
+            ⛓ aguardando {waiting.length} dependência{waiting.length > 1 ? 's' : ''}
           </Chip>
         )}
         {queued && <Chip className="text-info">na fila</Chip>}
@@ -1025,7 +1048,46 @@ function Section({ title, badge, action, children }) {
 
 const Empty = ({ children }) => <div className="text-body text-muted">{children}</div>
 
-function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, onDequeue, onDecompose, onKill, onLog, onDiff, onArchive, onResolve, onEnrich, enriching }) {
+// Resposta à "## Human Request" direto do drawer: grava a resposta na task e a
+// devolve para a fila. Havendo sessão anterior, o backend a retoma (--resume) em
+// vez de recomeçar do zero.
+function HumanResponseForm({ onSubmit, disabled, hasSession }) {
+  const [text, setText] = useState('')
+  const [sending, setSending] = useState(false)
+  const [error, setError] = useState(null)
+
+  const send = () => {
+    const answer = text.trim()
+    if (!answer || sending) return
+    setSending(true); setError(null)
+    Promise.resolve(onSubmit(answer))
+      .then(() => setText(''))
+      .catch(e => setError(e.message))
+      .finally(() => setSending(false))
+  }
+
+  return (
+    <div className="mt-2.5 space-y-2">
+      <textarea value={text} onChange={e => setText(e.target.value)} disabled={disabled || sending}
+        onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send() }}
+        placeholder="Sua resposta ao agente…"
+        className="h-24 w-full resize-none rounded-[6px] bg-subtle p-2 text-body outline-none disabled:opacity-40" />
+      {error && <div className="text-meta text-danger">{error}</div>}
+      <div className="flex items-center gap-2">
+        <Btn variant="primary" disabled={disabled || sending || !text.trim()} onClick={send}>
+          {sending ? 'Enviando…' : 'Responder e executar'}
+        </Btn>
+        <span className="text-meta text-muted">
+          {disabled ? 'A task já está na fila ou rodando.'
+            : hasSession ? 'Continua a sessão anterior (--resume), sem perder o contexto.'
+            : 'Sem sessão anterior: roda do zero, com a resposta no prompt.'}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch, onRun, onDequeue, onDecompose, onKill, onLog, onAnswer, onDiff, onArchive, onResolve, onEnrich, enriching }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(task.title)
   const [body, setBody] = useState(task.body ?? '')
@@ -1123,11 +1185,33 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
         <div className="mt-3 rounded-[8px] border border-warning p-3">
           <div className="text-meta font-semibold uppercase tracking-wide text-warning">Decisão humana necessária</div>
           <div className="mt-1.5 whitespace-pre-wrap text-body text-ink-2">{humanRequest}</div>
-          <div className="mt-2 text-meta text-muted">
-            Responda editando a "## Descrição" (ou removendo a seção "## Human Request") e execute de novo.
-          </div>
+          <HumanResponseForm
+            disabled={running || queued}
+            hasSession={!!run.session_id}
+            onSubmit={onAnswer} />
         </div>
       )}
+
+      <Section title="Dependências">
+        {deps.length === 0 ? <Empty>Esta task não depende de nenhuma outra.</Empty> : (
+          <div className="space-y-1.5">
+            {deps.map(d => (
+              <div key={d.id} className="flex items-center gap-2 rounded-[6px] border border-line p-2 text-body">
+                <Dot className={d.done ? 'bg-success' : 'bg-warning'} />
+                <span className="font-mono text-meta text-muted">{d.id}</span>
+                <span className="min-w-0 flex-1 truncate text-ink-2">{d.title}</span>
+                <span className="text-meta text-muted">{d.done ? 'cumprida' : d.status}</span>
+                <button title="Remover dependência"
+                  onClick={() => onPatch({ depends_on: deps.filter(x => x.id !== d.id).map(x => x.id) })}
+                  className="text-meta text-danger hover:underline">×</button>
+              </div>
+            ))}
+            <div className="text-meta text-muted">
+              A task fica na fila até todas concluírem — só então entra em execução.
+            </div>
+          </div>
+        )}
+      </Section>
 
       <Section title="Agendamento">
         <SchedulePicker
