@@ -238,6 +238,87 @@ export function captureDiff(cwd, startSha) {
   return diff + '\n'
 }
 
+// Erro de conflito de merge — o index.js traduz em 409 para a UI.
+export class MergeConflictError extends Error {
+  constructor(message) { super(message); this.name = 'MergeConflictError'; this.conflict = true }
+}
+
+// Merge da branch da task na branch base do projeto. Ação explícita do humano
+// (o guard.mjs bloqueia isso para a *sessão* do agente, não para o servidor).
+// O merge acontece no checkout principal: exige working tree limpo, troca para a
+// base, mergeia e volta para a branch em que o checkout estava. Em conflito, faz
+// `merge --abort` — o repo nunca fica sujo — e sobe MergeConflictError.
+export function mergeTaskBranch(project, branch, { noFF = true } = {}) {
+  const root = project.path
+  const base = gitSettings(project).baseBranch
+  if (!isGitRepo(root)) throw new Error('diretório não é um repositório git')
+  if (!branchExists(root, branch)) throw new Error(`branch "${branch}" não existe`)
+  if (branch === base) throw new Error(`a branch da task é a própria base ("${base}") — nada a mergear`)
+  if (isDirty(root)) throw new Error('o checkout do projeto tem mudanças não commitadas — commite ou guarde no stash antes de aprovar')
+  if (!branchExists(root, base)) throw new Error(`branch base "${base}" não existe no repositório`)
+
+  const original = currentBranch(root)
+  if (original !== base) git(root, 'checkout', base)
+  try {
+    const before = headSha(root)
+    try {
+      // O git põe os "CONFLICT (content): ..." no stdout, não no stderr — daí o
+      // execFileSync direto, para a UI receber a mensagem real do git.
+      execFileSync('git',
+        ['merge', ...(noFF ? ['--no-ff'] : ['--ff']), '-m', `Merge branch '${branch}' (claude-kanban)`, branch],
+        { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (e) {
+      const detail = [e.stdout, e.stderr].map(s => (s || '').toString().trim()).filter(Boolean).join('\n')
+      try { git(root, 'merge', '--abort') } catch {}
+      throw new MergeConflictError(detail || e.message)
+    }
+    const after = headSha(root)
+    let pushed = false
+    let pushError = null
+    if (gitSettings(project).autoPush && hasRemote(root)) {
+      try { git(root, 'push', 'origin', base); pushed = true } catch (e) { pushError = e.message }
+    }
+    return { base, branch, merged: before !== after, sha: after, pushed, pushError }
+  } finally {
+    // Devolve o checkout para onde o humano estava — o merge não deve sequestrar a branch atual.
+    if (original !== base && branchExists(root, original)) { try { git(root, 'checkout', original) } catch {} }
+  }
+}
+
+// Descarta o trabalho da task: apaga a branch local (e o worktree, se sobrou).
+// A branch remota NÃO é apagada — remover coisa do remote continua sendo ação humana.
+export function deleteTaskBranch(project, branch) {
+  const root = project.path
+  const base = gitSettings(project).baseBranch
+  if (!isGitRepo(root)) throw new Error('diretório não é um repositório git')
+  if (branch === base) throw new Error(`recusando apagar a branch base ("${base}")`)
+  if (!branchExists(root, branch)) return { deleted: false }
+
+  // A branch pode estar checada no checkout principal ou presa em um worktree órfão.
+  if (currentBranch(root) === branch) {
+    if (isDirty(root)) throw new Error('o checkout do projeto está na branch da task e com mudanças não commitadas')
+    git(root, 'checkout', base)
+  }
+  for (const wt of listWorktreesForBranch(root, branch)) {
+    try { git(root, 'worktree', 'remove', '--force', wt) } catch { fs.rmSync(wt, { recursive: true, force: true }) }
+  }
+  try { git(root, 'worktree', 'prune') } catch {}
+  git(root, 'branch', '-D', branch)
+  return { deleted: true }
+}
+
+// Diretórios de worktree que têm `branch` checada (git worktree list --porcelain).
+function listWorktreesForBranch(root, branch) {
+  let out = ''
+  try { out = git(root, 'worktree', 'list', '--porcelain') } catch { return [] }
+  const dirs = []
+  let cur = null
+  for (const line of out.split('\n')) {
+    if (line.startsWith('worktree ')) cur = line.slice('worktree '.length)
+    else if (line === `branch refs/heads/${branch}` && cur) dirs.push(cur)
+  }
+  return dirs.filter(d => path.resolve(d) !== path.resolve(root))
+}
 // PR aberta pela sessão (autoPR) para a branch da task. Depende do `gh` estar
 // instalado e autenticado; sem ele, ou sem PR aberta, devolve null — a UI
 // simplesmente não mostra o botão. Precisa rodar antes do worktree ser removido.

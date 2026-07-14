@@ -400,7 +400,13 @@ export default function App() {
             .catch(e => alert(e.message))} />
       )}
       {diffTask && project && (
-        <DiffDrawer projectId={project.id} task={diffTask} onClose={() => setDiffTask(null)} />
+        <DiffDrawer projectId={project.id} task={diffTask} onClose={() => setDiffTask(null)}
+          onResolved={(kind, res) => {
+            setDiffTask(null)
+            if (kind === 'approve' && res.pushError) alert(`Merge feito, mas o push falhou:\n${res.pushError}`)
+            api.tasks(project.id).then(d => setTasks(d.tasks))
+            refreshProjects()
+          }} />
       )}
       {logTask && project && (
         <LogDrawer projectId={project.id} taskId={logTask} events={logs[logTask] || []} onClose={() => setLogTask(null)}
