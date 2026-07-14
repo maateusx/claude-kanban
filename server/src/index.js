@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { nanoid } from 'nanoid'
 import {
-  HOME_DIR, LOCK_FILE, loadProjects, saveProjects, diffFile,
+  HOME_DIR, LOCK_FILE, STATUSES, loadProjects, saveProjects, diffFile,
 } from './lib/paths.js'
 import {
   listTasks, findTask, createTask, updateTask, reconcileProject,
@@ -18,6 +18,7 @@ import { watchProject } from './lib/watcher.js'
 import { Runner } from './lib/runner.js'
 import { analyzeProject, SUGGESTION_TYPES } from './lib/analyzer.js'
 import { enrichTask } from './lib/enricher.js'
+import { listIssues, issueTag, issueDescription } from './lib/github.js'
 import { replaceSection } from './lib/tasks.js'
 import { DevServers } from './lib/devservers.js'
 import { DEFAULT_GIT, gitSettings, projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty } from './lib/git.js'
@@ -28,6 +29,7 @@ import { Scheduler, parseWhen, isFuture } from './lib/scheduler.js'
 const PORT = Number(process.env.PORT || 4400)
 const MIN_TIMEOUT_MS = 60_000
 const MAX_TIMEOUT_MS = 240 * 60_000
+const PRIORITIES = ['low', 'medium', 'high', 'urgent']
 
 const invalidModelMsg = (v) => `modelo inválido: "${v}". Use um destes: ${MODEL_IDS.join(', ')}`
 
@@ -418,6 +420,56 @@ app.post('/api/projects/:projectId/analyze', async (req, reply) => {
   } catch (e) {
     return reply.code(500).send({ error: e.message })
   }
+})
+
+// ---- importar issues do GitHub como tasks ----
+// Toda task importada leva a tag `gh:<n>`: é ela (e não o título) que identifica a
+// issue de origem, então reimportar a mesma issue não duplica card.
+app.get('/api/projects/:projectId/issues', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  let issues
+  try {
+    issues = listIssues(p.path, { state: req.query.state === 'all' ? 'all' : 'open' })
+  } catch (e) {
+    return reply.code(e.code ? 409 : 500).send({ error: e.message })
+  }
+  const imported = new Set(listTasks(p.path).flatMap(t => (t.tags || []).filter(tag => tag.startsWith('gh:'))))
+  return { issues: issues.map(i => ({ ...i, imported: imported.has(issueTag(i.number)) })) }
+})
+
+app.post('/api/projects/:projectId/issues/import', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  const numbers = [...new Set((req.body?.numbers || []).map(Number).filter(Number.isInteger))]
+  if (!numbers.length) return reply.code(400).send({ error: 'numbers é obrigatório (issues a importar)' })
+  const { priority, status } = req.body || {}
+
+  let issues
+  try {
+    issues = listIssues(p.path, { state: 'all' })
+  } catch (e) {
+    return reply.code(e.code ? 409 : 500).send({ error: e.message })
+  }
+  const byNumber = new Map(issues.map(i => [i.number, i]))
+  const existing = new Set(listTasks(p.path).flatMap(t => t.tags || []))
+
+  const created = []
+  const skipped = []
+  for (const n of numbers) {
+    const issue = byNumber.get(n)
+    if (!issue) { skipped.push({ number: n, reason: 'issue não encontrada' }); continue }
+    if (existing.has(issueTag(n))) { skipped.push({ number: n, reason: 'já importada' }); continue }
+    const task = createTask(p.path, {
+      title: issue.title,
+      description: issueDescription(issue),
+      priority: PRIORITIES.includes(priority) ? priority : 'medium',
+      tags: ['issue', issueTag(n)],
+      status: STATUSES.includes(status) ? status : 'backlog',
+    })
+    existing.add(issueTag(n))
+    created.push(task)
+    emit('task.upserted', { projectId: p.id, task })
+  }
+  return { created, skipped }
 })
 
 // ---- enriquecer/reescrever a descrição de uma task (sob demanda) ----

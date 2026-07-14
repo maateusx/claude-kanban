@@ -120,6 +120,7 @@ export default function App() {
   const [showPending, setShowPending] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showSuggest, setShowSuggest] = useState(false)
+  const [showIssues, setShowIssues] = useState(false)
   const [showClaudeConfig, setShowClaudeConfig] = useState(false)
   const [showAddProject, setShowAddProject] = useState(false)
   const [view, setView] = useState('todas')
@@ -257,6 +258,7 @@ export default function App() {
               onNewTask={() => setNewTask({ status: 'backlog' })}
               onPending={() => setShowPending(true)}
               onSuggest={() => setShowSuggest(true)}
+              onImportIssues={() => setShowIssues(true)}
               onClaudeConfig={() => setShowClaudeConfig(true)}
               onSettings={() => setShowSettings(true)}
               onRerun={() => api.rebootstrap(project.id).then(refreshProjects)}
@@ -337,6 +339,10 @@ export default function App() {
       {showSuggest && project && (
         <SuggestModal project={project} onClose={() => setShowSuggest(false)}
           onCreated={() => { setShowSuggest(false); api.tasks(project.id).then(d => setTasks(d.tasks)) }} />
+      )}
+      {showIssues && project && (
+        <ImportIssuesModal project={project} onClose={() => setShowIssues(false)}
+          onImported={() => { setShowIssues(false); api.tasks(project.id).then(d => setTasks(d.tasks)) }} />
       )}
       {showPending && project && (
         <PendingPanel actions={pending} onClose={() => setShowPending(false)}
@@ -641,7 +647,7 @@ function UsageRail() {
 /* ------------------------------------------------------------------- header */
 
 function BoardHeader({ project, health, view, onView, query, onQuery, searchRef, pendingCount,
-  onNewTask, onPending, onSuggest, onClaudeConfig, onSettings, onRerun, onAutoRun, onChanged }) {
+  onNewTask, onPending, onSuggest, onImportIssues, onClaudeConfig, onSettings, onRerun, onAutoRun, onChanged }) {
   return (
     <header className="border-b border-line px-4 py-3">
       <div className="flex items-center gap-2">
@@ -656,6 +662,7 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
           { label: 'Config do Claude (.claude)', onClick: onClaudeConfig },
           { label: 'Configurações do projeto', onClick: onSettings },
           { label: '✦ Sugerir tasks com o Claude', onClick: onSuggest, disabled: !health.claudeAvailable },
+          { label: 'Importar issues do GitHub', onClick: onImportIssues },
         ]} />
       </div>
       <div className="mt-3 flex items-center gap-2">
@@ -1505,6 +1512,91 @@ function SuggestModal({ project, onClose, onCreated }) {
             <Btn variant="quiet" onClick={() => setPhase('pick')} disabled={phase === 'creating'}>← Refazer</Btn>
             <Btn variant="primary" onClick={create} disabled={!selectedCount || phase === 'creating'}>
               {phase === 'creating' ? 'criando…' : `Criar ${selectedCount} no Backlog`}
+            </Btn>
+          </div>
+        </div>
+      )}
+    </Modal>
+  )
+}
+
+const ISSUE_TAG = 'issue' // tag fixa em toda task importada do GitHub (a outra é gh:<n>)
+
+function ImportIssuesModal({ project, onClose, onImported }) {
+  const [issues, setIssues] = useState(null)        // null = carregando
+  const [selected, setSelected] = useState({})      // number -> bool
+  const [importing, setImporting] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    api.issues(project.id)
+      .then(d => {
+        setIssues(d.issues)
+        // Já importadas vêm desmarcadas: reimportar não duplica, mas também não faz nada.
+        setSelected(Object.fromEntries(d.issues.filter(i => !i.imported).map(i => [i.number, true])))
+      })
+      .catch(e => { setError(e.message); setIssues([]) })
+  }, [project.id])
+
+  const importable = (issues || []).filter(i => !i.imported)
+  const selectedNumbers = importable.filter(i => selected[i.number]).map(i => i.number)
+
+  const doImport = () => {
+    setImporting(true); setError(null)
+    api.importIssues(project.id, selectedNumbers)
+      .then(onImported)
+      .catch(e => { setError(e.message); setImporting(false) })
+  }
+
+  return (
+    <Modal onClose={importing ? () => {} : onClose} title={`Importar issues do GitHub — ${project.name}`}>
+      {error && <div className="mb-3 rounded-[6px] border border-line px-3 py-2 text-body text-danger">{error}</div>}
+
+      {issues === null ? (
+        <div className="flex flex-col items-center gap-3 py-10 text-body text-ink-2">
+          <span className="size-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          Buscando issues abertas com o <code className="font-mono">gh</code>…
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-center text-body text-ink-2">
+            <span>
+              {issues.length} issue(s) aberta(s) — as importadas entram no Backlog com as tags{' '}
+              <Chip>{ISSUE_TAG}</Chip> + <Chip>gh:&lt;n&gt;</Chip>
+            </span>
+            <div className="flex-1" />
+            {importable.length > 0 && (
+              <button onClick={() => setSelected(
+                Object.fromEntries(importable.map(i => [i.number, selectedNumbers.length < importable.length])))}
+                className="text-meta text-accent hover:underline">
+                {selectedNumbers.length < importable.length ? 'selecionar todas' : 'desmarcar todas'}
+              </button>
+            )}
+          </div>
+          <div className="max-h-[55vh] space-y-2 overflow-y-auto">
+            {issues.length === 0 && !error && <Empty>Nenhuma issue aberta neste repositório.</Empty>}
+            {issues.map(i => (
+              <label key={i.number}
+                className={`flex items-start gap-3 rounded-[8px] border p-3 text-body ${i.imported ? 'cursor-default border-line opacity-50' : `cursor-pointer ${selected[i.number] ? 'border-accent' : 'border-line opacity-60'}`}`}>
+                <input type="checkbox" checked={!!selected[i.number] && !i.imported} disabled={i.imported}
+                  className="mt-1 accent-[var(--color-accent)]"
+                  onChange={e => setSelected(sel => ({ ...sel, [i.number]: e.target.checked }))} />
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-meta text-muted">#{i.number}</span>
+                    <span className="font-medium">{i.title}</span>
+                    {i.imported && <Chip>já importada</Chip>}
+                    {i.labels.map(l => <Chip key={l}>{l}</Chip>)}
+                  </span>
+                  {i.body && <span className="mt-1 block line-clamp-3 whitespace-pre-wrap text-meta text-muted">{i.body}</span>}
+                </span>
+              </label>
+            ))}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Btn variant="quiet" onClick={onClose} disabled={importing}>Cancelar</Btn>
+            <Btn variant="primary" onClick={doImport} disabled={!selectedNumbers.length || importing}>
+              {importing ? 'importando…' : `Importar ${selectedNumbers.length} no Backlog`}
             </Btn>
           </div>
         </div>
