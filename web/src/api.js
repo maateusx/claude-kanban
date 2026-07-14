@@ -25,6 +25,7 @@ export const api = {
     if (!r.ok) { const e = new Error(b.error || r.statusText); e.canStash = b.canStash; throw e }
     return b
   }),
+  templates: pid => fetch(`/api/projects/${pid}/templates`).then(j),
   tasks: pid => fetch(`/api/projects/${pid}/tasks`).then(j),
   stats: (pid, days) => fetch(`/api/projects/${pid}/stats?days=${days ?? 30}`).then(j),
   addTask: (pid, data) => fetch(`/api/projects/${pid}/tasks`, opts(data)).then(j),

@@ -10,6 +10,7 @@ import {
 import {
   listTasks, findTask, createTask, updateTask, reconcileProject,
 } from './lib/tasks.js'
+import { listTemplates, findTemplate } from './lib/templates.js'
 import { sortTasks } from './lib/sort.js'
 import { bootstrapProject, bootstrapStatus, uninstallGuardrails } from './lib/bootstrap.js'
 import { listPendingActions, resolvePendingAction } from './lib/pending.js'
@@ -335,6 +336,11 @@ app.get('/api/projects/:projectId/tasks', (req, reply) => {
   return { tasks: listTasks(p.path) }
 })
 
+app.get('/api/projects/:projectId/templates', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  return { templates: listTemplates(p.path) }
+})
+
 // Custos/histórico: agrega os blocos `run` dos .md por dia/modelo/status.
 // ?days=0 (ou ausente de janela) = período inteiro.
 app.get('/api/projects/:projectId/stats', (req, reply) => {
@@ -346,12 +352,13 @@ app.get('/api/projects/:projectId/stats', (req, reply) => {
 
 app.post('/api/projects/:projectId/tasks', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
-  const { title, description, priority, tags, status, model, enrich, decompose, scheduled_at } = req.body || {}
+  const { title, description, priority, tags, status, model, enrich, decompose, scheduled_at, template } = req.body || {}
   if (!title) return reply.code(400).send({ error: 'title é obrigatório' })
   if (model && !normalizeModel(model)) return reply.code(400).send({ error: invalidModelMsg(model) })
+  if (template && !findTemplate(p.path, template)) return reply.code(400).send({ error: `template não encontrado: ${template}` })
   const when = scheduled_at ? parseWhen(scheduled_at) : null
   if (scheduled_at && !when) return reply.code(400).send({ error: 'scheduled_at inválido (use uma data ISO)' })
-  const task = createTask(p.path, { title, description, priority, tags, status, model: normalizeModel(model), enrich, decompose, scheduled_at: when })
+  const task = createTask(p.path, { title, description, priority, tags, status, model: normalizeModel(model), enrich, decompose, scheduled_at: when, template })
   emit('task.upserted', { projectId: p.id, task })
   return { task }
 })

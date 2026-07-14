@@ -4,6 +4,7 @@ import matter from 'gray-matter'
 import { customAlphabet } from 'nanoid'
 import { STATUSES, tasksDir } from './paths.js'
 import { normalizeModel } from './models.js'
+import { findTemplate, bodyFromTemplate } from './templates.js'
 
 export const newId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6)
 
@@ -127,15 +128,25 @@ export function findTask(projectPath, taskId) {
   return listTasks(projectPath).find(t => t.id === taskId) || null
 }
 
-export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, enrich = null, decompose = null, scheduled_at = null }) {
+export function createTask(projectPath, { title, description, priority, tags, status = 'backlog', model = null, enrich = null, decompose = null, scheduled_at = null, template = null }) {
   if (!STATUSES.includes(status)) status = 'backlog'
+  // O template dá o corpo e os defaults de prioridade/tags/modelo; o que veio
+  // explícito no request sempre vence.
+  const tpl = template ? findTemplate(projectPath, template) : null
   const now = new Date().toISOString()
-  const task = { id: newId(), title, status, priority, tags, model: normalizeModel(model), enrich, decompose, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN } }
+  const task = {
+    id: newId(), title, status,
+    priority: priority || tpl?.priority || 'medium',
+    tags: tags?.length ? tags : (tpl?.tags || []),
+    model: normalizeModel(model || tpl?.model || null),
+    enrich, decompose, scheduled_at, created_at: now, updated_at: now, run: { ...DEFAULT_RUN },
+  }
+  const body = tpl ? bodyFromTemplate(tpl, description) : defaultBody(description)
   const dir = tasksDir(projectPath, status)
   fs.mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, taskFileName(task))
   markSelfWrite(filePath)
-  fs.writeFileSync(filePath, serializeTask(task, defaultBody(description)))
+  fs.writeFileSync(filePath, serializeTask(task, body))
   return loadTask(projectPath, filePath)
 }
 
