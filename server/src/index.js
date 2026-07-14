@@ -1,6 +1,3 @@
-import Fastify from 'fastify'
-import cors from '@fastify/cors'
-import websocket from '@fastify/websocket'
 import fs from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { nanoid } from 'nanoid'
@@ -13,9 +10,6 @@ import {
 } from './lib/tasks.js'
 import { listTemplates, findTemplate } from './lib/templates.js'
 import { sortTasks } from './lib/sort.js'
-import { bootstrapProject, bootstrapStatus, uninstallGuardrails } from './lib/bootstrap.js'
-import { listPendingActions, resolvePendingAction } from './lib/pending.js'
-import { listConfigFiles, readConfigFile, writeConfigFile } from './lib/claudeConfig.js'
 import { watchProject } from './lib/watcher.js'
 import { Runner, DEFAULT_RETRY, retrySettings } from './lib/runner.js'
 import { analyzeProject, SUGGESTION_TYPES } from './lib/analyzer.js'
@@ -28,6 +22,7 @@ import { getUsage } from './lib/usage.js'
 import { computeStats } from './lib/stats.js'
 import { MODEL_IDS, normalizeModel } from './lib/models.js'
 import { Scheduler, parseWhen, isFuture } from './lib/scheduler.js'
+import { buildApp } from './app.js'
 
 const PORT = Number(process.env.PORT || 4400)
 const MIN_TIMEOUT_MS = 60_000
@@ -121,6 +116,11 @@ function startWatcher(project) {
   watchers.set(project.id, watchProject(project, emit))
 }
 
+function stopWatcher(projectId) {
+  watchers.get(projectId)?.close()
+  watchers.delete(projectId)
+}
+
 // ---- boot ----
 let claudeAvailable = true
 try { execFileSync('claude', ['--version'], { stdio: 'ignore' }) } catch { claudeAvailable = false }
@@ -137,7 +137,12 @@ for (const p of db.projects) autoEnqueue(p)
 scheduler.start()
 
 // ---- app ----
-const app = Fastify()
+const app = await buildApp({
+  db, runner, devServers, emit, sockets, bootstrapErrors,
+  claudeAvailable: () => claudeAvailable,
+  startWatcher, stopWatcher, autoEnqueue,
+})
+// const app = Fastify()
 await app.register(cors, { origin: true })
 await app.register(websocket)
 
