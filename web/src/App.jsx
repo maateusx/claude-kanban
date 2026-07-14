@@ -322,7 +322,7 @@ export default function App() {
             .catch(e => alert(e.message))} />
       )}
       {newTask && project && (
-        <TaskModal onClose={() => setNewTask(null)}
+        <TaskModal projectId={project.id} onClose={() => setNewTask(null)}
           onSave={data => api.addTask(project.id, { ...data, status: newTask.status })
             .then(() => { setNewTask(null); api.tasks(project.id).then(d => setTasks(d.tasks)) })
             .catch(e => alert(e.message))} />
@@ -1301,7 +1301,7 @@ function QueuePauseButton({ project, onChanged }) {
 
 /* -------------------------------------------------------------------- modais */
 
-function TaskModal({ onClose, onSave }) {
+function TaskModal({ projectId, onClose, onSave }) {
   const [title, setTitle] = useState('')
   const [priority, setPriority] = useState('medium')
   const [tags, setTags] = useState('')
@@ -1309,9 +1309,35 @@ function TaskModal({ onClose, onSave }) {
   const [decompose, setDecompose] = useState(false)
   const [description, setDescription] = useState('')
   const [when, setWhen] = useState('')
+  const [templates, setTemplates] = useState([])
+  const [template, setTemplate] = useState('')
+
+  useEffect(() => { api.templates(projectId).then(d => setTemplates(d.templates)).catch(() => setTemplates([])) }, [projectId])
+
+  // Trocar de template repõe prioridade/tags/descrição a partir dele; as demais
+  // seções do template (repro, critérios de aceite...) o backend monta no .md.
+  const pickTemplate = id => {
+    setTemplate(id)
+    const tpl = templates.find(t => t.id === id)
+    if (!tpl) return
+    if (tpl.priority) setPriority(tpl.priority)
+    setTags((tpl.tags || []).join(', '))
+    setDescription(section(tpl.body, 'Descrição'))
+  }
+
   return (
     <Modal onClose={onClose} title="Nova task">
       <div className="space-y-3">
+        {templates.length > 0 && (
+          <select value={template} onChange={e => pickTemplate(e.target.value)}
+            title="Template: pré-preenche corpo, tags e prioridade"
+            className="w-full rounded-[6px] border border-line px-2 py-2 text-body outline-none focus:border-accent">
+            <option value="">Sem template (descrição livre)</option>
+            {templates.map(t => (
+              <option key={t.id} value={t.id}>{t.title}{t.description ? ` — ${t.description}` : ''}</option>
+            ))}
+          </select>
+        )}
         <input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="Título"
           className="w-full rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
         <div className="flex gap-2">
@@ -1341,7 +1367,7 @@ function TaskModal({ onClose, onSave }) {
         <div className="flex justify-end gap-2">
           <Btn variant="quiet" onClick={onClose}>Cancelar</Btn>
           <Btn variant="primary" disabled={!title.trim()}
-            onClick={() => onSave({ title, priority, tags: splitTags(tags), model: model || null, decompose: decompose || null, description, scheduled_at: fromLocalInput(when) })}>
+            onClick={() => onSave({ title, priority, tags: splitTags(tags), model: model || null, decompose: decompose || null, description, scheduled_at: fromLocalInput(when), template: template || null })}>
 
             Criar task
           </Btn>
