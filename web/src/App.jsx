@@ -529,6 +529,7 @@ function QueueIndicator({ queue }) {
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
+const DEFAULT_RETRY = { maxAttempts: 3, backoffMinutes: 0 }
 
 const USAGE_LABEL = {
   session: 'Sessão (5h)',
@@ -1768,8 +1769,25 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
   const g = project.git || {}
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
   const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
+  const retry = project.retry || DEFAULT_RETRY
+  const [maxAttempts, setMaxAttempts] = useState(String(retry.maxAttempts))
+  const [backoffMin, setBackoffMin] = useState(String(retry.backoffMinutes))
   const maxConc = queue?.maxConcurrency || 1
   const patchGit = patch => onPatch({ git: patch })
+
+  // Campos inválidos voltam ao valor salvo em vez de virar patch — mesmo contrato
+  // do timeout, e evita mandar NaN para o backend.
+  const commitRetry = () => {
+    const a = Number(maxAttempts)
+    const b = Number(backoffMin)
+    const okA = Number.isInteger(a) && a >= 1 && a <= 10
+    const okB = Number.isFinite(b) && b >= 0 && b <= 1440
+    if (!okA) setMaxAttempts(String(retry.maxAttempts))
+    if (!okB) setBackoffMin(String(retry.backoffMinutes))
+    if (!okA || !okB) return
+    if (a === retry.maxAttempts && b === retry.backoffMinutes) return
+    onPatch({ retry: { maxAttempts: a, backoffMinutes: b } })
+  }
 
   const commitTimeout = () => {
     const min = Number(timeoutMin)
@@ -1837,6 +1855,30 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
             className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
           <span className="text-meta text-muted">entre 1 e 240 min. Vale a partir do próximo run.</span>
         </label>
+
+        <div className="flex items-start gap-3">
+          <span className="mt-1">Retentativas</span>
+          <span className="flex-1">
+            <span className="flex items-center gap-2">
+              <input type="number" min={1} max={10} value={maxAttempts}
+                onChange={e => setMaxAttempts(e.target.value)}
+                onBlur={commitRetry}
+                onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+                className="w-16 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
+              <span className="text-meta text-muted">tentativas antes de marcar <code>blocked</code></span>
+              <input type="number" min={0} max={1440} value={backoffMin}
+                onChange={e => setBackoffMin(e.target.value)}
+                onBlur={commitRetry}
+                onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+                className="w-16 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
+              <span className="text-meta text-muted">min de espera entre elas</span>
+            </span>
+            <span className="mt-1 block text-meta text-muted">
+              Com backoff maior que zero e auto-pilot ligado, uma task que falha é reagendada para daqui a
+              N minutos em vez de voltar imediatamente para a fila. 0 = volta no próximo tick (comportamento default).
+            </span>
+          </span>
+        </div>
 
         <div className="rounded-[8px] border border-line p-3">
           <GitCheck label="Desmembrar tasks automaticamente"
