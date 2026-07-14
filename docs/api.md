@@ -72,12 +72,15 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
   "run": {
     "session_id": null, "started_at": "...", "completed_at": null,
     "exit_code": null, "cost_usd": null, "duration_ms": null,
-    "num_turns": null, "attempts": 1, "has_diff": false, "branch": "kanban/a472lb"
+    "num_turns": null, "attempts": 1, "has_diff": false, "branch": "kanban/a472lb",
+    "pr": { "url": "https://github.com/org/repo/pull/12", "number": 12, "state": "OPEN" }
   },
   "body": "## Descrição\n…",
   "filePath": "/abs/.claude/claude-kanban/tasks/doing/documentar-a-api--a472lb.md"
 }
 ```
+
+`run.pr` é a pull request aberta pela sessão quando o projeto tem `git.autoPR` ligado: ao terminar um run com `exit_code: 0` e `autoPush`, o servidor pergunta ao `gh` (`gh pr view <branch> --json url,number,state`) qual é a PR da branch da task e grava `{ url, number, state }` no frontmatter. Sem `gh` instalado/autenticado, ou sem PR aberta, o campo fica `null` e a UI não mostra o botão "Ver PR".
 
 `status` ∈ `backlog | todo | doing | done | archived` e é **derivado da pasta** do arquivo — a pasta vence o frontmatter em caso de divergência.
 
@@ -188,7 +191,7 @@ Cada mensagem é uma linha JSON no formato `{ "type": "<evento>", ...payload }`.
 | `run.queued` | `{ projectId, taskId, position }` | Task entrou na fila. `position` é o índice no momento. |
 | `run.started` | `{ projectId, taskId, pid }` | Sessão `claude -p` iniciou. |
 | `run.log` | `{ projectId, taskId, event }` | Uma linha do `--output-format stream-json` da sessão. `event` é o objeto do próprio Claude Code (`assistant`, `user`, `result`…); linhas não-JSON viram `{ type: "raw", text }`. Este é o evento de alto volume. |
-| `run.finished` | `{ projectId, taskId, exitCode, humanRequest?, costUsd, durationMs, numTurns, sessionId }` | Sessão terminou (sucesso, erro ou timeout). `exitCode: 0` ⇒ task foi para `done/` e registrada no ledger — exceto se o agente deixou uma seção `## Human Request` preenchida: nesse caso `humanRequest: true`, a task volta para `todo/` com a tag `human-request` (fora do auto-pilot) e aguarda decisão do humano; qualquer outro valor ⇒ volta para `todo/` e o motivo é anexado ao "## Log de erros" da task. `exitCode: -1` também cobre falha ao preparar o workspace git. |
+| `run.finished` | `{ projectId, taskId, exitCode, humanRequest?, costUsd, durationMs, numTurns, sessionId, pr? }` | Sessão terminou (sucesso, erro ou timeout). `exitCode: 0` ⇒ task foi para `done/` e registrada no ledger — exceto se o agente deixou uma seção `## Human Request` preenchida: nesse caso `humanRequest: true`, a task volta para `todo/` com a tag `human-request` (fora do auto-pilot) e aguarda decisão do humano; qualquer outro valor ⇒ volta para `todo/` e o motivo é anexado ao "## Log de erros" da task. `exitCode: -1` também cobre falha ao preparar o workspace git. `pr` é `{ url, number, state }` da PR aberta pela sessão (`autoPR`), ou `null` — o mesmo valor gravado em `run.pr` no frontmatter. |
 | `run.killed` | `{ projectId, taskId }` | Sessão morta manualmente (`/api/run/kill`). A task volta para `todo/` e **não** re-entra sozinha na fila, mesmo com auto-run ligado. |
 | `run.dequeued` | `{ projectId, taskId }` | Task cancelada antes de começar (`/api/run/dequeue`): saiu da fila. Vem seguido de um `run.queue`. |
 | `run.queue` | `queueView` | A fila foi alterada por fora do fluxo normal (remoção de um projeto, cancelamento de um item da fila). |

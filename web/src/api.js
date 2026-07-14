@@ -25,7 +25,9 @@ export const api = {
     if (!r.ok) { const e = new Error(b.error || r.statusText); e.canStash = b.canStash; throw e }
     return b
   }),
+  templates: pid => fetch(`/api/projects/${pid}/templates`).then(j),
   tasks: pid => fetch(`/api/projects/${pid}/tasks`).then(j),
+  stats: (pid, days) => fetch(`/api/projects/${pid}/stats?days=${days ?? 30}`).then(j),
   addTask: (pid, data) => fetch(`/api/projects/${pid}/tasks`, opts(data)).then(j),
   patchTask: (pid, tid, patch) => fetch(`/api/projects/${pid}/tasks/${tid}`, { ...opts(patch), method: 'PATCH' }).then(j),
   archiveTask: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}`, { method: 'DELETE' }).then(j),
@@ -37,6 +39,8 @@ export const api = {
   enrichTask: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}/enrich`, opts({})).then(j),
   suggestionTypes: () => fetch('/api/suggestion-types').then(j),
   analyze: (pid, types) => fetch(`/api/projects/${pid}/analyze`, opts({ types })).then(j),
+  issues: pid => fetch(`/api/projects/${pid}/issues`).then(j),
+  importIssues: (pid, numbers) => fetch(`/api/projects/${pid}/issues/import`, opts({ numbers })).then(j),
   pending: pid => fetch(`/api/projects/${pid}/pending-actions`).then(j),
   resolvePending: (pid, aid) => fetch(`/api/projects/${pid}/pending-actions/${aid}/resolve`, opts({})).then(j),
   run: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}/run`, opts({})).then(j),
