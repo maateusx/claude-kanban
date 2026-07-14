@@ -1915,6 +1915,14 @@ function LogEvent({ event, debug }) {
       </div>
     )
   }
+  if (event.type === 'verify') {
+    return (
+      <div className={`rounded-[6px] p-2 ${event.ok ? 'bg-subtle text-success' : 'border-l-2 border-danger bg-subtle pl-2 text-danger'}`}>
+        <div>{event.ok ? '✓' : '✕'} verificação — <span className="font-mono">{event.command}</span> (exit {event.exitCode})</div>
+        {!event.ok && <pre className="mt-1 whitespace-pre-wrap break-all text-ink-2">{event.text}</pre>}
+      </div>
+    )
+  }
   if (event.type === 'system') return <div className="text-muted">[{event.subtype}] sessão {event.session_id?.slice(0, 8)}</div>
   return <div className={deny ? 'border-l-2 border-danger pl-2 text-danger' : 'text-muted'}>{JSON.stringify(event).slice(0, 200)}</div>
 }
@@ -2094,6 +2102,7 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
   const g = project.git || {}
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
   const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
+  const [verifyCommand, setVerifyCommand] = useState(project.verifyCommand || '')
   const retry = project.retry || DEFAULT_RETRY
   const [maxAttempts, setMaxAttempts] = useState(String(retry.maxAttempts))
   const [backoffMin, setBackoffMin] = useState(String(retry.backoffMinutes))
@@ -2181,6 +2190,20 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
           <span className="text-meta text-muted">entre 1 e 240 min. Vale a partir do próximo run.</span>
         </label>
 
+        <label className="flex items-start gap-3">
+          <span className="mt-1">Comando de verificação</span>
+          <span className="flex-1">
+            <input value={verifyCommand} onChange={e => setVerifyCommand(e.target.value)}
+              onBlur={() => onPatch({ verifyCommand })}
+              onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+              placeholder="npm test"
+              className="w-full rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
+            <span className="mt-1 block text-meta text-muted">
+              Rodado no worktree da task depois do run. Se falhar, a task volta para "A fazer" com a saída
+              no log de erros em vez de ir para "Concluído". Vazio: sem verificação.
+            </span>
+          </span>
+        </label>
         <div className="flex items-start gap-3">
           <span className="mt-1">Retentativas</span>
           <span className="flex-1">
