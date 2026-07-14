@@ -4,7 +4,7 @@ import path from 'node:path'
 import { loadState, saveState, diffFile, logFile } from './paths.js'
 import { findTask, updateTask, appendToSection, listTasks, createTask, getSection } from './tasks.js'
 import { decomposeTask } from './decomposer.js'
-import { prepareWorkspace, cleanupWorkspace, captureDiff, gitSettings, isGitRepo } from './git.js'
+import { prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo } from './git.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
 import { PRIORITY_RANK } from './sort.js'
 import { normalizeModel } from './models.js'
@@ -451,6 +451,16 @@ export class Runner {
       }
     } catch {}
 
+    // A sessão pode ter aberto uma PR (autoPR): o resultado só existe no log dela,
+    // então perguntamos ao `gh` qual é a PR da branch. Também antes do cleanup.
+    let pr = null
+    try {
+      const g = gitSettings(project)
+      if (exitCode === 0 && !a.killed && !a.timedOut && g.autoPush && a.workspace.branch) {
+        pr = capturePR(a.workspace.cwd, a.workspace.branch)
+      }
+    } catch {}
+
     // Traz o resultado escrito no worktree de volta ao projeto e remove o worktree
     // (a branch da task é preservada) — precisa acontecer antes dos updateTask abaixo.
     try { cleanupWorkspace(project, a.workspace, a.taskRelPath) } catch {}
@@ -458,6 +468,7 @@ export class Runner {
     const r = a.result || {}
     const runMeta = {
       has_diff: hasDiff,
+      pr,
       completed_at: new Date().toISOString(),
       exit_code: exitCode,
       session_id: r.session_id ?? null,
@@ -486,6 +497,7 @@ export class Runner {
         projectId: a.projectId, taskId: a.taskId, exitCode, humanRequest: true,
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
+        pr: runMeta.pr,
       })
     } else if (exitCode === 0 && !a.timedOut) {
       updateTask(project.path, a.taskId, { status: 'done', run: runMeta })
@@ -496,6 +508,7 @@ export class Runner {
         projectId: a.projectId, taskId: a.taskId, exitCode,
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
+        pr: runMeta.pr,
       })
     } else {
       const reason = a.timedOut

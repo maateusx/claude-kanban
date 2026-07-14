@@ -238,6 +238,20 @@ export function captureDiff(cwd, startSha) {
   return diff + '\n'
 }
 
+// PR aberta pela sessão (autoPR) para a branch da task. Depende do `gh` estar
+// instalado e autenticado; sem ele, ou sem PR aberta, devolve null — a UI
+// simplesmente não mostra o botão. Precisa rodar antes do worktree ser removido.
+export function capturePR(cwd, branch) {
+  if (!branch || !isGitRepo(cwd)) return null
+  try {
+    const out = execFileSync('gh', ['pr', 'view', branch, '--json', 'url,number,state'],
+      { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const pr = JSON.parse(out)
+    if (!pr?.url) return null
+    return { url: pr.url, number: pr.number ?? null, state: pr.state ?? null }
+  } catch { return null }
+}
+
 // Traz o arquivo da task de volta (o modelo edita a cópia do worktree) e remove o worktree.
 // A branch da task é preservada — os commits ficam acessíveis no repositório principal.
 export function cleanupWorkspace(project, workspace, taskRelPath) {
