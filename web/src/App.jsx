@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback, useReducer } from 'react'
 import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors, useDroppable, useDraggable, closestCorners } from '@dnd-kit/core'
 import { api, connectWS } from './api.js'
-import { reducer, effectsFor, initialState } from './events.js'
+import { reducer, effectsFor, initialState, notificationsFor, pendingIds } from './events.js'
+import * as notifications from './notify.js'
 import { DiffDrawer } from './Diff.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
 import { MODELS, modelLabel } from './models.js'
@@ -22,6 +23,8 @@ const VIEWS = [
   { key: 'todas', label: 'Todas', columns: ['backlog', 'todo', 'doing', 'done'] },
   { key: 'backlog', label: 'Backlog', columns: ['backlog'] },
   { key: 'arquivadas', label: 'Arquivadas', columns: ['archived'] },
+  // Não é um board: renderiza o painel de custos no lugar das colunas.
+  { key: 'custos', label: 'Custos', columns: [] },
 ]
 
 const PRIORITY = {
@@ -120,6 +123,7 @@ export default function App() {
   const [showPending, setShowPending] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showSuggest, setShowSuggest] = useState(false)
+  const [showIssues, setShowIssues] = useState(false)
   const [showClaudeConfig, setShowClaudeConfig] = useState(false)
   const [showAddProject, setShowAddProject] = useState(false)
   const [view, setView] = useState('todas')
@@ -127,14 +131,38 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [health, setHealth] = useState({ ok: true, claudeAvailable: true })
   const [activeId, setActiveId] = useState(null)
+  const [notifyOn, setNotifyOn] = useState(notifications.loadNotifyEnabled)
   const searchRef = useRef(null)
   const selectedIdRef = useRef(null)
   selectedIdRef.current = selectedId
+
+  // Refs para o handler do WS (que é montado uma vez) enxergar o estado atual
+  // sem reconectar a cada render.
+  const notifyRef = useRef(notifyOn)
+  notifyRef.current = notifyOn
+  const projectsRef = useRef(projects)
+  projectsRef.current = projects
+  const tasksRef = useRef(tasks)
+  tasksRef.current = tasks
+  // pending-actions já vistas + projetos já "semeados": o watcher reemite a lista
+  // inteira, então a primeira leitura de um projeto só registra os ids (senão o
+  // board notificaria tudo que já estava pendente ao abrir).
+  const seenPendingRef = useRef({ ids: new Set(), seeded: new Set() })
 
   const project = projects.find(p => p.id === selectedId) || null
 
   const setTasks = useCallback(ts => dispatch({ type: 'setTasks', tasks: ts }), [])
   const setPending = useCallback(p => dispatch({ type: 'setPending', pending: p }), [])
+
+  // Ligar o toggle pede a permissão do browser; se o usuário negar, o toggle
+  // volta para desligado (senão ficaria "ligado" sem nunca notificar).
+  const setNotifyEnabled = useCallback(async v => {
+    if (!v) { setNotifyOn(false); notifications.saveNotifyEnabled(false); return }
+    const perm = await notifications.ensurePermission()
+    const on = perm === 'granted'
+    setNotifyOn(on)
+    notifications.saveNotifyEnabled(on)
+  }, [])
 
   const refreshProjects = useCallback(() => api.projects().then(d => {
     setProjects(d.projects)
@@ -156,6 +184,26 @@ export default function App() {
       if (effect === 'projects') refreshProjects()
       if (effect === 'queue') api.queue().then(setQueue)
       if (effect === 'tasks') api.tasks(cur).then(d => setTasks(d.tasks))
+    }
+
+    const seen = seenPendingRef.current
+    const firstPending = evt.type === 'pending.updated' && !seen.seeded.has(evt.projectId)
+    if (notifyRef.current && !firstPending) {
+      const ns = notificationsFor(evt, {
+        projects: projectsRef.current,
+        tasks: tasksRef.current,
+        seenPendingIds: seen.ids,
+      })
+      for (const n of ns) {
+        notifications.notify(n, () => {
+          if (n.projectId) setSelectedId(n.projectId)
+          if (n.taskId) setDetailId(n.taskId)
+        })
+      }
+    }
+    if (evt.type === 'pending.updated') {
+      for (const id of pendingIds(evt)) seen.ids.add(id)
+      seen.seeded.add(evt.projectId)
     }
   }), [refreshProjects, setTasks])
 
@@ -257,6 +305,7 @@ export default function App() {
               onNewTask={() => setNewTask({ status: 'backlog' })}
               onPending={() => setShowPending(true)}
               onSuggest={() => setShowSuggest(true)}
+              onImportIssues={() => setShowIssues(true)}
               onClaudeConfig={() => setShowClaudeConfig(true)}
               onSettings={() => setShowSettings(true)}
               onRerun={() => api.rebootstrap(project.id).then(refreshProjects)}
@@ -264,6 +313,9 @@ export default function App() {
               onChanged={refreshProjects}
             />
             <div className="flex min-h-0 flex-1">
+              {view === 'custos' ? (
+                <CostsView project={project} tasks={tasks} onOpen={setDetailId} />
+              ) : (
               <DndContext sensors={sensors} collisionDetection={closestCorners}
                 onDragStart={({ active }) => setActiveId(active.id)}
                 onDragCancel={() => setActiveId(null)} onDragEnd={onDragEnd}>
@@ -283,6 +335,7 @@ export default function App() {
                   ) : null}
                 </DragOverlay>
               </DndContext>
+              )}
               {detail && (
                 <TaskDrawer task={detail} project={project} queue={queue}
                   pending={pending.filter(a => a.taskId === detail.id)}
@@ -338,6 +391,10 @@ export default function App() {
         <SuggestModal project={project} onClose={() => setShowSuggest(false)}
           onCreated={() => { setShowSuggest(false); api.tasks(project.id).then(d => setTasks(d.tasks)) }} />
       )}
+      {showIssues && project && (
+        <ImportIssuesModal project={project} onClose={() => setShowIssues(false)}
+          onImported={() => { setShowIssues(false); api.tasks(project.id).then(d => setTasks(d.tasks)) }} />
+      )}
       {showPending && project && (
         <PendingPanel actions={pending} onClose={() => setShowPending(false)}
           onResolve={aid => api.resolvePending(project.id, aid).then(d => setPending(d.actions))} />
@@ -348,6 +405,7 @@ export default function App() {
       {showSettings && project && (
         <SettingsModal project={project} onClose={() => setShowSettings(false)}
           queue={queue} onConcurrency={max => api.setConcurrency(max).then(setQueue)}
+          notifyOn={notifyOn} onNotify={setNotifyEnabled}
           onPatch={patch => api.patchProject(project.id, patch).then(refreshProjects)}
           onRemove={uninstall => {
             api.removeProject(project.id, uninstall).then(() => { setShowSettings(false); setSelectedId(null); refreshProjects() })
@@ -641,7 +699,7 @@ function UsageRail() {
 /* ------------------------------------------------------------------- header */
 
 function BoardHeader({ project, health, view, onView, query, onQuery, searchRef, pendingCount,
-  onNewTask, onPending, onSuggest, onClaudeConfig, onSettings, onRerun, onAutoRun, onChanged }) {
+  onNewTask, onPending, onSuggest, onImportIssues, onClaudeConfig, onSettings, onRerun, onAutoRun, onChanged }) {
   return (
     <header className="border-b border-line px-4 py-3">
       <div className="flex items-center gap-2">
@@ -656,6 +714,7 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
           { label: 'Config do Claude (.claude)', onClick: onClaudeConfig },
           { label: 'Configurações do projeto', onClick: onSettings },
           { label: '✦ Sugerir tasks com o Claude', onClick: onSuggest, disabled: !health.claudeAvailable },
+          { label: 'Importar issues do GitHub', onClick: onImportIssues },
         ]} />
       </div>
       <div className="mt-3 flex items-center gap-2">
@@ -990,6 +1049,13 @@ function RunStrip({ task, running, openPending, onRun }) {
       {run.branch && (
         <div className="mt-1 truncate font-mono text-[11px] text-muted">{run.branch}{run.has_diff ? ' · diff' : ''}</div>
       )}
+      {run.pr?.url && (
+        <a href={run.pr.url} target="_blank" rel="noreferrer"
+          onPointerDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}
+          className="mt-1.5 inline-block text-meta text-accent hover:underline">
+          Ver PR{run.pr.number ? ` #${run.pr.number}` : ''} ↗
+        </a>
+      )}
     </div>
   )
 }
@@ -1056,6 +1122,7 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           { label: 'Quebrar em subtasks agora', onClick: onDecompose, disabled: running || queued },
           { label: 'Ver log', onClick: onLog },
           { label: 'Ver diff', onClick: onDiff, disabled: !run.has_diff },
+          { label: 'Ver PR', onClick: () => window.open(run.pr.url, '_blank', 'noreferrer'), disabled: !run.pr?.url },
           { label: 'Arquivar', onClick: onArchive, danger: true, disabled: task.status === 'archived' },
         ]} />
         <button onClick={onClose} title="Fechar (esc)" className="rounded-[6px] px-2 py-1 text-muted hover:bg-hover hover:text-ink">✕</button>
@@ -1141,7 +1208,16 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           ? <button onClick={onKill} className="text-meta text-danger hover:underline">Matar sessão</button>
           : queued
             ? <button onClick={onDequeue} className="text-meta text-danger hover:underline">Cancelar (tirar da fila)</button>
-            : run.has_diff ? <button onClick={onDiff} className="text-meta text-accent hover:underline">Ver diff</button> : null}>
+            : (run.has_diff || run.pr?.url) ? (
+              <span className="flex items-center gap-2">
+                {run.pr?.url && (
+                  <a href={run.pr.url} target="_blank" rel="noreferrer" className="text-meta text-accent hover:underline">
+                    Ver PR{run.pr.number ? ` #${run.pr.number}` : ''} ↗
+                  </a>
+                )}
+                {run.has_diff && <button onClick={onDiff} className="text-meta text-accent hover:underline">Ver diff</button>}
+              </span>
+            ) : null}>
         {!run.started_at && !running ? (
           <Empty>Nenhuma execução ainda.</Empty>
         ) : (
@@ -1403,6 +1479,129 @@ function AddProjectModal({ onClose, onAdd }) {
   )
 }
 
+/* -------------------------------------------------------------------- custos */
+
+const PERIODS = [
+  { key: '7', label: '7 dias' },
+  { key: '30', label: '30 dias' },
+  { key: '0', label: 'Tudo' },
+]
+
+// Custos de sessão são centavos: 2 casas escondem a maior parte deles.
+export const fmtUsd = v => `$${Number(v || 0).toFixed(Number(v || 0) < 1 ? 3 : 2)}`
+export const fmtPct = v => v == null ? '—' : `${Math.round(v * 100)}%`
+const fmtDay = d => d.slice(8, 10) + '/' + d.slice(5, 7)
+
+function CostsView({ project, tasks, onOpen }) {
+  const [days, setDays] = useState('30')
+  const [stats, setStats] = useState(null)
+  const [error, setError] = useState(null)
+
+  // `tasks` muda quando o WebSocket entrega run.finished (o App refaz o fetch das
+  // tasks), então o painel se atualiza sozinho ao fim de cada execução.
+  useEffect(() => {
+    let alive = true
+    api.stats(project.id, days)
+      .then(d => { if (alive) { setStats(d); setError(null) } })
+      .catch(e => { if (alive) setError(e.message) })
+    return () => { alive = false }
+  }, [project.id, days, tasks])
+
+  if (error) return <div className="flex-1 p-6 text-body text-danger">{error}</div>
+  if (!stats) return <div className="flex-1 p-6 text-body text-muted">Carregando…</div>
+
+  const { totals, byDay, byModel, top } = stats
+  const maxDay = Math.max(...byDay.map(d => d.costUsd), 0)
+
+  return (
+    <div className="min-w-0 flex-1 overflow-y-auto p-6">
+      <div className="mb-4 flex items-center gap-2">
+        <Segmented value={days} onChange={setDays} options={PERIODS} />
+        <span className="text-meta text-muted">
+          {totals.runs} de {totals.tasks} task(s) já executaram
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Stat label="Custo total" value={fmtUsd(totals.costUsd)} />
+        <Stat label="Custo médio por task" value={fmtUsd(totals.avgCostUsd)} />
+        <Stat label="Taxa de sucesso" value={fmtPct(totals.successRate)}
+          hint={`${totals.successes} exit 0 / ${totals.attempts} tentativa(s)`} />
+        <Stat label="Tempo total" value={fmtDur(totals.durationMs) || '—'}
+          hint={`${totals.numTurns} turno(s)`} />
+      </div>
+
+      <Panel title="Custo por dia">
+        {byDay.length === 0 ? <Nothing /> : (
+          <div className="flex h-40 items-end gap-1.5">
+            {byDay.map(d => (
+              <div key={d.date} className="flex min-w-0 flex-1 flex-col items-center gap-1"
+                title={`${d.date} — ${fmtUsd(d.costUsd)} em ${d.runs} run(s)`}>
+                <div className="w-full rounded-t-[3px] bg-accent"
+                  style={{ height: `${maxDay ? Math.max(2, (d.costUsd / maxDay) * 120) : 2}px` }} />
+                <span className="truncate text-meta text-muted">{fmtDay(d.date)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      <Panel title="Custo por modelo">
+        {byModel.length === 0 ? <Nothing /> : (
+          <table className="w-full text-body">
+            <tbody>
+              {byModel.map(m => (
+                <tr key={m.model} className="border-b border-line last:border-0">
+                  <td className="py-1.5 font-mono text-meta">{m.model}</td>
+                  <td className="py-1.5 text-right text-meta text-muted">{m.runs} run(s)</td>
+                  <td className="py-1.5 text-right tabular-nums">{fmtUsd(m.costUsd)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+
+      <Panel title="Top 5 mais caras">
+        {top.length === 0 ? <Nothing /> : (
+          <table className="w-full text-body">
+            <tbody>
+              {top.map(t => (
+                <tr key={t.id} className="cursor-pointer border-b border-line last:border-0 hover:bg-hover"
+                  onClick={() => onOpen(t.id)}>
+                  <td className="max-w-0 truncate py-1.5 pr-2">{t.title}</td>
+                  <td className="py-1.5 text-right text-meta text-muted">{fmtDur(t.durationMs) || '—'}</td>
+                  <td className="py-1.5 text-right text-meta text-muted">
+                    {t.exitCode === 0 ? 'ok' : `exit ${t.exitCode ?? '?'}`}
+                  </td>
+                  <td className="py-1.5 pl-2 text-right tabular-nums">{fmtUsd(t.costUsd)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+    </div>
+  )
+}
+
+const Stat = ({ label, value, hint }) => (
+  <div className="rounded-[8px] border border-line p-3">
+    <div className="text-meta text-muted">{label}</div>
+    <div className="mt-1 text-title font-semibold tabular-nums">{value}</div>
+    {hint && <div className="mt-0.5 text-meta text-muted">{hint}</div>}
+  </div>
+)
+
+const Panel = ({ title, children }) => (
+  <section className="mt-5">
+    <h2 className="mb-2 text-body font-medium text-ink-2">{title}</h2>
+    <div className="rounded-[8px] border border-line p-3">{children}</div>
+  </section>
+)
+
+const Nothing = () => <div className="py-3 text-center text-meta text-muted">Nenhuma execução no período.</div>
+
 function EmptyProjects({ onAdd }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3">
@@ -1531,6 +1730,91 @@ function SuggestModal({ project, onClose, onCreated }) {
             <Btn variant="quiet" onClick={() => setPhase('pick')} disabled={phase === 'creating'}>← Refazer</Btn>
             <Btn variant="primary" onClick={create} disabled={!selectedCount || phase === 'creating'}>
               {phase === 'creating' ? 'criando…' : `Criar ${selectedCount} no Backlog`}
+            </Btn>
+          </div>
+        </div>
+      )}
+    </Modal>
+  )
+}
+
+const ISSUE_TAG = 'issue' // tag fixa em toda task importada do GitHub (a outra é gh:<n>)
+
+function ImportIssuesModal({ project, onClose, onImported }) {
+  const [issues, setIssues] = useState(null)        // null = carregando
+  const [selected, setSelected] = useState({})      // number -> bool
+  const [importing, setImporting] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    api.issues(project.id)
+      .then(d => {
+        setIssues(d.issues)
+        // Já importadas vêm desmarcadas: reimportar não duplica, mas também não faz nada.
+        setSelected(Object.fromEntries(d.issues.filter(i => !i.imported).map(i => [i.number, true])))
+      })
+      .catch(e => { setError(e.message); setIssues([]) })
+  }, [project.id])
+
+  const importable = (issues || []).filter(i => !i.imported)
+  const selectedNumbers = importable.filter(i => selected[i.number]).map(i => i.number)
+
+  const doImport = () => {
+    setImporting(true); setError(null)
+    api.importIssues(project.id, selectedNumbers)
+      .then(onImported)
+      .catch(e => { setError(e.message); setImporting(false) })
+  }
+
+  return (
+    <Modal onClose={importing ? () => {} : onClose} title={`Importar issues do GitHub — ${project.name}`}>
+      {error && <div className="mb-3 rounded-[6px] border border-line px-3 py-2 text-body text-danger">{error}</div>}
+
+      {issues === null ? (
+        <div className="flex flex-col items-center gap-3 py-10 text-body text-ink-2">
+          <span className="size-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          Buscando issues abertas com o <code className="font-mono">gh</code>…
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-center text-body text-ink-2">
+            <span>
+              {issues.length} issue(s) aberta(s) — as importadas entram no Backlog com as tags{' '}
+              <Chip>{ISSUE_TAG}</Chip> + <Chip>gh:&lt;n&gt;</Chip>
+            </span>
+            <div className="flex-1" />
+            {importable.length > 0 && (
+              <button onClick={() => setSelected(
+                Object.fromEntries(importable.map(i => [i.number, selectedNumbers.length < importable.length])))}
+                className="text-meta text-accent hover:underline">
+                {selectedNumbers.length < importable.length ? 'selecionar todas' : 'desmarcar todas'}
+              </button>
+            )}
+          </div>
+          <div className="max-h-[55vh] space-y-2 overflow-y-auto">
+            {issues.length === 0 && !error && <Empty>Nenhuma issue aberta neste repositório.</Empty>}
+            {issues.map(i => (
+              <label key={i.number}
+                className={`flex items-start gap-3 rounded-[8px] border p-3 text-body ${i.imported ? 'cursor-default border-line opacity-50' : `cursor-pointer ${selected[i.number] ? 'border-accent' : 'border-line opacity-60'}`}`}>
+                <input type="checkbox" checked={!!selected[i.number] && !i.imported} disabled={i.imported}
+                  className="mt-1 accent-[var(--color-accent)]"
+                  onChange={e => setSelected(sel => ({ ...sel, [i.number]: e.target.checked }))} />
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-meta text-muted">#{i.number}</span>
+                    <span className="font-medium">{i.title}</span>
+                    {i.imported && <Chip>já importada</Chip>}
+                    {i.labels.map(l => <Chip key={l}>{l}</Chip>)}
+                  </span>
+                  {i.body && <span className="mt-1 block line-clamp-3 whitespace-pre-wrap text-meta text-muted">{i.body}</span>}
+                </span>
+              </label>
+            ))}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Btn variant="quiet" onClick={onClose} disabled={importing}>Cancelar</Btn>
+            <Btn variant="primary" onClick={doImport} disabled={!selectedNumbers.length || importing}>
+              {importing ? 'importando…' : `Importar ${selectedNumbers.length} no Backlog`}
             </Btn>
           </div>
         </div>
@@ -1789,7 +2073,7 @@ function ClaudeConfigModal({ project, onClose }) {
   )
 }
 
-function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurrency }) {
+function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurrency, notifyOn, onNotify }) {
   const [confirmRemove, setConfirmRemove] = useState(0)
   const g = project.git || {}
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
@@ -1863,6 +2147,8 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
             className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
           <span className="text-meta text-muted">entre 1 e 240 min. Vale a partir do próximo run.</span>
         </label>
+
+        <NotificationsSetting notifyOn={notifyOn} onNotify={onNotify} />
 
         <div className="rounded-[8px] border border-line p-3">
           <GitCheck label="Desmembrar tasks automaticamente"
@@ -1957,6 +2243,30 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
         </div>
       </div>
     </>
+  )
+}
+
+// Preferência global (localStorage), não por projeto — por isso mora aqui e não
+// no patch do projeto.
+function NotificationsSetting({ notifyOn, onNotify }) {
+  const [perm, setPerm] = useState(notifications.permission)
+  const supported = notifications.supported()
+  const toggle = async v => { await onNotify(v); setPerm(notifications.permission()) }
+  return (
+    <label className="flex items-start gap-3 rounded-[8px] border border-line p-3">
+      <input type="checkbox" checked={!!notifyOn} disabled={!supported || perm === 'denied'}
+        onChange={e => toggle(e.target.checked)} className="mt-0.5 accent-[var(--color-accent)]" />
+      <span>
+        <span className="font-medium">Notificações</span>
+        <span className="mt-1 block text-meta text-muted">
+          {!supported
+            ? 'Este navegador não suporta notificações do sistema.'
+            : perm === 'denied'
+              ? 'O navegador bloqueou as notificações deste site — libere nas permissões do site para ativar.'
+              : 'Avisa quando um run termina (sucesso, falha ou pedido de decisão humana) e quando uma ação é bloqueada pelos guardrails. Clicar na notificação abre a task. Vale para todos os projetos.'}
+        </span>
+      </span>
+    </label>
   )
 }
 
