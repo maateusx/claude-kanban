@@ -52,10 +52,54 @@ export class Runner {
     const state = loadState()
     this.queue = state.queue || []  // [{ projectId, taskId }]
     this.maxConcurrency = Math.min(Math.max(state.maxConcurrency || 1, 1), MAX_CONCURRENCY)
+    // Pausa global (todos os projetos). Sempre "drenar": nada novo sai da fila,
+    // mas os runs já ativos seguem até o fim — pausar nunca mata sessão.
+    // paused=true com pausedUntil=null é pausa indefinida (até resume manual).
+    this.paused = !!state.paused
+    this.pausedUntil = state.pausedUntil || null
     this.actives = new Map()        // taskId -> { projectId, taskId, child, timer, ... }
   }
 
-  persist() { saveState({ queue: this.queue, maxConcurrency: this.maxConcurrency }) }
+  persist() {
+    saveState({
+      queue: this.queue,
+      maxConcurrency: this.maxConcurrency,
+      paused: this.paused,
+      pausedUntil: this.pausedUntil,
+    })
+  }
+
+  // until=null → pausa indefinida; until=ISO futuro → pausa que expira sozinha.
+  pause(until = null) {
+    this.paused = true
+    this.pausedUntil = until
+    this.persist()
+    this.emit('run.queue', this.getQueueView())
+    return this.getQueueView()
+  }
+
+  resume() {
+    this.paused = false
+    this.pausedUntil = null
+    this.persist()
+    this.emit('run.queue', this.getQueueView())
+    this.tick()
+    return this.getQueueView()
+  }
+
+  // Expira a pausa com prazo vencido no próprio check — assim a fila destrava no
+  // primeiro tick depois da hora, sem depender do ticker do scheduler.
+  isPaused(now = Date.now()) {
+    if (!this.paused) return false
+    if (this.pausedUntil && !isFuture(this.pausedUntil, now)) {
+      this.paused = false
+      this.pausedUntil = null
+      this.persist()
+      this.emit('run.queue', this.getQueueView())
+      return false
+    }
+    return true
+  }
 
   setConcurrency(n) {
     this.maxConcurrency = Math.min(Math.max(Number(n) || 1, 1), MAX_CONCURRENCY)
@@ -151,6 +195,8 @@ export class Runner {
       actives: [...this.actives.values()].map(a => ({ projectId: a.projectId, taskId: a.taskId })),
       queue: this.queue,
       maxConcurrency: this.maxConcurrency,
+      paused: this.paused,
+      pausedUntil: this.pausedUntil,
     }
   }
 
@@ -179,6 +225,7 @@ export class Runner {
   }
 
   tick() {
+    if (this.isPaused()) return
     while (this.actives.size < this.maxConcurrency && this.queue.length > 0) {
       const idx = this.queue.findIndex(q => this.eligible(q.projectId))
       if (idx === -1) return

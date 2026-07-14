@@ -634,6 +634,22 @@ app.post('/api/projects/:projectId/queue/resume', (req, reply) => {
   return { project: projectView(p) }
 })
 
+// ---- pausa global da fila (todos os projetos) ----
+// Sempre em modo "drenar": nada novo sai da fila, mas as sessões já ativas
+// terminam normalmente. Sem `until` a pausa é indefinida (até o resume).
+app.post('/api/run/pause', (req, reply) => {
+  const raw = req.body?.until
+  let until = null
+  if (raw) {
+    until = parseWhen(raw)
+    if (!until) return reply.code(400).send({ error: 'until inválido (use uma data ISO)' })
+    if (!isFuture(until)) return reply.code(400).send({ error: 'until precisa estar no futuro' })
+  }
+  return runner.pause(until)
+})
+
+app.post('/api/run/resume', () => runner.resume())
+
 app.post('/api/run/concurrency', req => {
   runner.setConcurrency(req.body?.max)
   return runner.getQueueView()
