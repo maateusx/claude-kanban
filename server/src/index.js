@@ -16,7 +16,7 @@ import { bootstrapProject, bootstrapStatus, uninstallGuardrails } from './lib/bo
 import { listPendingActions, resolvePendingAction } from './lib/pending.js'
 import { listConfigFiles, readConfigFile, writeConfigFile } from './lib/claudeConfig.js'
 import { watchProject } from './lib/watcher.js'
-import { Runner } from './lib/runner.js'
+import { Runner, DEFAULT_RETRY, retrySettings } from './lib/runner.js'
 import { analyzeProject, SUGGESTION_TYPES } from './lib/analyzer.js'
 import { enrichTask } from './lib/enricher.js'
 import { listIssues, issueTag, issueDescription } from './lib/github.js'
@@ -105,6 +105,7 @@ function projectView(p) {
   return {
     ...p,
     git: gitSettings(p),
+    retry: retrySettings(p),
     available,
     bootstrap: bootstrapErrors.has(p.id) ? 'failed' : (available ? bootstrapStatus(p.path) : 'unknown'),
     bootstrapError: bootstrapErrors.get(p.id) || null,
@@ -193,8 +194,26 @@ app.post('/api/projects', (req, reply) => {
 app.patch('/api/projects/:projectId', (req, reply) => {
   const p = getProject(req.params.projectId)
   if (!p) return reply.code(404).send({ error: 'projeto não encontrado' })
-  const { name, skipPermissions, git, defaultModel, autoRun, autoDecompose, devServer, timeoutMs, enrichMode } = req.body || {}
+  const { name, skipPermissions, git, defaultModel, autoRun, autoDecompose, devServer, timeoutMs, enrichMode, retry } = req.body || {}
   if (name !== undefined) p.name = name
+  if (retry !== undefined && typeof retry === 'object' && retry !== null) {
+    const next = { ...DEFAULT_RETRY, ...(p.retry || {}) }
+    if (retry.maxAttempts !== undefined) {
+      const n = Number(retry.maxAttempts)
+      if (!Number.isInteger(n) || n < 1 || n > 10) {
+        return reply.code(400).send({ error: 'retry.maxAttempts deve ser um inteiro entre 1 e 10' })
+      }
+      next.maxAttempts = n
+    }
+    if (retry.backoffMinutes !== undefined) {
+      const n = Number(retry.backoffMinutes)
+      if (!Number.isFinite(n) || n < 0 || n > 1440) {
+        return reply.code(400).send({ error: 'retry.backoffMinutes deve estar entre 0 e 1440' })
+      }
+      next.backoffMinutes = n
+    }
+    p.retry = next
+  }
   if (skipPermissions !== undefined) p.skipPermissions = !!skipPermissions
   if (timeoutMs !== undefined) {
     if (timeoutMs === null || timeoutMs === '') {
