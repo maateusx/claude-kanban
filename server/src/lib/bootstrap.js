@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { APP_VERSION, STATUSES, kanbanDir, tasksDir, pendingFile } from './paths.js'
+import { APP_VERSION, STATUSES, kanbanDir, tasksDir, pendingFile, templatesDir } from './paths.js'
 import { reconcileProject } from './tasks.js'
 
 const TPL = fileURLToPath(new URL('../../templates/', import.meta.url))
@@ -78,10 +78,21 @@ export function bootstrapProject(projectPath) {
   // 4. skill
   fs.copyFileSync(path.join(TPL, 'SKILL.md'), path.join(claudeDir, 'skills', 'claude-kanban', 'SKILL.md'))
 
-  // 5. pending-actions.md (nunca sobrescreve)
+  // 5. templates de task (exemplos): nunca sobrescreve — são do usuário depois
+  // de criados, inclusive se ele apagar um deles não recriamos... exceto se a
+  // pasta inteira não existir (projeto novo / templates ainda não instalados).
+  const td = templatesDir(projectPath)
+  if (!fs.existsSync(td)) {
+    fs.mkdirSync(td, { recursive: true })
+    for (const f of fs.readdirSync(path.join(TPL, 'task-templates'))) {
+      fs.copyFileSync(path.join(TPL, 'task-templates', f), path.join(td, f))
+    }
+  }
+
+  // 6. pending-actions.md (nunca sobrescreve)
   if (!fs.existsSync(pendingFile(projectPath))) fs.writeFileSync(pendingFile(projectPath), '')
 
-  // 6. gitignore
+  // 7. gitignore
   if (fs.existsSync(path.join(projectPath, '.git'))) {
     const gi = path.join(projectPath, '.gitignore')
     const existing = fs.existsSync(gi) ? fs.readFileSync(gi, 'utf8') : ''
@@ -102,7 +113,7 @@ export function bootstrapProject(projectPath) {
   // meta
   fs.writeFileSync(metaFile, JSON.stringify({ kanbanVersion: APP_VERSION, bootstrappedAt: new Date().toISOString() }, null, 2) + '\n')
 
-  // 7. reconciliação
+  // 8. reconciliação
   reconcileProject(projectPath)
 }
 

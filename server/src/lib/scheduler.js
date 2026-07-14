@@ -4,6 +4,8 @@ import { listTasks, updateTask } from './tasks.js'
 // Ticker do agendamento. Duas formas de adiar trabalho:
 //   - task.scheduled_at  → a task entra na fila sozinha quando chegar a hora;
 //   - project.queuePausedUntil → a fila inteira do projeto fica parada até a hora.
+// A pausa global (runner.paused/pausedUntil, em state.json) é do runner, mas
+// depende deste ticker para expirar sozinha quando tem prazo.
 // A granularidade é a do tick: um agendamento nunca dispara antes da hora, mas
 // pode disparar até TICK_MS depois. Suficiente para "roda de madrugada".
 export const TICK_MS = 20_000
@@ -51,7 +53,6 @@ export class Scheduler {
   }
 
   tick(now = Date.now()) {
-    let unpaused = false
     for (const project of this.db.projects) {
       if (!fs.existsSync(project.path)) continue
 
@@ -59,7 +60,6 @@ export class Scheduler {
       // neste mesmo tick já possa rodar.
       if (project.queuePausedUntil && !isFuture(project.queuePausedUntil, now)) {
         project.queuePausedUntil = null
-        unpaused = true
         this.saveProjects(this.db)
         this.emit('project.updated', { projectId: project.id })
       }
@@ -76,7 +76,9 @@ export class Scheduler {
         this.runner.enqueue(project.id, t.id)
       }
     }
-    // A fila pode ter itens parados desde antes da pausa vencer.
-    if (unpaused) this.runner.tick()
+    // Tick incondicional: a fila pode ter itens parados desde antes da pausa do
+    // projeto vencer, e é o próprio tick do runner que expira a pausa global com
+    // prazo (sem ele, uma pausa "até as 9h" só cairia no próximo enqueue).
+    this.runner.tick()
   }
 }
