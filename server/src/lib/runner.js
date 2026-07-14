@@ -4,13 +4,27 @@ import path from 'node:path'
 import { loadState, saveState, diffFile, logFile } from './paths.js'
 import { findTask, updateTask, appendToSection, listTasks, createTask, getSection } from './tasks.js'
 import { decomposeTask } from './decomposer.js'
-import { prepareWorkspace, cleanupWorkspace, captureDiff, gitSettings, isGitRepo } from './git.js'
+import { prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo } from './git.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
 import { PRIORITY_RANK } from './sort.js'
 import { normalizeModel } from './models.js'
 import { isFuture } from './scheduler.js'
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
+// Política de retentativa. Defaults preservam o comportamento histórico:
+// 3 tentativas antes da tag `blocked` e nenhum backoff (a task volta para todo/
+// e o auto-run a repesca no mesmo tick).
+export const DEFAULT_RETRY = { maxAttempts: 3, backoffMinutes: 0 }
+
+export function retrySettings(project) {
+  const r = project?.retry || {}
+  const maxAttempts = Number(r.maxAttempts)
+  const backoffMinutes = Number(r.backoffMinutes)
+  return {
+    maxAttempts: Number.isFinite(maxAttempts) && maxAttempts >= 1 ? Math.round(maxAttempts) : DEFAULT_RETRY.maxAttempts,
+    backoffMinutes: Number.isFinite(backoffMinutes) && backoffMinutes >= 0 ? backoffMinutes : DEFAULT_RETRY.backoffMinutes,
+  }
+}
 // Tag aplicada quando o agente termina sinalizando que depende de decisão humana.
 // Cards com ela ficam fora do auto-pilot até o humano responder e re-executar.
 export const HUMAN_REQUEST_TAG = 'human-request'
@@ -61,10 +75,54 @@ export class Runner {
     const state = loadState()
     this.queue = state.queue || []  // [{ projectId, taskId }]
     this.maxConcurrency = Math.min(Math.max(state.maxConcurrency || 1, 1), MAX_CONCURRENCY)
+    // Pausa global (todos os projetos). Sempre "drenar": nada novo sai da fila,
+    // mas os runs já ativos seguem até o fim — pausar nunca mata sessão.
+    // paused=true com pausedUntil=null é pausa indefinida (até resume manual).
+    this.paused = !!state.paused
+    this.pausedUntil = state.pausedUntil || null
     this.actives = new Map()        // taskId -> { projectId, taskId, child, timer, ... }
   }
 
-  persist() { saveState({ queue: this.queue, maxConcurrency: this.maxConcurrency }) }
+  persist() {
+    saveState({
+      queue: this.queue,
+      maxConcurrency: this.maxConcurrency,
+      paused: this.paused,
+      pausedUntil: this.pausedUntil,
+    })
+  }
+
+  // until=null → pausa indefinida; until=ISO futuro → pausa que expira sozinha.
+  pause(until = null) {
+    this.paused = true
+    this.pausedUntil = until
+    this.persist()
+    this.emit('run.queue', this.getQueueView())
+    return this.getQueueView()
+  }
+
+  resume() {
+    this.paused = false
+    this.pausedUntil = null
+    this.persist()
+    this.emit('run.queue', this.getQueueView())
+    this.tick()
+    return this.getQueueView()
+  }
+
+  // Expira a pausa com prazo vencido no próprio check — assim a fila destrava no
+  // primeiro tick depois da hora, sem depender do ticker do scheduler.
+  isPaused(now = Date.now()) {
+    if (!this.paused) return false
+    if (this.pausedUntil && !isFuture(this.pausedUntil, now)) {
+      this.paused = false
+      this.pausedUntil = null
+      this.persist()
+      this.emit('run.queue', this.getQueueView())
+      return false
+    }
+    return true
+  }
 
   setConcurrency(n) {
     this.maxConcurrency = Math.min(Math.max(Number(n) || 1, 1), MAX_CONCURRENCY)
@@ -160,6 +218,8 @@ export class Runner {
       actives: [...this.actives.values()].map(a => ({ projectId: a.projectId, taskId: a.taskId })),
       queue: this.queue,
       maxConcurrency: this.maxConcurrency,
+      paused: this.paused,
+      pausedUntil: this.pausedUntil,
     }
   }
 
@@ -188,6 +248,7 @@ export class Runner {
   }
 
   tick() {
+    if (this.isPaused()) return
     while (this.actives.size < this.maxConcurrency && this.queue.length > 0) {
       const idx = this.queue.findIndex(q => this.eligible(q.projectId))
       if (idx === -1) return
@@ -479,6 +540,16 @@ export class Runner {
       }
     } catch {}
 
+    // A sessão pode ter aberto uma PR (autoPR): o resultado só existe no log dela,
+    // então perguntamos ao `gh` qual é a PR da branch. Também antes do cleanup.
+    let pr = null
+    try {
+      const g = gitSettings(project)
+      if (exitCode === 0 && !a.killed && !a.timedOut && g.autoPush && a.workspace.branch) {
+        pr = capturePR(a.workspace.cwd, a.workspace.branch)
+      }
+    } catch {}
+
     // Traz o resultado escrito no worktree de volta ao projeto e remove o worktree
     // (a branch da task é preservada) — precisa acontecer antes dos updateTask abaixo.
     try { cleanupWorkspace(project, a.workspace, a.taskRelPath) } catch {}
@@ -486,6 +557,7 @@ export class Runner {
     const r = a.result || {}
     const runMeta = {
       has_diff: hasDiff,
+      pr,
       completed_at: new Date().toISOString(),
       exit_code: exitCode,
       session_id: r.session_id ?? null,
@@ -514,6 +586,7 @@ export class Runner {
         projectId: a.projectId, taskId: a.taskId, exitCode, humanRequest: true,
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
+        pr: runMeta.pr,
       })
     } else if (verify && !verify.ok && !a.timedOut) {
       // Verificação reprovou: volta para todo (conta como tentativa) e NÃO entra
@@ -539,18 +612,30 @@ export class Runner {
         projectId: a.projectId, taskId: a.taskId, exitCode,
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
+        pr: runMeta.pr,
       })
     } else {
       const reason = a.timedOut
         ? `Timeout da execução. Limite configurado: ${Math.round((a.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)} min.`
         : `Exit code ${exitCode}.`
+      const { maxAttempts, backoffMinutes } = retrySettings(project)
       const patch = { status: 'todo', run: runMeta }
-      if (attempts >= 3 && task && !task.tags?.includes('blocked')) {
-        patch.tags = [...(task.tags || []), 'blocked']
+      let retryAt = null
+      if (attempts >= maxAttempts) {
+        if (task && !task.tags?.includes('blocked')) patch.tags = [...(task.tags || []), 'blocked']
+      } else if (project.autoRun && backoffMinutes > 0) {
+        // Ainda há tentativa sobrando: em vez de deixar o auto-run repescar a task
+        // no mesmo tick, marca o horário do retry e deixa o Scheduler enfileirá-la
+        // quando o backoff vencer (autoEnqueue ignora scheduled_at no futuro).
+        retryAt = new Date(Date.parse(runMeta.completed_at) + backoffMinutes * 60_000).toISOString()
+        patch.scheduled_at = retryAt
       }
       updateTask(project.path, a.taskId, patch)
+      const retryNote = retryAt
+        ? `\nNova tentativa agendada para ${retryAt} (tentativa ${attempts + 1} de ${maxAttempts}).`
+        : ''
       appendToSection(project.path, a.taskId, 'Log de erros',
-        `[${runMeta.completed_at}] ${reason}\n\n\`\`\`\n${(a.stderr || '').slice(-2000)}\n\`\`\``)
+        `[${runMeta.completed_at}] ${reason}${retryNote}\n\n\`\`\`\n${(a.stderr || '').slice(-2000)}\n\`\`\``)
       this.emit('run.finished', {
         projectId: a.projectId, taskId: a.taskId, exitCode,
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,

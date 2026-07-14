@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback, useReducer } from 'react'
 import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors, useDroppable, useDraggable, closestCorners } from '@dnd-kit/core'
 import { api, connectWS } from './api.js'
-import { reducer, effectsFor, initialState } from './events.js'
+import { reducer, effectsFor, initialState, notificationsFor, pendingIds } from './events.js'
+import * as notifications from './notify.js'
 import { DiffDrawer } from './Diff.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
 import { MODELS, modelLabel } from './models.js'
@@ -22,6 +23,8 @@ const VIEWS = [
   { key: 'todas', label: 'Todas', columns: ['backlog', 'todo', 'doing', 'done'] },
   { key: 'backlog', label: 'Backlog', columns: ['backlog'] },
   { key: 'arquivadas', label: 'Arquivadas', columns: ['archived'] },
+  // Não é um board: renderiza o painel de custos no lugar das colunas.
+  { key: 'custos', label: 'Custos', columns: [] },
 ]
 
 const PRIORITY = {
@@ -112,7 +115,8 @@ export default function App() {
   const [projects, setProjects] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [{ tasks, pending, logs }, dispatch] = useReducer(reducer, initialState)
-  const [queue, setQueue] = useState({ actives: [], queue: [], maxConcurrency: 1 })
+  const [queue, setQueue] = useState({ actives: [], queue: [], maxConcurrency: 1, paused: false, pausedUntil: null })
+  const usage = useUsage()
   const [logTask, setLogTask] = useState(null)
   const [diffTask, setDiffTask] = useState(null)
   const [detailId, setDetailId] = useState(null)   // task aberta no drawer
@@ -120,6 +124,7 @@ export default function App() {
   const [showPending, setShowPending] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showSuggest, setShowSuggest] = useState(false)
+  const [showIssues, setShowIssues] = useState(false)
   const [showClaudeConfig, setShowClaudeConfig] = useState(false)
   const [showAddProject, setShowAddProject] = useState(false)
   const [view, setView] = useState('todas')
@@ -127,14 +132,38 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [health, setHealth] = useState({ ok: true, claudeAvailable: true })
   const [activeId, setActiveId] = useState(null)
+  const [notifyOn, setNotifyOn] = useState(notifications.loadNotifyEnabled)
   const searchRef = useRef(null)
   const selectedIdRef = useRef(null)
   selectedIdRef.current = selectedId
+
+  // Refs para o handler do WS (que é montado uma vez) enxergar o estado atual
+  // sem reconectar a cada render.
+  const notifyRef = useRef(notifyOn)
+  notifyRef.current = notifyOn
+  const projectsRef = useRef(projects)
+  projectsRef.current = projects
+  const tasksRef = useRef(tasks)
+  tasksRef.current = tasks
+  // pending-actions já vistas + projetos já "semeados": o watcher reemite a lista
+  // inteira, então a primeira leitura de um projeto só registra os ids (senão o
+  // board notificaria tudo que já estava pendente ao abrir).
+  const seenPendingRef = useRef({ ids: new Set(), seeded: new Set() })
 
   const project = projects.find(p => p.id === selectedId) || null
 
   const setTasks = useCallback(ts => dispatch({ type: 'setTasks', tasks: ts }), [])
   const setPending = useCallback(p => dispatch({ type: 'setPending', pending: p }), [])
+
+  // Ligar o toggle pede a permissão do browser; se o usuário negar, o toggle
+  // volta para desligado (senão ficaria "ligado" sem nunca notificar).
+  const setNotifyEnabled = useCallback(async v => {
+    if (!v) { setNotifyOn(false); notifications.saveNotifyEnabled(false); return }
+    const perm = await notifications.ensurePermission()
+    const on = perm === 'granted'
+    setNotifyOn(on)
+    notifications.saveNotifyEnabled(on)
+  }, [])
 
   const refreshProjects = useCallback(() => api.projects().then(d => {
     setProjects(d.projects)
@@ -156,6 +185,26 @@ export default function App() {
       if (effect === 'projects') refreshProjects()
       if (effect === 'queue') api.queue().then(setQueue)
       if (effect === 'tasks') api.tasks(cur).then(d => setTasks(d.tasks))
+    }
+
+    const seen = seenPendingRef.current
+    const firstPending = evt.type === 'pending.updated' && !seen.seeded.has(evt.projectId)
+    if (notifyRef.current && !firstPending) {
+      const ns = notificationsFor(evt, {
+        projects: projectsRef.current,
+        tasks: tasksRef.current,
+        seenPendingIds: seen.ids,
+      })
+      for (const n of ns) {
+        notifications.notify(n, () => {
+          if (n.projectId) setSelectedId(n.projectId)
+          if (n.taskId) setDetailId(n.taskId)
+        })
+      }
+    }
+    if (evt.type === 'pending.updated') {
+      for (const id of pendingIds(evt)) seen.ids.add(id)
+      seen.seeded.add(evt.projectId)
     }
   }), [refreshProjects, setTasks])
 
@@ -238,7 +287,7 @@ export default function App() {
   return (
     <div className="flex h-full bg-bg text-ink">
       <Rail
-        projects={projects} selectedId={selectedId} onSelect={setSelectedId} queue={queue}
+        projects={projects} selectedId={selectedId} onSelect={setSelectedId} queue={queue} usage={usage}
         onAdd={() => setShowAddProject(true)}
         onSettings={() => project && setShowSettings(true)}
       />
@@ -257,6 +306,7 @@ export default function App() {
               onNewTask={() => setNewTask({ status: 'backlog' })}
               onPending={() => setShowPending(true)}
               onSuggest={() => setShowSuggest(true)}
+              onImportIssues={() => setShowIssues(true)}
               onClaudeConfig={() => setShowClaudeConfig(true)}
               onSettings={() => setShowSettings(true)}
               onRerun={() => api.rebootstrap(project.id).then(refreshProjects)}
@@ -264,6 +314,9 @@ export default function App() {
               onChanged={refreshProjects}
             />
             <div className="flex min-h-0 flex-1">
+              {view === 'custos' ? (
+                <CostsView project={project} tasks={tasks} onOpen={setDetailId} />
+              ) : (
               <DndContext sensors={sensors} collisionDetection={closestCorners}
                 onDragStart={({ active }) => setActiveId(active.id)}
                 onDragCancel={() => setActiveId(null)} onDragEnd={onDragEnd}>
@@ -283,6 +336,7 @@ export default function App() {
                   ) : null}
                 </DragOverlay>
               </DndContext>
+              )}
               {detail && (
                 <TaskDrawer task={detail} project={project} queue={queue}
                   pending={pending.filter(a => a.taskId === detail.id)}
@@ -304,7 +358,7 @@ export default function App() {
         ) : (
           <EmptyProjects onAdd={() => setShowAddProject(true)} />
         )}
-        <QueueBar queue={queue} tasks={tasks} projects={projects}
+        <QueueBar queue={queue} tasks={tasks} projects={projects} usage={usage}
           onOpen={(q, withLog) => {
             if (q.projectId && q.projectId !== selectedId) setSelectedId(q.projectId)
             setDetailId(q.taskId)
@@ -312,7 +366,9 @@ export default function App() {
           }}
           onKill={tid => api.kill(tid).then(() => api.queue().then(setQueue))}
           onReorder={ids => api.reorderQueue(ids).then(setQueue)}
-          onDequeue={dequeueTask} />
+          onDequeue={dequeueTask}
+          onPause={until => api.pauseRuns(until).then(setQueue).catch(e => alert(e.message))}
+          onResume={() => api.resumeRuns().then(setQueue).catch(e => alert(e.message))} />
       </main>
 
       {showAddProject && (
@@ -322,7 +378,7 @@ export default function App() {
             .catch(e => alert(e.message))} />
       )}
       {newTask && project && (
-        <TaskModal onClose={() => setNewTask(null)}
+        <TaskModal projectId={project.id} onClose={() => setNewTask(null)}
           onSave={data => api.addTask(project.id, { ...data, status: newTask.status })
             .then(() => { setNewTask(null); api.tasks(project.id).then(d => setTasks(d.tasks)) })
             .catch(e => alert(e.message))} />
@@ -338,6 +394,10 @@ export default function App() {
         <SuggestModal project={project} onClose={() => setShowSuggest(false)}
           onCreated={() => { setShowSuggest(false); api.tasks(project.id).then(d => setTasks(d.tasks)) }} />
       )}
+      {showIssues && project && (
+        <ImportIssuesModal project={project} onClose={() => setShowIssues(false)}
+          onImported={() => { setShowIssues(false); api.tasks(project.id).then(d => setTasks(d.tasks)) }} />
+      )}
       {showPending && project && (
         <PendingPanel actions={pending} onClose={() => setShowPending(false)}
           onResolve={aid => api.resolvePending(project.id, aid).then(d => setPending(d.actions))} />
@@ -348,6 +408,7 @@ export default function App() {
       {showSettings && project && (
         <SettingsModal project={project} onClose={() => setShowSettings(false)}
           queue={queue} onConcurrency={max => api.setConcurrency(max).then(setQueue)}
+          notifyOn={notifyOn} onNotify={setNotifyEnabled}
           onPatch={patch => api.patchProject(project.id, patch).then(refreshProjects)}
           onRemove={uninstall => {
             api.removeProject(project.id, uninstall).then(() => { setShowSettings(false); setSelectedId(null); refreshProjects() })
@@ -460,7 +521,7 @@ function HoverTip({ label, disabled, children, className }) {
   )
 }
 
-function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue }) {
+function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue, usage }) {
   const [expanded, toggle] = useRailExpanded()
   return (
     <aside style={{ width: expanded ? 'var(--rail-w-open)' : 'var(--rail-w)' }}
@@ -510,7 +571,7 @@ function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue }) {
         <span>⚙</span>
         {expanded && <span className="text-body">Configurações</span>}
       </button>
-      <UsageRail />
+      <UsageRail usage={usage} />
     </aside>
   )
 }
@@ -529,6 +590,7 @@ function QueueIndicator({ queue }) {
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
+const DEFAULT_RETRY = { maxAttempts: 3, backoffMinutes: 0 }
 
 const USAGE_LABEL = {
   session: 'Sessão (5h)',
@@ -567,13 +629,10 @@ function usageBarColor(l) {
 const usagePct = l => Math.min(100, Math.max(0, l?.percent ?? 0))
 const usageName = l => `${USAGE_LABEL[l.kind] || l.kind}${l.model ? ` · ${l.model}` : ''}`
 
-// No rail cabe só o essencial: a sessão de 5h, que é a janela que de fato
-// limita o trabalho do dia. Os limites semanais vivem no popover.
-function UsageRail() {
+// Um único poll do uso no App: o rail mostra o consumo e a QueueBar usa o mesmo
+// dado para sugerir a pausa global quando o limite fica crítico.
+function useUsage() {
   const [usage, setUsage] = useState(null)
-  const [open, setOpen] = useState(false)
-  const ref = useRef(null)
-
   useEffect(() => {
     let alive = true
     const load = () => api.usage().then(d => { if (alive) setUsage(d) }).catch(() => {})
@@ -581,6 +640,21 @@ function UsageRail() {
     const t = setInterval(load, 60_000)
     return () => { alive = false; clearInterval(t) }
   }, [])
+  return usage
+}
+
+// Limite em situação crítica: o próprio backend do Claude marca severity != normal;
+// o corte por percentual cobre o caso de a API não mandar severity.
+export function criticalLimit(usage) {
+  if (!usage?.available) return null
+  return (usage.limits || []).find(l => usagePct(l) >= 90 || (l.severity && l.severity !== 'normal')) || null
+}
+
+// No rail cabe só o essencial: a sessão de 5h, que é a janela que de fato
+// limita o trabalho do dia. Os limites semanais vivem no popover.
+function UsageRail({ usage }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
 
   useEffect(() => {
     if (!open) return
@@ -641,7 +715,7 @@ function UsageRail() {
 /* ------------------------------------------------------------------- header */
 
 function BoardHeader({ project, health, view, onView, query, onQuery, searchRef, pendingCount,
-  onNewTask, onPending, onSuggest, onClaudeConfig, onSettings, onRerun, onAutoRun, onChanged }) {
+  onNewTask, onPending, onSuggest, onImportIssues, onClaudeConfig, onSettings, onRerun, onAutoRun, onChanged }) {
   return (
     <header className="border-b border-line px-4 py-3">
       <div className="flex items-center gap-2">
@@ -656,6 +730,7 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
           { label: 'Config do Claude (.claude)', onClick: onClaudeConfig },
           { label: 'Configurações do projeto', onClick: onSettings },
           { label: '✦ Sugerir tasks com o Claude', onClick: onSuggest, disabled: !health.claudeAvailable },
+          { label: 'Importar issues do GitHub', onClick: onImportIssues },
         ]} />
       </div>
       <div className="mt-3 flex items-center gap-2">
@@ -990,6 +1065,13 @@ function RunStrip({ task, running, openPending, onRun }) {
       {run.branch && (
         <div className="mt-1 truncate font-mono text-[11px] text-muted">{run.branch}{run.has_diff ? ' · diff' : ''}</div>
       )}
+      {run.pr?.url && (
+        <a href={run.pr.url} target="_blank" rel="noreferrer"
+          onPointerDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}
+          className="mt-1.5 inline-block text-meta text-accent hover:underline">
+          Ver PR{run.pr.number ? ` #${run.pr.number}` : ''} ↗
+        </a>
+      )}
     </div>
   )
 }
@@ -1056,6 +1138,7 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           { label: 'Quebrar em subtasks agora', onClick: onDecompose, disabled: running || queued },
           { label: 'Ver log', onClick: onLog },
           { label: 'Ver diff', onClick: onDiff, disabled: !run.has_diff },
+          { label: 'Ver PR', onClick: () => window.open(run.pr.url, '_blank', 'noreferrer'), disabled: !run.pr?.url },
           { label: 'Arquivar', onClick: onArchive, danger: true, disabled: task.status === 'archived' },
         ]} />
         <button onClick={onClose} title="Fechar (esc)" className="rounded-[6px] px-2 py-1 text-muted hover:bg-hover hover:text-ink">✕</button>
@@ -1141,7 +1224,16 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           ? <button onClick={onKill} className="text-meta text-danger hover:underline">Matar sessão</button>
           : queued
             ? <button onClick={onDequeue} className="text-meta text-danger hover:underline">Cancelar (tirar da fila)</button>
-            : run.has_diff ? <button onClick={onDiff} className="text-meta text-accent hover:underline">Ver diff</button> : null}>
+            : (run.has_diff || run.pr?.url) ? (
+              <span className="flex items-center gap-2">
+                {run.pr?.url && (
+                  <a href={run.pr.url} target="_blank" rel="noreferrer" className="text-meta text-accent hover:underline">
+                    Ver PR{run.pr.number ? ` #${run.pr.number}` : ''} ↗
+                  </a>
+                )}
+                {run.has_diff && <button onClick={onDiff} className="text-meta text-accent hover:underline">Ver diff</button>}
+              </span>
+            ) : null}>
         {!run.started_at && !running ? (
           <Empty>Nenhuma execução ainda.</Empty>
         ) : (
@@ -1301,7 +1393,7 @@ function QueuePauseButton({ project, onChanged }) {
 
 /* -------------------------------------------------------------------- modais */
 
-function TaskModal({ onClose, onSave }) {
+function TaskModal({ projectId, onClose, onSave }) {
   const [title, setTitle] = useState('')
   const [priority, setPriority] = useState('medium')
   const [tags, setTags] = useState('')
@@ -1309,9 +1401,35 @@ function TaskModal({ onClose, onSave }) {
   const [decompose, setDecompose] = useState(false)
   const [description, setDescription] = useState('')
   const [when, setWhen] = useState('')
+  const [templates, setTemplates] = useState([])
+  const [template, setTemplate] = useState('')
+
+  useEffect(() => { api.templates(projectId).then(d => setTemplates(d.templates)).catch(() => setTemplates([])) }, [projectId])
+
+  // Trocar de template repõe prioridade/tags/descrição a partir dele; as demais
+  // seções do template (repro, critérios de aceite...) o backend monta no .md.
+  const pickTemplate = id => {
+    setTemplate(id)
+    const tpl = templates.find(t => t.id === id)
+    if (!tpl) return
+    if (tpl.priority) setPriority(tpl.priority)
+    setTags((tpl.tags || []).join(', '))
+    setDescription(section(tpl.body, 'Descrição'))
+  }
+
   return (
     <Modal onClose={onClose} title="Nova task">
       <div className="space-y-3">
+        {templates.length > 0 && (
+          <select value={template} onChange={e => pickTemplate(e.target.value)}
+            title="Template: pré-preenche corpo, tags e prioridade"
+            className="w-full rounded-[6px] border border-line px-2 py-2 text-body outline-none focus:border-accent">
+            <option value="">Sem template (descrição livre)</option>
+            {templates.map(t => (
+              <option key={t.id} value={t.id}>{t.title}{t.description ? ` — ${t.description}` : ''}</option>
+            ))}
+          </select>
+        )}
         <input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="Título"
           className="w-full rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
         <div className="flex gap-2">
@@ -1341,7 +1459,7 @@ function TaskModal({ onClose, onSave }) {
         <div className="flex justify-end gap-2">
           <Btn variant="quiet" onClick={onClose}>Cancelar</Btn>
           <Btn variant="primary" disabled={!title.trim()}
-            onClick={() => onSave({ title, priority, tags: splitTags(tags), model: model || null, decompose: decompose || null, description, scheduled_at: fromLocalInput(when) })}>
+            onClick={() => onSave({ title, priority, tags: splitTags(tags), model: model || null, decompose: decompose || null, description, scheduled_at: fromLocalInput(when), template: template || null })}>
 
             Criar task
           </Btn>
@@ -1376,6 +1494,129 @@ function AddProjectModal({ onClose, onAdd }) {
     </Modal>
   )
 }
+
+/* -------------------------------------------------------------------- custos */
+
+const PERIODS = [
+  { key: '7', label: '7 dias' },
+  { key: '30', label: '30 dias' },
+  { key: '0', label: 'Tudo' },
+]
+
+// Custos de sessão são centavos: 2 casas escondem a maior parte deles.
+export const fmtUsd = v => `$${Number(v || 0).toFixed(Number(v || 0) < 1 ? 3 : 2)}`
+export const fmtPct = v => v == null ? '—' : `${Math.round(v * 100)}%`
+const fmtDay = d => d.slice(8, 10) + '/' + d.slice(5, 7)
+
+function CostsView({ project, tasks, onOpen }) {
+  const [days, setDays] = useState('30')
+  const [stats, setStats] = useState(null)
+  const [error, setError] = useState(null)
+
+  // `tasks` muda quando o WebSocket entrega run.finished (o App refaz o fetch das
+  // tasks), então o painel se atualiza sozinho ao fim de cada execução.
+  useEffect(() => {
+    let alive = true
+    api.stats(project.id, days)
+      .then(d => { if (alive) { setStats(d); setError(null) } })
+      .catch(e => { if (alive) setError(e.message) })
+    return () => { alive = false }
+  }, [project.id, days, tasks])
+
+  if (error) return <div className="flex-1 p-6 text-body text-danger">{error}</div>
+  if (!stats) return <div className="flex-1 p-6 text-body text-muted">Carregando…</div>
+
+  const { totals, byDay, byModel, top } = stats
+  const maxDay = Math.max(...byDay.map(d => d.costUsd), 0)
+
+  return (
+    <div className="min-w-0 flex-1 overflow-y-auto p-6">
+      <div className="mb-4 flex items-center gap-2">
+        <Segmented value={days} onChange={setDays} options={PERIODS} />
+        <span className="text-meta text-muted">
+          {totals.runs} de {totals.tasks} task(s) já executaram
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Stat label="Custo total" value={fmtUsd(totals.costUsd)} />
+        <Stat label="Custo médio por task" value={fmtUsd(totals.avgCostUsd)} />
+        <Stat label="Taxa de sucesso" value={fmtPct(totals.successRate)}
+          hint={`${totals.successes} exit 0 / ${totals.attempts} tentativa(s)`} />
+        <Stat label="Tempo total" value={fmtDur(totals.durationMs) || '—'}
+          hint={`${totals.numTurns} turno(s)`} />
+      </div>
+
+      <Panel title="Custo por dia">
+        {byDay.length === 0 ? <Nothing /> : (
+          <div className="flex h-40 items-end gap-1.5">
+            {byDay.map(d => (
+              <div key={d.date} className="flex min-w-0 flex-1 flex-col items-center gap-1"
+                title={`${d.date} — ${fmtUsd(d.costUsd)} em ${d.runs} run(s)`}>
+                <div className="w-full rounded-t-[3px] bg-accent"
+                  style={{ height: `${maxDay ? Math.max(2, (d.costUsd / maxDay) * 120) : 2}px` }} />
+                <span className="truncate text-meta text-muted">{fmtDay(d.date)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      <Panel title="Custo por modelo">
+        {byModel.length === 0 ? <Nothing /> : (
+          <table className="w-full text-body">
+            <tbody>
+              {byModel.map(m => (
+                <tr key={m.model} className="border-b border-line last:border-0">
+                  <td className="py-1.5 font-mono text-meta">{m.model}</td>
+                  <td className="py-1.5 text-right text-meta text-muted">{m.runs} run(s)</td>
+                  <td className="py-1.5 text-right tabular-nums">{fmtUsd(m.costUsd)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+
+      <Panel title="Top 5 mais caras">
+        {top.length === 0 ? <Nothing /> : (
+          <table className="w-full text-body">
+            <tbody>
+              {top.map(t => (
+                <tr key={t.id} className="cursor-pointer border-b border-line last:border-0 hover:bg-hover"
+                  onClick={() => onOpen(t.id)}>
+                  <td className="max-w-0 truncate py-1.5 pr-2">{t.title}</td>
+                  <td className="py-1.5 text-right text-meta text-muted">{fmtDur(t.durationMs) || '—'}</td>
+                  <td className="py-1.5 text-right text-meta text-muted">
+                    {t.exitCode === 0 ? 'ok' : `exit ${t.exitCode ?? '?'}`}
+                  </td>
+                  <td className="py-1.5 pl-2 text-right tabular-nums">{fmtUsd(t.costUsd)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+    </div>
+  )
+}
+
+const Stat = ({ label, value, hint }) => (
+  <div className="rounded-[8px] border border-line p-3">
+    <div className="text-meta text-muted">{label}</div>
+    <div className="mt-1 text-title font-semibold tabular-nums">{value}</div>
+    {hint && <div className="mt-0.5 text-meta text-muted">{hint}</div>}
+  </div>
+)
+
+const Panel = ({ title, children }) => (
+  <section className="mt-5">
+    <h2 className="mb-2 text-body font-medium text-ink-2">{title}</h2>
+    <div className="rounded-[8px] border border-line p-3">{children}</div>
+  </section>
+)
+
+const Nothing = () => <div className="py-3 text-center text-meta text-muted">Nenhuma execução no período.</div>
 
 function EmptyProjects({ onAdd }) {
   return (
@@ -1505,6 +1746,91 @@ function SuggestModal({ project, onClose, onCreated }) {
             <Btn variant="quiet" onClick={() => setPhase('pick')} disabled={phase === 'creating'}>← Refazer</Btn>
             <Btn variant="primary" onClick={create} disabled={!selectedCount || phase === 'creating'}>
               {phase === 'creating' ? 'criando…' : `Criar ${selectedCount} no Backlog`}
+            </Btn>
+          </div>
+        </div>
+      )}
+    </Modal>
+  )
+}
+
+const ISSUE_TAG = 'issue' // tag fixa em toda task importada do GitHub (a outra é gh:<n>)
+
+function ImportIssuesModal({ project, onClose, onImported }) {
+  const [issues, setIssues] = useState(null)        // null = carregando
+  const [selected, setSelected] = useState({})      // number -> bool
+  const [importing, setImporting] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    api.issues(project.id)
+      .then(d => {
+        setIssues(d.issues)
+        // Já importadas vêm desmarcadas: reimportar não duplica, mas também não faz nada.
+        setSelected(Object.fromEntries(d.issues.filter(i => !i.imported).map(i => [i.number, true])))
+      })
+      .catch(e => { setError(e.message); setIssues([]) })
+  }, [project.id])
+
+  const importable = (issues || []).filter(i => !i.imported)
+  const selectedNumbers = importable.filter(i => selected[i.number]).map(i => i.number)
+
+  const doImport = () => {
+    setImporting(true); setError(null)
+    api.importIssues(project.id, selectedNumbers)
+      .then(onImported)
+      .catch(e => { setError(e.message); setImporting(false) })
+  }
+
+  return (
+    <Modal onClose={importing ? () => {} : onClose} title={`Importar issues do GitHub — ${project.name}`}>
+      {error && <div className="mb-3 rounded-[6px] border border-line px-3 py-2 text-body text-danger">{error}</div>}
+
+      {issues === null ? (
+        <div className="flex flex-col items-center gap-3 py-10 text-body text-ink-2">
+          <span className="size-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          Buscando issues abertas com o <code className="font-mono">gh</code>…
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-center text-body text-ink-2">
+            <span>
+              {issues.length} issue(s) aberta(s) — as importadas entram no Backlog com as tags{' '}
+              <Chip>{ISSUE_TAG}</Chip> + <Chip>gh:&lt;n&gt;</Chip>
+            </span>
+            <div className="flex-1" />
+            {importable.length > 0 && (
+              <button onClick={() => setSelected(
+                Object.fromEntries(importable.map(i => [i.number, selectedNumbers.length < importable.length])))}
+                className="text-meta text-accent hover:underline">
+                {selectedNumbers.length < importable.length ? 'selecionar todas' : 'desmarcar todas'}
+              </button>
+            )}
+          </div>
+          <div className="max-h-[55vh] space-y-2 overflow-y-auto">
+            {issues.length === 0 && !error && <Empty>Nenhuma issue aberta neste repositório.</Empty>}
+            {issues.map(i => (
+              <label key={i.number}
+                className={`flex items-start gap-3 rounded-[8px] border p-3 text-body ${i.imported ? 'cursor-default border-line opacity-50' : `cursor-pointer ${selected[i.number] ? 'border-accent' : 'border-line opacity-60'}`}`}>
+                <input type="checkbox" checked={!!selected[i.number] && !i.imported} disabled={i.imported}
+                  className="mt-1 accent-[var(--color-accent)]"
+                  onChange={e => setSelected(sel => ({ ...sel, [i.number]: e.target.checked }))} />
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-meta text-muted">#{i.number}</span>
+                    <span className="font-medium">{i.title}</span>
+                    {i.imported && <Chip>já importada</Chip>}
+                    {i.labels.map(l => <Chip key={l}>{l}</Chip>)}
+                  </span>
+                  {i.body && <span className="mt-1 block line-clamp-3 whitespace-pre-wrap text-meta text-muted">{i.body}</span>}
+                </span>
+              </label>
+            ))}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Btn variant="quiet" onClick={onClose} disabled={importing}>Cancelar</Btn>
+            <Btn variant="primary" onClick={doImport} disabled={!selectedNumbers.length || importing}>
+              {importing ? 'importando…' : `Importar ${selectedNumbers.length} no Backlog`}
             </Btn>
           </div>
         </div>
@@ -1771,14 +2097,31 @@ function ClaudeConfigModal({ project, onClose }) {
   )
 }
 
-function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurrency }) {
+function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurrency, notifyOn, onNotify }) {
   const [confirmRemove, setConfirmRemove] = useState(0)
   const g = project.git || {}
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
   const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
   const [verifyCommand, setVerifyCommand] = useState(project.verifyCommand || '')
+  const retry = project.retry || DEFAULT_RETRY
+  const [maxAttempts, setMaxAttempts] = useState(String(retry.maxAttempts))
+  const [backoffMin, setBackoffMin] = useState(String(retry.backoffMinutes))
   const maxConc = queue?.maxConcurrency || 1
   const patchGit = patch => onPatch({ git: patch })
+
+  // Campos inválidos voltam ao valor salvo em vez de virar patch — mesmo contrato
+  // do timeout, e evita mandar NaN para o backend.
+  const commitRetry = () => {
+    const a = Number(maxAttempts)
+    const b = Number(backoffMin)
+    const okA = Number.isInteger(a) && a >= 1 && a <= 10
+    const okB = Number.isFinite(b) && b >= 0 && b <= 1440
+    if (!okA) setMaxAttempts(String(retry.maxAttempts))
+    if (!okB) setBackoffMin(String(retry.backoffMinutes))
+    if (!okA || !okB) return
+    if (a === retry.maxAttempts && b === retry.backoffMinutes) return
+    onPatch({ retry: { maxAttempts: a, backoffMinutes: b } })
+  }
 
   const commitTimeout = () => {
     const min = Number(timeoutMin)
@@ -1861,6 +2204,30 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
             </span>
           </span>
         </label>
+        <div className="flex items-start gap-3">
+          <span className="mt-1">Retentativas</span>
+          <span className="flex-1">
+            <span className="flex items-center gap-2">
+              <input type="number" min={1} max={10} value={maxAttempts}
+                onChange={e => setMaxAttempts(e.target.value)}
+                onBlur={commitRetry}
+                onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+                className="w-16 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
+              <span className="text-meta text-muted">tentativas antes de marcar <code>blocked</code></span>
+              <input type="number" min={0} max={1440} value={backoffMin}
+                onChange={e => setBackoffMin(e.target.value)}
+                onBlur={commitRetry}
+                onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+                className="w-16 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
+              <span className="text-meta text-muted">min de espera entre elas</span>
+            </span>
+            <span className="mt-1 block text-meta text-muted">
+              Com backoff maior que zero e auto-pilot ligado, uma task que falha é reagendada para daqui a
+              N minutos em vez de voltar imediatamente para a fila. 0 = volta no próximo tick (comportamento default).
+            </span>
+          </span>
+        </div>
+        <NotificationsSetting notifyOn={notifyOn} onNotify={onNotify} />
 
         <div className="rounded-[8px] border border-line p-3">
           <GitCheck label="Desmembrar tasks automaticamente"
@@ -1958,9 +2325,96 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
   )
 }
 
-function QueueBar({ queue, tasks, projects, onOpen, onKill, onReorder, onDequeue }) {
+// Pausa global (todos os projetos), sempre em modo "drenar": as sessões ativas
+// terminam, nada novo sai da fila. Com um limite do plano em situação crítica,
+// o botão vira uma sugestão explícita de pausar.
+function GlobalPauseButton({ queue, usage, onPause, onResume }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  const paused = !!queue.paused
+  const critical = criticalLimit(usage)
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+
+  const pause = until => { setOpen(false); onPause(until) }
+
+  if (paused) {
+    return (
+      <div className="flex shrink-0 items-center overflow-hidden rounded-[6px] border border-warning">
+        <span className="px-2.5 py-1 text-meta text-warning"
+          title="Nada sai da fila; as sessões que já estavam rodando terminam normalmente.">
+          ⏸ Fila global pausada{queue.pausedUntil ? ` até ${fmtWhen(queue.pausedUntil)}` : ''}
+        </span>
+        <button onClick={onResume} title="Retomar a fila global agora"
+          className="border-l border-warning px-2 py-1 text-meta text-warning hover:bg-hover">Retomar</button>
+      </div>
+    )
+  }
+
+  const presets = [
+    { label: 'Pausar até eu retomar', at: () => null },
+    { label: 'Pausar por 1 hora', at: () => inHours(1) },
+    { label: 'Pausar por 4 horas', at: () => inHours(4) },
+    { label: 'Retomar amanhã às 9h', at: () => nextAt(9) },
+  ]
+
+  return (
+    <div className="relative shrink-0" ref={ref}>
+      <button onClick={() => setOpen(v => !v)}
+        title={critical
+          ? `${usageName(critical)} em ${usagePct(critical)}% — considere pausar a fila global.`
+          : 'Pausa global: nenhuma task de nenhum projeto sai da fila; as ativas terminam.'}
+        className={`rounded-[6px] border px-2.5 py-1 text-meta ${critical
+          ? 'border-danger text-danger hover:bg-hover'
+          : 'border-line text-ink-2 hover:bg-hover'}`}>
+        ⏸ {critical ? `Pausar tudo — uso em ${usagePct(critical)}%` : 'Pausar tudo'}
+      </button>
+      {open && (
+        <div className="absolute bottom-full left-0 z-30 mb-1 w-64 rounded-[8px] border border-line bg-bg py-1">
+          {presets.map(p => (
+            <button key={p.label} onClick={() => pause(p.at())}
+              className="block w-full px-3 py-1.5 text-left text-body text-ink-2 hover:bg-hover">{p.label}</button>
+          ))}
+          <p className="border-t border-line px-3 py-2 text-[10px] text-muted">
+            Modo drenar: as sessões em execução terminam, nada novo começa.
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function NotificationsSetting({ notifyOn, onNotify }) {
+  const [perm, setPerm] = useState(notifications.permission)
+  const supported = notifications.supported()
+  const toggle = async v => { await onNotify(v); setPerm(notifications.permission()) }
+  return (
+    <label className="flex items-start gap-3 rounded-[8px] border border-line p-3">
+      <input type="checkbox" checked={!!notifyOn} disabled={!supported || perm === 'denied'}
+        onChange={e => toggle(e.target.checked)} className="mt-0.5 accent-[var(--color-accent)]" />
+      <span>
+        <span className="font-medium">Notificações</span>
+        <span className="mt-1 block text-meta text-muted">
+          {!supported
+            ? 'Este navegador não suporta notificações do sistema.'
+            : perm === 'denied'
+              ? 'O navegador bloqueou as notificações deste site — libere nas permissões do site para ativar.'
+              : 'Avisa quando um run termina (sucesso, falha ou pedido de decisão humana) e quando uma ação é bloqueada pelos guardrails. Clicar na notificação abre a task. Vale para todos os projetos.'}
+        </span>
+      </span>
+    </label>
+  )
+}
+
+function QueueBar({ queue, tasks, projects, usage, onOpen, onKill, onReorder, onDequeue, onPause, onResume }) {
+// Preferência global (localStorage), não por projeto — por isso mora aqui e não
+// no patch do projeto.
   const items = queue.queue
-  if (!(queue.actives || []).length && items.length === 0) return null
   const label = q => {
     const t = tasks.find(x => x.id === q.taskId)
     const p = projects.find(x => x.id === q.projectId)
@@ -1975,6 +2429,7 @@ function QueueBar({ queue, tasks, projects, onOpen, onKill, onReorder, onDequeue
   }
   return (
     <footer className="flex items-center gap-2 overflow-x-auto border-t border-line px-4 py-2 text-meta">
+      <GlobalPauseButton queue={queue} usage={usage} onPause={onPause} onResume={onResume} />
       {(queue.actives || []).map(a => (
         <div key={a.taskId} className="flex shrink-0 items-center gap-2 rounded-[6px] bg-subtle px-3 py-1.5">
           <Dot className="animate-pulse bg-st-doing" />

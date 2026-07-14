@@ -16,6 +16,9 @@ export function kanbanDir(projectPath) {
 export function tasksDir(projectPath, status = '') {
   return path.join(kanbanDir(projectPath), 'tasks', status)
 }
+export function templatesDir(projectPath) {
+  return path.join(kanbanDir(projectPath), 'templates')
+}
 export function diffFile(projectPath, taskId) {
   return path.join(kanbanDir(projectPath), 'diffs', `${taskId}.diff`)
 }

@@ -3,10 +3,11 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createTask, updateTask, listTasks, loadTask, reconcileProject, findTask } from '../src/lib/tasks.js'
+import { createTask, updateTask, listTasks, loadTask, reconcileProject, findTask, getSection } from '../src/lib/tasks.js'
 import { bootstrapProject, mergeSettings, uninstallFromSettings, bootstrapStatus } from '../src/lib/bootstrap.js'
 import { listPendingActions, resolvePendingAction } from '../src/lib/pending.js'
-import { tasksDir, pendingFile, loadState } from '../src/lib/paths.js'
+import { tasksDir, pendingFile, loadState, templatesDir } from '../src/lib/paths.js'
+import { listTemplates, findTemplate } from '../src/lib/templates.js'
 import { Runner } from '../src/lib/runner.js'
 import { markSucceeded, wasSucceeded, getExecuted, clearExecuted } from '../src/lib/ledger.js'
 import { sortTasks } from '../src/lib/sort.js'
@@ -327,4 +328,49 @@ test('fila: task de prioridade mais alta entra na frente das menores', () => {
   const med2 = createTask(root, { title: 'Med 2', priority: 'medium', status: 'todo' })
   runner.enqueue('p1', med2.id, { auto: true })
   assert.deepEqual(runner.queue.map(q => q.taskId), [urgent.id, med.id, med2.id, low.id])
+})
+
+test('templates: bootstrap instala exemplos e não sobrescreve edições do usuário', () => {
+  const root = proj()
+  bootstrapProject(root)
+  const bug = path.join(templatesDir(root), 'bug-report.md')
+  assert.ok(existsSync(bug))
+  assert.ok(existsSync(path.join(templatesDir(root), 'feature.md')))
+
+  writeFileSync(bug, '---\ntitle: Meu bug\n---\n\n## Descrição\n\nmeu\n')
+  bootstrapProject(root) // re-run
+  assert.match(readFileSync(bug, 'utf8'), /Meu bug/)
+})
+
+test('templates: criar task com template preenche corpo, tags e prioridade', () => {
+  const root = proj()
+  bootstrapProject(root)
+  const tpls = listTemplates(root)
+  assert.deepEqual(tpls.map(t => t.id).sort(), ['bug-report', 'feature'])
+
+  const t = createTask(root, { title: 'Login quebrado', description: 'não loga', template: 'bug-report', status: 'todo' })
+  assert.equal(t.priority, 'high')
+  assert.deepEqual(t.tags, ['bug'])
+  assert.match(t.body, /## Passos para reproduzir/)
+  assert.match(t.body, /## Comportamento esperado/)
+  assert.equal(getSection(t.body, 'Descrição'), 'não loga')
+  // as seções que o runner/backend escrevem sobrevivem
+  assert.match(t.body, /## Resultado/)
+  assert.match(t.body, /## Log de erros/)
+
+  // request explícito vence os defaults do template
+  const t2 = createTask(root, { title: 'x', priority: 'low', tags: ['ui'], template: 'feature' })
+  assert.equal(t2.priority, 'low')
+  assert.deepEqual(t2.tags, ['ui'])
+})
+
+test('templates: projeto sem pasta de templates usa o esqueleto padrão', () => {
+  const root = proj()
+  for (const s of ['backlog', 'todo']) mkdirSync(tasksDir(root, s), { recursive: true })
+  assert.deepEqual(listTemplates(root), [])
+  const t = createTask(root, { title: 'Sem template', description: 'oi' })
+  assert.equal(getSection(t.body, 'Descrição'), 'oi')
+  assert.match(t.body, /## Resultado/)
+  // id fora da pasta (path traversal) não resolve
+  assert.equal(findTemplate(root, '../../../etc/passwd'), null)
 })
