@@ -1,33 +1,33 @@
-import Fastify from 'fastify'
-import cors from '@fastify/cors'
-import websocket from '@fastify/websocket'
 import fs from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { nanoid } from 'nanoid'
 import {
-  HOME_DIR, LOCK_FILE, loadProjects, saveProjects, diffFile,
+  HOME_DIR, LOCK_FILE, STATUSES, loadProjects, saveProjects, diffFile,
 } from './lib/paths.js'
 import {
   listTasks, findTask, createTask, updateTask, reconcileProject,
+  normalizeDependsOn, hasDependencyCycle,
 } from './lib/tasks.js'
+import { listTemplates, findTemplate } from './lib/templates.js'
 import { sortTasks } from './lib/sort.js'
-import { bootstrapProject, bootstrapStatus, uninstallGuardrails } from './lib/bootstrap.js'
-import { listPendingActions, resolvePendingAction } from './lib/pending.js'
-import { listConfigFiles, readConfigFile, writeConfigFile } from './lib/claudeConfig.js'
 import { watchProject } from './lib/watcher.js'
-import { Runner } from './lib/runner.js'
+import { Runner, DEFAULT_RETRY, retrySettings } from './lib/runner.js'
 import { analyzeProject, SUGGESTION_TYPES } from './lib/analyzer.js'
 import { enrichTask } from './lib/enricher.js'
+import { listIssues, issueTag, issueDescription } from './lib/github.js'
 import { replaceSection } from './lib/tasks.js'
 import { DevServers } from './lib/devservers.js'
-import { DEFAULT_GIT, gitSettings, projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty } from './lib/git.js'
+import { DEFAULT_GIT, gitSettings, projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty, mergeTaskBranch, deleteTaskBranch } from './lib/git.js'
 import { getUsage } from './lib/usage.js'
+import { computeStats } from './lib/stats.js'
 import { MODEL_IDS, normalizeModel } from './lib/models.js'
 import { Scheduler, parseWhen, isFuture } from './lib/scheduler.js'
+import { buildApp } from './app.js'
 
 const PORT = Number(process.env.PORT || 4400)
 const MIN_TIMEOUT_MS = 60_000
 const MAX_TIMEOUT_MS = 240 * 60_000
+const PRIORITIES = ['low', 'medium', 'high', 'urgent']
 
 const invalidModelMsg = (v) => `modelo inválido: "${v}". Use um destes: ${MODEL_IDS.join(', ')}`
 
@@ -101,6 +101,7 @@ function projectView(p) {
   return {
     ...p,
     git: gitSettings(p),
+    retry: retrySettings(p),
     available,
     bootstrap: bootstrapErrors.has(p.id) ? 'failed' : (available ? bootstrapStatus(p.path) : 'unknown'),
     bootstrapError: bootstrapErrors.get(p.id) || null,
@@ -113,6 +114,11 @@ function projectView(p) {
 function startWatcher(project) {
   if (watchers.has(project.id) || !fs.existsSync(project.path)) return
   watchers.set(project.id, watchProject(project, emit))
+}
+
+function stopWatcher(projectId) {
+  watchers.get(projectId)?.close()
+  watchers.delete(projectId)
 }
 
 // ---- boot ----
@@ -131,7 +137,12 @@ for (const p of db.projects) autoEnqueue(p)
 scheduler.start()
 
 // ---- app ----
-const app = Fastify()
+const app = await buildApp({
+  db, runner, devServers, emit, sockets, bootstrapErrors,
+  claudeAvailable: () => claudeAvailable,
+  startWatcher, stopWatcher, autoEnqueue,
+})
+// const app = Fastify()
 await app.register(cors, { origin: true })
 await app.register(websocket)
 
@@ -189,8 +200,27 @@ app.post('/api/projects', (req, reply) => {
 app.patch('/api/projects/:projectId', (req, reply) => {
   const p = getProject(req.params.projectId)
   if (!p) return reply.code(404).send({ error: 'projeto não encontrado' })
-  const { name, skipPermissions, git, defaultModel, autoRun, autoDecompose, devServer, timeoutMs, enrichMode } = req.body || {}
+  const { name, skipPermissions, git, defaultModel, autoRun, autoDecompose, devServer, timeoutMs, enrichMode, verifyCommand, retry } = req.body || {}
   if (name !== undefined) p.name = name
+  if (verifyCommand !== undefined) p.verifyCommand = String(verifyCommand || '').trim() || null
+  if (retry !== undefined && typeof retry === 'object' && retry !== null) {
+    const next = { ...DEFAULT_RETRY, ...(p.retry || {}) }
+    if (retry.maxAttempts !== undefined) {
+      const n = Number(retry.maxAttempts)
+      if (!Number.isInteger(n) || n < 1 || n > 10) {
+        return reply.code(400).send({ error: 'retry.maxAttempts deve ser um inteiro entre 1 e 10' })
+      }
+      next.maxAttempts = n
+    }
+    if (retry.backoffMinutes !== undefined) {
+      const n = Number(retry.backoffMinutes)
+      if (!Number.isFinite(n) || n < 0 || n > 1440) {
+        return reply.code(400).send({ error: 'retry.backoffMinutes deve estar entre 0 e 1440' })
+      }
+      next.backoffMinutes = n
+    }
+    p.retry = next
+  }
   if (skipPermissions !== undefined) p.skipPermissions = !!skipPermissions
   if (timeoutMs !== undefined) {
     if (timeoutMs === null || timeoutMs === '') {
@@ -327,19 +357,52 @@ function withProject(req, reply) {
   return p
 }
 
+// Valida depends_on: ids precisam existir no projeto, nada de auto-dependência e
+// nada de ciclo (A→B→A trava a fila para sempre). taskId é o id da própria task
+// (num POST ainda não existe: usamos um sentinel que nunca colide com um id real).
+function validateDeps(projectPath, taskId, value) {
+  const deps = normalizeDependsOn(value)
+  if (!deps.length) return { deps }
+  const known = new Set(listTasks(projectPath).map(t => t.id))
+  const missing = deps.filter(id => !known.has(id))
+  if (missing.length) return { error: `depends_on referencia task inexistente: ${missing.join(', ')}` }
+  if (deps.includes(taskId)) return { error: 'depends_on não pode referenciar a própria task' }
+  if (hasDependencyCycle(listTasks(projectPath), taskId, deps)) {
+    return { error: 'depends_on cria um ciclo de dependências' }
+  }
+  return { deps }
+}
+
 app.get('/api/projects/:projectId/tasks', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
   return { tasks: listTasks(p.path) }
 })
 
+app.get('/api/projects/:projectId/templates', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  return { templates: listTemplates(p.path) }
+})
+
+// Custos/histórico: agrega os blocos `run` dos .md por dia/modelo/status.
+// ?days=0 (ou ausente de janela) = período inteiro.
+app.get('/api/projects/:projectId/stats', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  const days = req.query.days === undefined ? 30 : Number(req.query.days)
+  if (!Number.isFinite(days) || days < 0) return reply.code(400).send({ error: 'days inválido' })
+  return computeStats(listTasks(p.path), { days, defaultModel: p.defaultModel || null })
+})
+
 app.post('/api/projects/:projectId/tasks', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
-  const { title, description, priority, tags, status, model, enrich, decompose, scheduled_at } = req.body || {}
+  const { title, description, priority, tags, status, model, enrich, decompose, scheduled_at, template, depends_on } = req.body || {}
   if (!title) return reply.code(400).send({ error: 'title é obrigatório' })
   if (model && !normalizeModel(model)) return reply.code(400).send({ error: invalidModelMsg(model) })
+  if (template && !findTemplate(p.path, template)) return reply.code(400).send({ error: `template não encontrado: ${template}` })
   const when = scheduled_at ? parseWhen(scheduled_at) : null
   if (scheduled_at && !when) return reply.code(400).send({ error: 'scheduled_at inválido (use uma data ISO)' })
-  const task = createTask(p.path, { title, description, priority, tags, status, model: normalizeModel(model), enrich, decompose, scheduled_at: when })
+  const { deps, error } = validateDeps(p.path, '__new__', depends_on)
+  if (error) return reply.code(400).send({ error })
+  const task = createTask(p.path, { title, description, priority, tags, status, model: normalizeModel(model), enrich, decompose, scheduled_at: when, depends_on: deps, template })
   emit('task.upserted', { projectId: p.id, task })
   return { task }
 })
@@ -372,6 +435,11 @@ app.patch('/api/projects/:projectId/tasks/:taskId', (req, reply) => {
       patch.scheduled_at = iso
     }
   }
+  if (patch.depends_on !== undefined) {
+    const { deps, error } = validateDeps(p.path, req.params.taskId, patch.depends_on)
+    if (error) return reply.code(400).send({ error })
+    patch.depends_on = deps
+  }
   const task = updateTask(p.path, req.params.taskId, patch)
   if (before.status !== task.status) {
     emit('task.moved', { projectId: p.id, taskId: task.id, from: before.status, to: task.status })
@@ -399,6 +467,65 @@ app.get('/api/projects/:projectId/tasks/:taskId/diff', (req, reply) => {
   return { diff: fs.readFileSync(file, 'utf8') }
 })
 
+// Aprovar/descartar o resultado de uma task pelo diff. São ações explícitas do
+// humano: o merge em `main` é justamente o que o guard.mjs bloqueia para o agente.
+const busyWithTask = taskId =>
+  runner.actives.has(taskId) || runner.queue.some(q => q.taskId === taskId)
+
+const taskWithBranch = (req, reply, p) => {
+  const task = findTask(p.path, req.params.taskId)
+  if (!task) { reply.code(404).send({ error: 'task não encontrada' }); return null }
+  if (busyWithTask(task.id)) { reply.code(409).send({ error: 'task em execução ou na fila — pare antes' }); return null }
+  const branch = task.run?.branch
+  if (!branch) { reply.code(409).send({ error: 'a task não tem branch registrada' }); return null }
+  return { task, branch }
+}
+
+const withTag = (task, tag) => [...new Set([...(task.tags || []), tag])]
+
+app.post('/api/projects/:projectId/tasks/:taskId/approve', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  const ctx = taskWithBranch(req, reply, p); if (!ctx) return
+  const { task, branch } = ctx
+  let result
+  try {
+    result = mergeTaskBranch(p, branch)
+  } catch (e) {
+    return reply.code(409).send({ error: e.message, conflict: !!e.conflict })
+  }
+  const archive = req.body?.archive !== false
+  const updated = updateTask(p.path, task.id, {
+    tags: withTag(task, 'merged'),
+    status: archive ? 'archived' : 'done',
+  })
+  if (updated.status !== task.status) {
+    emit('task.moved', { projectId: p.id, taskId: task.id, from: task.status, to: updated.status })
+  }
+  emit('task.upserted', { projectId: p.id, task: updated })
+  emit('project.updated', { projectId: p.id })
+  return { task: updated, ...result }
+})
+
+app.post('/api/projects/:projectId/tasks/:taskId/discard', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  const ctx = taskWithBranch(req, reply, p); if (!ctx) return
+  const { task, branch } = ctx
+  let deleted
+  try {
+    deleted = deleteTaskBranch(p, branch).deleted
+  } catch (e) {
+    return reply.code(409).send({ error: e.message })
+  }
+  try { fs.rmSync(diffFile(p.path, task.id), { force: true }) } catch {}
+  const updated = updateTask(p.path, task.id, {
+    tags: withTag(task, 'discarded'),
+    run: { has_diff: false, branch: null },
+  })
+  emit('task.upserted', { projectId: p.id, task: updated })
+  emit('project.updated', { projectId: p.id })
+  return { task: updated, branch, deleted }
+})
+
 app.get('/api/projects/:projectId/tasks/:taskId/log', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
   const task = findTask(p.path, req.params.taskId)
@@ -418,6 +545,56 @@ app.post('/api/projects/:projectId/analyze', async (req, reply) => {
   } catch (e) {
     return reply.code(500).send({ error: e.message })
   }
+})
+
+// ---- importar issues do GitHub como tasks ----
+// Toda task importada leva a tag `gh:<n>`: é ela (e não o título) que identifica a
+// issue de origem, então reimportar a mesma issue não duplica card.
+app.get('/api/projects/:projectId/issues', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  let issues
+  try {
+    issues = listIssues(p.path, { state: req.query.state === 'all' ? 'all' : 'open' })
+  } catch (e) {
+    return reply.code(e.code ? 409 : 500).send({ error: e.message })
+  }
+  const imported = new Set(listTasks(p.path).flatMap(t => (t.tags || []).filter(tag => tag.startsWith('gh:'))))
+  return { issues: issues.map(i => ({ ...i, imported: imported.has(issueTag(i.number)) })) }
+})
+
+app.post('/api/projects/:projectId/issues/import', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  const numbers = [...new Set((req.body?.numbers || []).map(Number).filter(Number.isInteger))]
+  if (!numbers.length) return reply.code(400).send({ error: 'numbers é obrigatório (issues a importar)' })
+  const { priority, status } = req.body || {}
+
+  let issues
+  try {
+    issues = listIssues(p.path, { state: 'all' })
+  } catch (e) {
+    return reply.code(e.code ? 409 : 500).send({ error: e.message })
+  }
+  const byNumber = new Map(issues.map(i => [i.number, i]))
+  const existing = new Set(listTasks(p.path).flatMap(t => t.tags || []))
+
+  const created = []
+  const skipped = []
+  for (const n of numbers) {
+    const issue = byNumber.get(n)
+    if (!issue) { skipped.push({ number: n, reason: 'issue não encontrada' }); continue }
+    if (existing.has(issueTag(n))) { skipped.push({ number: n, reason: 'já importada' }); continue }
+    const task = createTask(p.path, {
+      title: issue.title,
+      description: issueDescription(issue),
+      priority: PRIORITIES.includes(priority) ? priority : 'medium',
+      tags: ['issue', issueTag(n)],
+      status: STATUSES.includes(status) ? status : 'backlog',
+    })
+    existing.add(issueTag(n))
+    created.push(task)
+    emit('task.upserted', { projectId: p.id, task })
+  }
+  return { created, skipped }
 })
 
 // ---- enriquecer/reescrever a descrição de uma task (sob demanda) ----
@@ -490,6 +667,28 @@ app.post('/api/projects/:projectId/tasks/:taskId/run', (req, reply) => {
   return runner.getQueueView()
 })
 
+// Responder a uma "## Human Request": grava a resposta no corpo da task (seção
+// "## Human Response") e enfileira. O runner consome a resposta no início do run —
+// retomando a sessão anterior com --resume quando ela existe.
+app.post('/api/projects/:projectId/tasks/:taskId/human-response', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  if (!claudeAvailable) return reply.code(409).send({ error: 'CLI `claude` não encontrado no PATH' })
+  const task = findTask(p.path, req.params.taskId)
+  if (!task) return reply.code(404).send({ error: 'task não encontrada' })
+  const response = String(req.body?.response ?? '').trim()
+  if (!response) return reply.code(400).send({ error: 'response é obrigatório' })
+  const view = runner.getQueueView()
+  if (view.actives.some(a => a.taskId === task.id) || view.queue.some(q => q.taskId === task.id)) {
+    return reply.code(409).send({ error: 'task já está na fila ou em execução — aguarde terminar' })
+  }
+  updateTask(p.path, task.id, { body: replaceSection(task.body, 'Human Response', response) })
+  // enqueue (auto: false) remove a tag human-request e devolve a task para a fila.
+  runner.enqueue(p.id, task.id)
+  const updated = findTask(p.path, task.id)
+  emit('task.upserted', { projectId: p.id, task: updated })
+  return { task: updated, queue: runner.getQueueView() }
+})
+
 // Desmembrar agora: roda a sessão de decomposição imediatamente (fora da fila).
 app.post('/api/projects/:projectId/tasks/:taskId/decompose', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
@@ -545,6 +744,22 @@ app.post('/api/projects/:projectId/queue/resume', (req, reply) => {
   runner.tick()
   return { project: projectView(p) }
 })
+
+// ---- pausa global da fila (todos os projetos) ----
+// Sempre em modo "drenar": nada novo sai da fila, mas as sessões já ativas
+// terminam normalmente. Sem `until` a pausa é indefinida (até o resume).
+app.post('/api/run/pause', (req, reply) => {
+  const raw = req.body?.until
+  let until = null
+  if (raw) {
+    until = parseWhen(raw)
+    if (!until) return reply.code(400).send({ error: 'until inválido (use uma data ISO)' })
+    if (!isFuture(until)) return reply.code(400).send({ error: 'until precisa estar no futuro' })
+  }
+  return runner.pause(until)
+})
+
+app.post('/api/run/resume', () => runner.resume())
 
 app.post('/api/run/concurrency', req => {
   runner.setConcurrency(req.body?.max)
