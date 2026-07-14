@@ -37,6 +37,7 @@ export const api = {
   claudeConfigFile: (pid, path) => fetch(`/api/projects/${pid}/claude-config/file?path=${encodeURIComponent(path)}`).then(j),
   saveClaudeConfigFile: (pid, path, content) => fetch(`/api/projects/${pid}/claude-config/file`, { ...opts({ path, content }), method: 'PUT' }).then(j),
   enrichTask: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}/enrich`, opts({})).then(j),
+  answerHumanRequest: (pid, tid, response) => fetch(`/api/projects/${pid}/tasks/${tid}/human-response`, opts({ response })).then(j),
   suggestionTypes: () => fetch('/api/suggestion-types').then(j),
   analyze: (pid, types) => fetch(`/api/projects/${pid}/analyze`, opts({ types })).then(j),
   issues: pid => fetch(`/api/projects/${pid}/issues`).then(j),

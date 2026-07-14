@@ -9,6 +9,7 @@ import {
 } from './lib/paths.js'
 import {
   listTasks, findTask, createTask, updateTask, reconcileProject,
+  normalizeDependsOn, hasDependencyCycle,
 } from './lib/tasks.js'
 import { listTemplates, findTemplate } from './lib/templates.js'
 import { sortTasks } from './lib/sort.js'
@@ -351,6 +352,22 @@ function withProject(req, reply) {
   return p
 }
 
+// Valida depends_on: ids precisam existir no projeto, nada de auto-dependência e
+// nada de ciclo (A→B→A trava a fila para sempre). taskId é o id da própria task
+// (num POST ainda não existe: usamos um sentinel que nunca colide com um id real).
+function validateDeps(projectPath, taskId, value) {
+  const deps = normalizeDependsOn(value)
+  if (!deps.length) return { deps }
+  const known = new Set(listTasks(projectPath).map(t => t.id))
+  const missing = deps.filter(id => !known.has(id))
+  if (missing.length) return { error: `depends_on referencia task inexistente: ${missing.join(', ')}` }
+  if (deps.includes(taskId)) return { error: 'depends_on não pode referenciar a própria task' }
+  if (hasDependencyCycle(listTasks(projectPath), taskId, deps)) {
+    return { error: 'depends_on cria um ciclo de dependências' }
+  }
+  return { deps }
+}
+
 app.get('/api/projects/:projectId/tasks', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
   return { tasks: listTasks(p.path) }
@@ -372,13 +389,15 @@ app.get('/api/projects/:projectId/stats', (req, reply) => {
 
 app.post('/api/projects/:projectId/tasks', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
-  const { title, description, priority, tags, status, model, enrich, decompose, scheduled_at, template } = req.body || {}
+  const { title, description, priority, tags, status, model, enrich, decompose, scheduled_at, template, depends_on } = req.body || {}
   if (!title) return reply.code(400).send({ error: 'title é obrigatório' })
   if (model && !normalizeModel(model)) return reply.code(400).send({ error: invalidModelMsg(model) })
   if (template && !findTemplate(p.path, template)) return reply.code(400).send({ error: `template não encontrado: ${template}` })
   const when = scheduled_at ? parseWhen(scheduled_at) : null
   if (scheduled_at && !when) return reply.code(400).send({ error: 'scheduled_at inválido (use uma data ISO)' })
-  const task = createTask(p.path, { title, description, priority, tags, status, model: normalizeModel(model), enrich, decompose, scheduled_at: when, template })
+  const { deps, error } = validateDeps(p.path, '__new__', depends_on)
+  if (error) return reply.code(400).send({ error })
+  const task = createTask(p.path, { title, description, priority, tags, status, model: normalizeModel(model), enrich, decompose, scheduled_at: when, depends_on: deps, template })
   emit('task.upserted', { projectId: p.id, task })
   return { task }
 })
@@ -410,6 +429,11 @@ app.patch('/api/projects/:projectId/tasks/:taskId', (req, reply) => {
       if (!iso) return reply.code(400).send({ error: 'scheduled_at inválido (use uma data ISO)' })
       patch.scheduled_at = iso
     }
+  }
+  if (patch.depends_on !== undefined) {
+    const { deps, error } = validateDeps(p.path, req.params.taskId, patch.depends_on)
+    if (error) return reply.code(400).send({ error })
+    patch.depends_on = deps
   }
   const task = updateTask(p.path, req.params.taskId, patch)
   if (before.status !== task.status) {
@@ -577,6 +601,28 @@ app.post('/api/projects/:projectId/tasks/:taskId/run', (req, reply) => {
   const ok = runner.enqueue(p.id, req.params.taskId)
   if (!ok) return reply.code(409).send({ error: 'task já está na fila ou não existe' })
   return runner.getQueueView()
+})
+
+// Responder a uma "## Human Request": grava a resposta no corpo da task (seção
+// "## Human Response") e enfileira. O runner consome a resposta no início do run —
+// retomando a sessão anterior com --resume quando ela existe.
+app.post('/api/projects/:projectId/tasks/:taskId/human-response', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  if (!claudeAvailable) return reply.code(409).send({ error: 'CLI `claude` não encontrado no PATH' })
+  const task = findTask(p.path, req.params.taskId)
+  if (!task) return reply.code(404).send({ error: 'task não encontrada' })
+  const response = String(req.body?.response ?? '').trim()
+  if (!response) return reply.code(400).send({ error: 'response é obrigatório' })
+  const view = runner.getQueueView()
+  if (view.actives.some(a => a.taskId === task.id) || view.queue.some(q => q.taskId === task.id)) {
+    return reply.code(409).send({ error: 'task já está na fila ou em execução — aguarde terminar' })
+  }
+  updateTask(p.path, task.id, { body: replaceSection(task.body, 'Human Response', response) })
+  // enqueue (auto: false) remove a tag human-request e devolve a task para a fila.
+  runner.enqueue(p.id, task.id)
+  const updated = findTask(p.path, task.id)
+  emit('task.upserted', { projectId: p.id, task: updated })
+  return { task: updated, queue: runner.getQueueView() }
 })
 
 // Desmembrar agora: roda a sessão de decomposição imediatamente (fora da fila).

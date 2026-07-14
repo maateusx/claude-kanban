@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadState, saveState, diffFile, logFile } from './paths.js'
-import { findTask, updateTask, appendToSection, listTasks, createTask, getSection } from './tasks.js'
+import { findTask, updateTask, appendToSection, listTasks, createTask, getSection, removeSection } from './tasks.js'
 import { decomposeTask } from './decomposer.js'
 import { prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo } from './git.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
@@ -29,10 +29,35 @@ export function retrySettings(project) {
 // Cards com ela ficam fora do auto-pilot até o humano responder e re-executar.
 export const HUMAN_REQUEST_TAG = 'human-request'
 
+const HISTORY_SECTION = 'Histórico de Human Requests'
+
 // O agente sinaliza bloqueio por decisão humana escrevendo uma seção
 // "## Human Request" com conteúdo no arquivo da task.
 export function hasHumanRequest(body) {
   return !!getSection(body, 'Human Request')
+}
+
+// O humano responde pela UI: a resposta entra no corpo da task como uma seção
+// "## Human Response". Ela é consumida no início do run seguinte.
+export function hasHumanResponse(body) {
+  return !!getSection(body, 'Human Response')
+}
+
+// Tira a pergunta/resposta do corpo e arquiva o par no histórico, para que o run
+// seguinte não tente responder de novo à mesma pergunta (e o agente possa abrir
+// uma nova "## Human Request" limpa). Devolve o par consumido, ou null.
+export function consumeHumanAnswer(projectPath, taskId) {
+  const task = findTask(projectPath, taskId)
+  const response = getSection(task?.body, 'Human Response')
+  if (!response) return null
+  const request = getSection(task.body, 'Human Request')
+
+  let body = removeSection(task.body, 'Human Response')
+  body = removeSection(body, 'Human Request')
+  updateTask(projectPath, taskId, { body })
+  appendToSection(projectPath, taskId, HISTORY_SECTION,
+    `**[${new Date().toISOString()}] Pergunta:**\n\n${request || '(sem seção "## Human Request")'}\n\n**Resposta do humano:**\n\n${response}`)
+  return { request, response }
 }
 const MAX_CONCURRENCY = 8
 
@@ -238,11 +263,31 @@ export class Runner {
     return gitSettings(project).useWorktree && isGitRepo(project.path)
   }
 
-  eligible(projectId) {
+  // Dependências (depends_on) ainda não satisfeitas de uma task. Uma dependência
+  // conta como satisfeita quando está done/archived ou já rodou com sucesso
+  // (ledger — o status vive na pasta e pode se perder). Dependência apontando para
+  // task inexistente é ignorada: um id morto travaria a fila para sempre.
+  pendingDeps(project, taskId) {
+    let tasks
+    try { tasks = listTasks(project.path) } catch { return [] }
+    const task = tasks.find(t => t.id === taskId)
+    if (!task?.depends_on?.length) return []
+    const byId = new Map(tasks.map(t => [t.id, t]))
+    return task.depends_on.filter(id => {
+      const dep = byId.get(id)
+      if (!dep) return false
+      return dep.status !== 'done' && dep.status !== 'archived' && !wasSucceeded(id)
+    })
+  }
+
+  eligible(projectId, taskId) {
     const project = this.getProject(projectId)
     if (!project) return true // start() descarta e segue
     // Fila adiada: os itens ficam na fila, na ordem, mas nada sai dela até a hora.
     if (isFuture(project.queuePausedUntil)) return false
+    // Dependência pendente: o item continua na fila (na mesma posição) e só sai
+    // num tick posterior, quando a task de que depende concluir.
+    if (taskId && this.pendingDeps(project, taskId).length) return false
     const busy = [...this.actives.values()].some(a => a.projectId === projectId)
     return !busy || this.canRunConcurrently(project)
   }
@@ -250,7 +295,7 @@ export class Runner {
   tick() {
     if (this.isPaused()) return
     while (this.actives.size < this.maxConcurrency && this.queue.length > 0) {
-      const idx = this.queue.findIndex(q => this.eligible(q.projectId))
+      const idx = this.queue.findIndex(q => this.eligible(q.projectId, q.taskId))
       if (idx === -1) return
       const [next] = this.queue.splice(idx, 1)
       this.persist()
@@ -258,7 +303,10 @@ export class Runner {
     }
   }
 
-  start(projectId, taskId, { skipDecompose = false } = {}) {
+  // human: par { request, response } já consumido do corpo — só vem preenchido no
+  // retry sem resume (o corpo já não tem mais as seções). noResume: força o run
+  // normal, com o prompt completo, mesmo havendo sessão anterior.
+  start(projectId, taskId, { skipDecompose = false, noResume = false, human = null } = {}) {
     const project = this.getProject(projectId)
     if (!project) return
     let task = findTask(project.path, taskId)
@@ -271,6 +319,15 @@ export class Runner {
       : (task.decompose == null && project.autoDecompose) ? 'auto'
       : null
     if (decomposeMode) return this.startDecompose(project, taskId, decomposeMode)
+
+    // Resposta humana pendente: sai do corpo (vai para o histórico) antes de
+    // preparar o workspace — o worktree copia o .claude/ do projeto, então o
+    // arquivo que o agente vai ler precisa já estar limpo.
+    const answer = human || consumeHumanAnswer(project.path, taskId)
+    const sessionId = task.run?.session_id || null
+    // Continuar a sessão anterior só faz sentido quando há resposta humana para
+    // entregar: sem ela, o run é uma re-execução do zero.
+    const resumeFrom = !noResume && answer && sessionId ? sessionId : null
 
     let workspace
     try {
@@ -304,7 +361,9 @@ export class Runner {
     const enrichMode = task.enrich === true ? 'always'
       : task.enrich === false ? 'off'
       : (project.enrichMode || 'off')
-    const prompt = buildPrompt(taskRelPath, md, workspace.branch, gitSettings(project), enrichMode)
+    const prompt = resumeFrom
+      ? buildResumePrompt(taskRelPath, answer, workspace.branch, gitSettings(project))
+      : buildPrompt(taskRelPath, md, workspace.branch, gitSettings(project), enrichMode, answer)
 
     // O Claude Code não auto-aprova edits em .claude/ mesmo com acceptEdits.
     // Como as tasks vivem em .claude/claude-kanban/tasks/, liberamos Edit/Write
@@ -314,6 +373,7 @@ export class Runner {
     const allowedTools = [project.allowedTools, ...allowRules].filter(Boolean).join(' ')
 
     const args = [
+      ...(resumeFrom ? ['--resume', resumeFrom] : []),
       '-p', prompt,
       '--output-format', 'stream-json',
       '--verbose',
@@ -332,7 +392,7 @@ export class Runner {
     const timeoutMs = project.timeoutMs || DEFAULT_TIMEOUT_MS
     const a = {
       projectId, taskId, child, timer: null, result: null, stderr: '', workspace, taskRelPath, timeoutMs,
-      logStream: null, logBytes: 0, logEvents: [],
+      logStream: null, logBytes: 0, logEvents: [], resumeFrom, answer,
     }
 
     // Log persistido: cada run recomeça o arquivo do zero (o drawer mostra a
@@ -350,7 +410,12 @@ export class Runner {
     }, timeoutMs)
 
     this.actives.set(taskId, a)
-    this.emit('run.started', { projectId, taskId, pid: child.pid })
+    if (resumeFrom) {
+      const note = { type: 'raw', text: `[resume] continuando a sessão ${resumeFrom} com a resposta humana` }
+      this.recordLog(a, note)
+      this.emit('run.log', { projectId, taskId, event: note })
+    }
+    this.emit('run.started', { projectId, taskId, pid: child.pid, resumedFrom: resumeFrom })
 
     let buf = ''
     child.stdout.on('data', chunk => {
@@ -447,6 +512,9 @@ export class Runner {
         tags: ['subtask', `pai:${parent.id}`],
         status: 'todo',
         model: parent.model || null,
+        // O modelo devolve as subtasks já ordenadas por dependência: encadeamos em
+        // série para a fila respeitar essa ordem (a 3ª não roda antes da 1ª).
+        depends_on: created.length ? [created[created.length - 1].id] : [],
       })
       created.push(t)
       this.emit('task.upserted', { projectId: a.projectId, task: t })
@@ -568,6 +636,17 @@ export class Runner {
 
     const task = findTask(project.path, a.taskId)
     const attempts = task?.run?.attempts || 0
+
+    // Resume falhou (sessão expirada, id desconhecido, CLI sem o histórico…):
+    // cai no run normal, com o prompt completo, levando junto a pergunta e a
+    // resposta humana — que já saíram do corpo da task.
+    if (a.resumeFrom && exitCode !== 0 && !a.killed && !a.timedOut) {
+      appendToSection(project.path, a.taskId, 'Log de erros',
+        `[${runMeta.completed_at}] Falha ao retomar a sessão ${a.resumeFrom} (exit code ${exitCode}). ` +
+        `Re-executando do zero com o prompt completo.\n\n\`\`\`\n${(a.stderr || '').slice(-2000)}\n\`\`\``)
+      this.start(a.projectId, a.taskId, { noResume: true, human: a.answer })
+      return
+    }
 
     if (a.killed && !a.timedOut) {
       updateTask(project.path, a.taskId, { status: 'todo', run: runMeta })
@@ -718,14 +797,62 @@ em "## Resultado" o que já foi feito, e encerre normalmente. O orquestrador dev
 o card para revisão humana.
 `
 
-function buildPrompt(taskRelPath, md, branch, g, enrichMode = 'off') {
+// Bloco com o par pergunta/resposta quando o run é uma retomada sem sessão (ou um
+// fallback de resume que falhou): as seções já saíram do corpo da task, então o
+// contexto precisa vir pelo prompt.
+function humanAnswerBlock(answer) {
+  if (!answer) return ''
+  return `
+Numa execução anterior você pediu uma decisão humana e o humano respondeu pela UI.
+Considere a resposta abaixo como decidida — não pergunte de novo.
+
+<human-request>
+${answer.request || '(pergunta não registrada)'}
+</human-request>
+
+<human-response>
+${answer.response}
+</human-response>
+`
+}
+
+// Prompt de um run que continua a sessão anterior (`claude --resume`): o modelo já
+// tem todo o contexto da execução que parou na pergunta — só falta a resposta.
+function buildResumePrompt(taskRelPath, answer, branch, g) {
+  return `O humano respondeu à sua "## Human Request" da task ${taskRelPath}.
+
+<human-request>
+${answer.request || '(pergunta não registrada)'}
+</human-request>
+
+<human-response>
+${answer.response}
+</human-response>
+
+Continue a task de onde parou, com essa decisão tomada. A seção "## Human Request"
+já foi removida do arquivo da task (a pergunta e a resposta ficam registradas em
+"## Histórico de Human Requests") — não a recrie, a menos que precise de uma NOVA
+decisão humana.
+${HUMAN_REQUEST_INSTRUCTIONS}
+Instruções obrigatórias ao concluir:
+1. Edite ${taskRelPath}, seção "## Resultado": resumo do que foi feito, decisões
+   técnicas e porquês, arquivos criados/alterados, contexto para memória futura
+   e pendências que exigem ação humana (cite os ids de pending-actions.md).
+2. NÃO altere o frontmatter e NÃO mova o arquivo de pasta — o orquestrador faz isso.
+3. Se uma ação sua for bloqueada pelos guardrails do projeto, não tente contornar:
+   registre no Resultado e siga com o restante da task.
+4. Se não conseguir concluir, escreva em "## Resultado" o que foi tentado,
+   onde travou e o que falta.${gitInstructions(branch, g)}`
+}
+
+function buildPrompt(taskRelPath, md, branch, g, enrichMode = 'off', answer = null) {
   return `Você vai executar a task abaixo, definida no arquivo ${taskRelPath} deste projeto.
 Siga a skill "claude-kanban" deste projeto para o workflow de tasks.
 
 <task>
 ${md}
 </task>
-${enrichInstructions(enrichMode)}${HUMAN_REQUEST_INSTRUCTIONS}
+${humanAnswerBlock(answer)}${enrichInstructions(enrichMode)}${HUMAN_REQUEST_INSTRUCTIONS}
 Instruções obrigatórias ao concluir:
 1. Edite ${taskRelPath}, seção "## Resultado": resumo do que foi feito, decisões
    técnicas e porquês, arquivos criados/alterados, contexto para memória futura
