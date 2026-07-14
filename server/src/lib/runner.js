@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadState, saveState, diffFile, logFile } from './paths.js'
@@ -21,6 +21,29 @@ export function hasHumanRequest(body) {
   return !!getSection(body, 'Human Request')
 }
 const MAX_CONCURRENCY = 8
+
+// Gate de verificação pós-run: comando do projeto (testes/lint) executado no
+// worktree da task antes de ela poder virar `done`.
+const VERIFY_TIMEOUT_MS = 10 * 60 * 1000
+const MAX_VERIFY_OUTPUT = 8000
+
+// Roda o verifyCommand no cwd do run. Shell porque o comando é livre
+// ("npm test && npm run lint"). Timeout/erro de spawn contam como falha.
+export function runVerify(command, cwd) {
+  const res = spawnSync(command, {
+    cwd, shell: true, encoding: 'utf8',
+    timeout: VERIFY_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
+  })
+  const out = [res.stdout, res.stderr].filter(Boolean).join('\n').trim()
+  const failedToRun = !!res.error
+  const output = (failedToRun ? `${out}\n${res.error.message}`.trim() : out).slice(-MAX_VERIFY_OUTPUT)
+  return {
+    command,
+    ok: !failedToRun && res.status === 0,
+    exitCode: failedToRun ? -1 : res.status,
+    output: output || '(sem saída)',
+  }
+}
 
 // Teto do log persistido por task. Um run longo com tool_results grandes passa
 // fácil de dezenas de MB; acima do teto paramos de gravar e registramos um
@@ -420,9 +443,28 @@ export class Runner {
   finish(a, exitCode) {
     if (!this.actives.delete(a.taskId)) return
     clearTimeout(a.timer)
-    try { a.logStream?.end() } catch {}
     const project = this.getProject(a.projectId)
-    if (!project) return this.tick()
+    if (!project) { try { a.logStream?.end() } catch {}; return this.tick() }
+
+    // Gate de verificação: `exit 0` do claude não basta para virar done se o
+    // projeto define um comando (testes/lint). Roda no worktree da task, antes
+    // do cleanup, e o resultado vai para o log do run (visível no drawer).
+    const verifyCommand = String(project.verifyCommand || '').trim()
+    let verify = null
+    if (exitCode === 0 && !a.killed && !a.timedOut && verifyCommand) {
+      verify = runVerify(verifyCommand, a.workspace.cwd)
+      const event = {
+        type: 'verify',
+        command: verify.command,
+        ok: verify.ok,
+        exitCode: verify.exitCode,
+        text: verify.output,
+      }
+      this.recordLog(a, event)
+      this.emit('run.log', { projectId: a.projectId, taskId: a.taskId, event })
+    }
+
+    try { a.logStream?.end() } catch {}
 
     // Captura o diff antes/depois do que a task produziu — precisa acontecer
     // antes de remover o worktree.
@@ -470,6 +512,21 @@ export class Runner {
       })
       this.emit('run.finished', {
         projectId: a.projectId, taskId: a.taskId, exitCode, humanRequest: true,
+        costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
+        numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
+      })
+    } else if (verify && !verify.ok && !a.timedOut) {
+      // Verificação reprovou: volta para todo (conta como tentativa) e NÃO entra
+      // no ledger — o card precisa ser re-executado até a build passar.
+      const patch = { status: 'todo', run: runMeta }
+      if (attempts >= 3 && task && !task.tags?.includes('blocked')) {
+        patch.tags = [...(task.tags || []), 'blocked']
+      }
+      updateTask(project.path, a.taskId, patch)
+      appendToSection(project.path, a.taskId, 'Log de erros',
+        `[${runMeta.completed_at}] Verificação falhou: \`${verify.command}\` (exit ${verify.exitCode}).\n\n\`\`\`\n${verify.output}\n\`\`\``)
+      this.emit('run.finished', {
+        projectId: a.projectId, taskId: a.taskId, exitCode, verifyFailed: true,
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
       })

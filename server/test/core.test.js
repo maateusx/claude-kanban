@@ -238,6 +238,62 @@ test('dropProject limpa a fila do projeto removido e emite atualização', () =>
   assert.ok(!loadState().queue.some(q => q.projectId === 'p1'))
 })
 
+// Simula o fim de um run bem-sucedido do claude (exit 0) num projeto dado.
+function finishRun(root, project, taskId, emitted = []) {
+  const runner = new Runner(() => project, (type, p) => emitted.push({ type, ...p }))
+  runner.tick = () => {}
+  runner.queue = []
+  const a = {
+    projectId: project.id, taskId, workspace: { cwd: root }, taskRelPath: 'x.md',
+    result: {}, stderr: '', logEvents: [], logBytes: 0, logStream: null,
+  }
+  runner.actives.set(taskId, a)
+  runner.finish(a, 0)
+  return { runner, a, emitted }
+}
+
+test('gate de verificação: comando que falha devolve a task para todo e não entra no ledger', () => {
+  const root = proj(); bootstrapProject(root)
+  const t = createTask(root, { title: 'Quebra o teste', status: 'doing' })
+  const project = { id: 'p1', path: root, verifyCommand: 'echo "1 test failed" && exit 1' }
+
+  const { a, emitted } = finishRun(root, project, t.id)
+
+  const task = findTask(root, t.id)
+  assert.equal(task.status, 'todo')
+  assert.ok(!wasSucceeded(t.id), 'run reprovado não pode entrar no ledger')
+  assert.match(task.body, /Verificação falhou/)
+  assert.match(task.body, /1 test failed/, 'saída do comando fica no log de erros')
+  assert.ok(emitted.some(e => e.type === 'run.finished' && e.verifyFailed))
+  const ev = a.logEvents.find(e => e.type === 'verify')
+  assert.equal(ev.ok, false)
+  assert.match(ev.text, /1 test failed/)
+})
+
+test('gate de verificação: comando que passa segue para done', () => {
+  const root = proj(); bootstrapProject(root)
+  const t = createTask(root, { title: 'Teste passa', status: 'doing' })
+  const project = { id: 'p1', path: root, verifyCommand: 'exit 0' }
+
+  const { a } = finishRun(root, project, t.id)
+
+  assert.equal(findTask(root, t.id).status, 'done')
+  assert.ok(wasSucceeded(t.id))
+  assert.equal(a.logEvents.find(e => e.type === 'verify').ok, true)
+  clearExecuted(t.id)
+})
+
+test('gate de verificação: sem comando configurado o comportamento é o de sempre', () => {
+  const root = proj(); bootstrapProject(root)
+  const t = createTask(root, { title: 'Sem verify', status: 'doing' })
+
+  const { a } = finishRun(root, { id: 'p1', path: root }, t.id)
+
+  assert.equal(findTask(root, t.id).status, 'done')
+  assert.ok(!a.logEvents.some(e => e.type === 'verify'), 'nenhum comando roda')
+  clearExecuted(t.id)
+})
+
 test('sortTasks: default é prioridade desc, empate pela mais antiga', () => {
   const t = (id, priority, created_at) => ({ id, priority, created_at, title: id })
   const tasks = [
