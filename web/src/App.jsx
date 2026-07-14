@@ -990,6 +990,13 @@ function RunStrip({ task, running, openPending, onRun }) {
       {run.branch && (
         <div className="mt-1 truncate font-mono text-[11px] text-muted">{run.branch}{run.has_diff ? ' · diff' : ''}</div>
       )}
+      {run.pr?.url && (
+        <a href={run.pr.url} target="_blank" rel="noreferrer"
+          onPointerDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}
+          className="mt-1.5 inline-block text-meta text-accent hover:underline">
+          Ver PR{run.pr.number ? ` #${run.pr.number}` : ''} ↗
+        </a>
+      )}
     </div>
   )
 }
@@ -1056,6 +1063,7 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           { label: 'Quebrar em subtasks agora', onClick: onDecompose, disabled: running || queued },
           { label: 'Ver log', onClick: onLog },
           { label: 'Ver diff', onClick: onDiff, disabled: !run.has_diff },
+          { label: 'Ver PR', onClick: () => window.open(run.pr.url, '_blank', 'noreferrer'), disabled: !run.pr?.url },
           { label: 'Arquivar', onClick: onArchive, danger: true, disabled: task.status === 'archived' },
         ]} />
         <button onClick={onClose} title="Fechar (esc)" className="rounded-[6px] px-2 py-1 text-muted hover:bg-hover hover:text-ink">✕</button>
@@ -1141,7 +1149,16 @@ function TaskDrawer({ task, project, queue, pending, onClose, onPatch, onRun, on
           ? <button onClick={onKill} className="text-meta text-danger hover:underline">Matar sessão</button>
           : queued
             ? <button onClick={onDequeue} className="text-meta text-danger hover:underline">Cancelar (tirar da fila)</button>
-            : run.has_diff ? <button onClick={onDiff} className="text-meta text-accent hover:underline">Ver diff</button> : null}>
+            : (run.has_diff || run.pr?.url) ? (
+              <span className="flex items-center gap-2">
+                {run.pr?.url && (
+                  <a href={run.pr.url} target="_blank" rel="noreferrer" className="text-meta text-accent hover:underline">
+                    Ver PR{run.pr.number ? ` #${run.pr.number}` : ''} ↗
+                  </a>
+                )}
+                {run.has_diff && <button onClick={onDiff} className="text-meta text-accent hover:underline">Ver diff</button>}
+              </span>
+            ) : null}>
         {!run.started_at && !running ? (
           <Empty>Nenhuma execução ainda.</Empty>
         ) : (

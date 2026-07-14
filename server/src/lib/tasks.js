@@ -34,6 +34,7 @@ export function taskFileName(task) {
 const DEFAULT_RUN = {
   session_id: null, started_at: null, completed_at: null, exit_code: null,
   cost_usd: null, duration_ms: null, num_turns: null, attempts: 0, has_diff: false,
+  pr: null, // { url, number, state } quando a sessão abriu uma PR (autoPR)
 }
 
 export function defaultBody(description = '') {
