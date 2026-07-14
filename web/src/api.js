@@ -26,6 +26,7 @@ export const api = {
     return b
   }),
   tasks: pid => fetch(`/api/projects/${pid}/tasks`).then(j),
+  stats: (pid, days) => fetch(`/api/projects/${pid}/stats?days=${days ?? 30}`).then(j),
   addTask: (pid, data) => fetch(`/api/projects/${pid}/tasks`, opts(data)).then(j),
   patchTask: (pid, tid, patch) => fetch(`/api/projects/${pid}/tasks/${tid}`, { ...opts(patch), method: 'PATCH' }).then(j),
   archiveTask: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}`, { method: 'DELETE' }).then(j),

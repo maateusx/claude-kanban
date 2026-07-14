@@ -23,6 +23,8 @@ const VIEWS = [
   { key: 'todas', label: 'Todas', columns: ['backlog', 'todo', 'doing', 'done'] },
   { key: 'backlog', label: 'Backlog', columns: ['backlog'] },
   { key: 'arquivadas', label: 'Arquivadas', columns: ['archived'] },
+  // Não é um board: renderiza o painel de custos no lugar das colunas.
+  { key: 'custos', label: 'Custos', columns: [] },
 ]
 
 const PRIORITY = {
@@ -309,6 +311,9 @@ export default function App() {
               onChanged={refreshProjects}
             />
             <div className="flex min-h-0 flex-1">
+              {view === 'custos' ? (
+                <CostsView project={project} tasks={tasks} onOpen={setDetailId} />
+              ) : (
               <DndContext sensors={sensors} collisionDetection={closestCorners}
                 onDragStart={({ active }) => setActiveId(active.id)}
                 onDragCancel={() => setActiveId(null)} onDragEnd={onDragEnd}>
@@ -328,6 +333,7 @@ export default function App() {
                   ) : null}
                 </DragOverlay>
               </DndContext>
+              )}
               {detail && (
                 <TaskDrawer task={detail} project={project} queue={queue}
                   pending={pending.filter(a => a.taskId === detail.id)}
@@ -1422,6 +1428,129 @@ function AddProjectModal({ onClose, onAdd }) {
     </Modal>
   )
 }
+
+/* -------------------------------------------------------------------- custos */
+
+const PERIODS = [
+  { key: '7', label: '7 dias' },
+  { key: '30', label: '30 dias' },
+  { key: '0', label: 'Tudo' },
+]
+
+// Custos de sessão são centavos: 2 casas escondem a maior parte deles.
+export const fmtUsd = v => `$${Number(v || 0).toFixed(Number(v || 0) < 1 ? 3 : 2)}`
+export const fmtPct = v => v == null ? '—' : `${Math.round(v * 100)}%`
+const fmtDay = d => d.slice(8, 10) + '/' + d.slice(5, 7)
+
+function CostsView({ project, tasks, onOpen }) {
+  const [days, setDays] = useState('30')
+  const [stats, setStats] = useState(null)
+  const [error, setError] = useState(null)
+
+  // `tasks` muda quando o WebSocket entrega run.finished (o App refaz o fetch das
+  // tasks), então o painel se atualiza sozinho ao fim de cada execução.
+  useEffect(() => {
+    let alive = true
+    api.stats(project.id, days)
+      .then(d => { if (alive) { setStats(d); setError(null) } })
+      .catch(e => { if (alive) setError(e.message) })
+    return () => { alive = false }
+  }, [project.id, days, tasks])
+
+  if (error) return <div className="flex-1 p-6 text-body text-danger">{error}</div>
+  if (!stats) return <div className="flex-1 p-6 text-body text-muted">Carregando…</div>
+
+  const { totals, byDay, byModel, top } = stats
+  const maxDay = Math.max(...byDay.map(d => d.costUsd), 0)
+
+  return (
+    <div className="min-w-0 flex-1 overflow-y-auto p-6">
+      <div className="mb-4 flex items-center gap-2">
+        <Segmented value={days} onChange={setDays} options={PERIODS} />
+        <span className="text-meta text-muted">
+          {totals.runs} de {totals.tasks} task(s) já executaram
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Stat label="Custo total" value={fmtUsd(totals.costUsd)} />
+        <Stat label="Custo médio por task" value={fmtUsd(totals.avgCostUsd)} />
+        <Stat label="Taxa de sucesso" value={fmtPct(totals.successRate)}
+          hint={`${totals.successes} exit 0 / ${totals.attempts} tentativa(s)`} />
+        <Stat label="Tempo total" value={fmtDur(totals.durationMs) || '—'}
+          hint={`${totals.numTurns} turno(s)`} />
+      </div>
+
+      <Panel title="Custo por dia">
+        {byDay.length === 0 ? <Nothing /> : (
+          <div className="flex h-40 items-end gap-1.5">
+            {byDay.map(d => (
+              <div key={d.date} className="flex min-w-0 flex-1 flex-col items-center gap-1"
+                title={`${d.date} — ${fmtUsd(d.costUsd)} em ${d.runs} run(s)`}>
+                <div className="w-full rounded-t-[3px] bg-accent"
+                  style={{ height: `${maxDay ? Math.max(2, (d.costUsd / maxDay) * 120) : 2}px` }} />
+                <span className="truncate text-meta text-muted">{fmtDay(d.date)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      <Panel title="Custo por modelo">
+        {byModel.length === 0 ? <Nothing /> : (
+          <table className="w-full text-body">
+            <tbody>
+              {byModel.map(m => (
+                <tr key={m.model} className="border-b border-line last:border-0">
+                  <td className="py-1.5 font-mono text-meta">{m.model}</td>
+                  <td className="py-1.5 text-right text-meta text-muted">{m.runs} run(s)</td>
+                  <td className="py-1.5 text-right tabular-nums">{fmtUsd(m.costUsd)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+
+      <Panel title="Top 5 mais caras">
+        {top.length === 0 ? <Nothing /> : (
+          <table className="w-full text-body">
+            <tbody>
+              {top.map(t => (
+                <tr key={t.id} className="cursor-pointer border-b border-line last:border-0 hover:bg-hover"
+                  onClick={() => onOpen(t.id)}>
+                  <td className="max-w-0 truncate py-1.5 pr-2">{t.title}</td>
+                  <td className="py-1.5 text-right text-meta text-muted">{fmtDur(t.durationMs) || '—'}</td>
+                  <td className="py-1.5 text-right text-meta text-muted">
+                    {t.exitCode === 0 ? 'ok' : `exit ${t.exitCode ?? '?'}`}
+                  </td>
+                  <td className="py-1.5 pl-2 text-right tabular-nums">{fmtUsd(t.costUsd)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+    </div>
+  )
+}
+
+const Stat = ({ label, value, hint }) => (
+  <div className="rounded-[8px] border border-line p-3">
+    <div className="text-meta text-muted">{label}</div>
+    <div className="mt-1 text-title font-semibold tabular-nums">{value}</div>
+    {hint && <div className="mt-0.5 text-meta text-muted">{hint}</div>}
+  </div>
+)
+
+const Panel = ({ title, children }) => (
+  <section className="mt-5">
+    <h2 className="mb-2 text-body font-medium text-ink-2">{title}</h2>
+    <div className="rounded-[8px] border border-line p-3">{children}</div>
+  </section>
+)
+
+const Nothing = () => <div className="py-3 text-center text-meta text-muted">Nenhuma execução no período.</div>
 
 function EmptyProjects({ onAdd }) {
   return (

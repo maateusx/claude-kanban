@@ -22,6 +22,7 @@ import { replaceSection } from './lib/tasks.js'
 import { DevServers } from './lib/devservers.js'
 import { DEFAULT_GIT, gitSettings, projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty } from './lib/git.js'
 import { getUsage } from './lib/usage.js'
+import { computeStats } from './lib/stats.js'
 import { MODEL_IDS, normalizeModel } from './lib/models.js'
 import { Scheduler, parseWhen, isFuture } from './lib/scheduler.js'
 
@@ -330,6 +331,15 @@ function withProject(req, reply) {
 app.get('/api/projects/:projectId/tasks', (req, reply) => {
   const p = withProject(req, reply); if (!p) return
   return { tasks: listTasks(p.path) }
+})
+
+// Custos/histórico: agrega os blocos `run` dos .md por dia/modelo/status.
+// ?days=0 (ou ausente de janela) = período inteiro.
+app.get('/api/projects/:projectId/stats', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  const days = req.query.days === undefined ? 30 : Number(req.query.days)
+  if (!Number.isFinite(days) || days < 0) return reply.code(400).send({ error: 'days inválido' })
+  return computeStats(listTasks(p.path), { days, defaultModel: p.defaultModel || null })
 })
 
 app.post('/api/projects/:projectId/tasks', (req, reply) => {
