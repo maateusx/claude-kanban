@@ -20,7 +20,7 @@ import { analyzeProject, SUGGESTION_TYPES } from './lib/analyzer.js'
 import { enrichTask } from './lib/enricher.js'
 import { replaceSection } from './lib/tasks.js'
 import { DevServers } from './lib/devservers.js'
-import { DEFAULT_GIT, gitSettings, projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty } from './lib/git.js'
+import { DEFAULT_GIT, gitSettings, projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty, mergeTaskBranch, deleteTaskBranch } from './lib/git.js'
 import { getUsage } from './lib/usage.js'
 import { MODEL_IDS, normalizeModel } from './lib/models.js'
 import { Scheduler, parseWhen, isFuture } from './lib/scheduler.js'
@@ -397,6 +397,65 @@ app.get('/api/projects/:projectId/tasks/:taskId/diff', (req, reply) => {
   const file = diffFile(p.path, task.id)
   if (!fs.existsSync(file)) return reply.code(404).send({ error: 'nenhum diff registrado para esta task' })
   return { diff: fs.readFileSync(file, 'utf8') }
+})
+
+// Aprovar/descartar o resultado de uma task pelo diff. São ações explícitas do
+// humano: o merge em `main` é justamente o que o guard.mjs bloqueia para o agente.
+const busyWithTask = taskId =>
+  runner.actives.has(taskId) || runner.queue.some(q => q.taskId === taskId)
+
+const taskWithBranch = (req, reply, p) => {
+  const task = findTask(p.path, req.params.taskId)
+  if (!task) { reply.code(404).send({ error: 'task não encontrada' }); return null }
+  if (busyWithTask(task.id)) { reply.code(409).send({ error: 'task em execução ou na fila — pare antes' }); return null }
+  const branch = task.run?.branch
+  if (!branch) { reply.code(409).send({ error: 'a task não tem branch registrada' }); return null }
+  return { task, branch }
+}
+
+const withTag = (task, tag) => [...new Set([...(task.tags || []), tag])]
+
+app.post('/api/projects/:projectId/tasks/:taskId/approve', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  const ctx = taskWithBranch(req, reply, p); if (!ctx) return
+  const { task, branch } = ctx
+  let result
+  try {
+    result = mergeTaskBranch(p, branch)
+  } catch (e) {
+    return reply.code(409).send({ error: e.message, conflict: !!e.conflict })
+  }
+  const archive = req.body?.archive !== false
+  const updated = updateTask(p.path, task.id, {
+    tags: withTag(task, 'merged'),
+    status: archive ? 'archived' : 'done',
+  })
+  if (updated.status !== task.status) {
+    emit('task.moved', { projectId: p.id, taskId: task.id, from: task.status, to: updated.status })
+  }
+  emit('task.upserted', { projectId: p.id, task: updated })
+  emit('project.updated', { projectId: p.id })
+  return { task: updated, ...result }
+})
+
+app.post('/api/projects/:projectId/tasks/:taskId/discard', (req, reply) => {
+  const p = withProject(req, reply); if (!p) return
+  const ctx = taskWithBranch(req, reply, p); if (!ctx) return
+  const { task, branch } = ctx
+  let deleted
+  try {
+    deleted = deleteTaskBranch(p, branch).deleted
+  } catch (e) {
+    return reply.code(409).send({ error: e.message })
+  }
+  try { fs.rmSync(diffFile(p.path, task.id), { force: true }) } catch {}
+  const updated = updateTask(p.path, task.id, {
+    tags: withTag(task, 'discarded'),
+    run: { has_diff: false, branch: null },
+  })
+  emit('task.upserted', { projectId: p.id, task: updated })
+  emit('project.updated', { projectId: p.id })
+  return { task: updated, branch, deleted }
 })
 
 app.get('/api/projects/:projectId/tasks/:taskId/log', (req, reply) => {
