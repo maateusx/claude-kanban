@@ -5,7 +5,7 @@ import { loadTask, isSelfWrite, statusFromPath, findTask } from './tasks.js'
 import { listPendingActions } from './pending.js'
 
 // Um watcher por projeto. Detecta unlink+add do mesmo id como move.
-export function watchProject(project, emit) {
+export function watchProject(project, emit, chokidarOptions = {}) {
   const tasksGlob = path.join(kanbanDir(project.path), 'tasks')
   const pending = pendingFile(project.path)
   const recentUnlinks = new Map() // taskId inferido por nome de arquivo -> {status, timer}
@@ -13,6 +13,7 @@ export function watchProject(project, emit) {
   const watcher = chokidar.watch([tasksGlob, pending], {
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 },
+    ...chokidarOptions,
   })
 
   const idFromFile = f => path.basename(f, '.md').match(/--(\w+)$/)?.[1] || path.basename(f)

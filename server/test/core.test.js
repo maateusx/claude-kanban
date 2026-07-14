@@ -3,11 +3,14 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createTask, updateTask, listTasks, loadTask, reconcileProject, findTask } from '../src/lib/tasks.js'
+
+import { createTask, updateTask, listTasks, loadTask, reconcileProject, findTask, hasDependencyCycle, normalizeDependsOn, getSection } from '../src/lib/tasks.js'
 import { bootstrapProject, mergeSettings, uninstallFromSettings, bootstrapStatus } from '../src/lib/bootstrap.js'
 import { listPendingActions, resolvePendingAction } from '../src/lib/pending.js'
-import { tasksDir, pendingFile, loadState } from '../src/lib/paths.js'
-import { Runner } from '../src/lib/runner.js'
+import { tasksDir, pendingFile, loadState, templatesDir } from '../src/lib/paths.js'
+import { listTemplates, findTemplate } from '../src/lib/templates.js'
+import { Runner, consumeHumanAnswer, hasHumanRequest, hasHumanResponse } from '../src/lib/runner.js'
+import { removeSection, replaceSection } from '../src/lib/tasks.js'
 import { markSucceeded, wasSucceeded, getExecuted, clearExecuted } from '../src/lib/ledger.js'
 import { sortTasks } from '../src/lib/sort.js'
 
@@ -238,6 +241,151 @@ test('dropProject limpa a fila do projeto removido e emite atualização', () =>
   assert.ok(!loadState().queue.some(q => q.projectId === 'p1'))
 })
 
+test('depends_on: persiste no frontmatter e normaliza', () => {
+  const root = proj(); bootstrapProject(root)
+  const a = createTask(root, { title: 'A', status: 'todo' })
+  const b = createTask(root, { title: 'B', status: 'todo', depends_on: [a.id, a.id, ''] })
+  assert.deepEqual(b.depends_on, [a.id])
+  assert.match(readFileSync(b.filePath, 'utf8'), new RegExp(`depends_on:\\n\\s+- ${a.id}`))
+  assert.deepEqual(findTask(root, b.id).depends_on, [a.id])
+
+  // string solta (humano editando o .md na mão) vira lista
+  assert.deepEqual(normalizeDependsOn(a.id), [a.id])
+  assert.deepEqual(updateTask(root, b.id, { depends_on: [] }).depends_on, [])
+})
+
+test('hasDependencyCycle detecta ciclo direto e indireto', () => {
+  const tasks = [
+    { id: 'a', depends_on: [] },
+    { id: 'b', depends_on: ['a'] },
+    { id: 'c', depends_on: ['b'] },
+  ]
+  assert.equal(hasDependencyCycle(tasks, 'd', ['c']), false, 'cadeia linear não é ciclo')
+  assert.equal(hasDependencyCycle(tasks, 'a', ['c']), true, 'a→c→b→a fecha o ciclo')
+  assert.equal(hasDependencyCycle(tasks, 'a', ['a']), true, 'auto-dependência é ciclo')
+})
+
+test('fila: task com dependência pendente não sai da fila; sai quando a dependência conclui', () => {
+  const root = proj(); bootstrapProject(root)
+  const dep = createTask(root, { title: 'Primeiro', status: 'todo' })
+  const blocked = createTask(root, { title: 'Depois', priority: 'urgent', status: 'todo', depends_on: [dep.id] })
+
+  const started = []
+  const runner = new Runner(() => ({ id: 'p1', path: root }), () => {})
+  runner.start = (projectId, taskId) => { started.push(taskId) } // não spawna o claude de verdade
+  runner.queue = []
+
+  // a bloqueada é urgent: entra na frente na fila, mas o tick não pode iniciá-la
+  runner.enqueue('p1', blocked.id, { auto: true })
+  runner.enqueue('p1', dep.id, { auto: true })
+  assert.deepEqual(runner.queue.map(q => q.taskId), [blocked.id], 'a bloqueada continua na fila')
+  assert.deepEqual(started, [dep.id], 'a dependente não roda antes da dependência')
+
+  // dependência concluída: a bloqueada dispara no tick seguinte
+  updateTask(root, dep.id, { status: 'done' })
+  runner.tick()
+  assert.deepEqual(started, [dep.id, blocked.id])
+  assert.equal(runner.queue.length, 0)
+})
+
+test('fila: dependência apontando para id inexistente não trava a task', () => {
+  const root = proj(); bootstrapProject(root)
+  const t = createTask(root, { title: 'Órfã', status: 'todo', depends_on: ['zzzzzz'] })
+  const started = []
+  const runner = new Runner(() => ({ id: 'p1', path: root }), () => {})
+  runner.start = (_p, taskId) => { started.push(taskId) }
+  runner.queue = []
+  runner.enqueue('p1', t.id, { auto: true })
+  assert.deepEqual(started, [t.id])
+})
+
+test('removeSection tira cabeçalho e conteúdo, preservando as demais seções', () => {
+  const body = '\n## Descrição\n\nfazer X\n\n## Human Request\n\nA ou B?\n\n## Resultado\n\nnada\n'
+  const out = removeSection(body, 'Human Request')
+  assert.ok(!out.includes('Human Request'))
+  assert.ok(out.includes('fazer X') && out.includes('## Resultado'))
+  assert.equal(removeSection(body, 'Inexistente'), body)
+})
+
+test('consumeHumanAnswer: tira pergunta/resposta do corpo e arquiva no histórico', () => {
+  const root = proj(); bootstrapProject(root)
+  const t = createTask(root, { title: 'Decidir', status: 'todo', description: 'fazer X' })
+  updateTask(root, t.id, {
+    body: replaceSection(replaceSection(t.body, 'Human Request', 'A ou B?'), 'Human Response', 'vai de B'),
+  })
+
+  const before = findTask(root, t.id)
+  assert.ok(hasHumanRequest(before.body) && hasHumanResponse(before.body))
+
+  const answer = consumeHumanAnswer(root, t.id)
+  assert.deepEqual(answer, { request: 'A ou B?', response: 'vai de B' })
+
+  const after = findTask(root, t.id)
+  assert.equal(hasHumanRequest(after.body), false, 'a pergunta sai do corpo')
+  assert.equal(hasHumanResponse(after.body), false, 'a resposta sai do corpo')
+  assert.match(after.body, /## Histórico de Human Requests/)
+  assert.match(after.body, /A ou B\?[\s\S]*vai de B/)
+  assert.match(after.body, /fazer X/, 'a descrição continua lá')
+
+  // idempotente: sem resposta pendente, o run seguinte não repete a mesma pergunta
+  assert.equal(consumeHumanAnswer(root, t.id), null)
+})
+// Simula o fim de um run bem-sucedido do claude (exit 0) num projeto dado.
+function finishRun(root, project, taskId, emitted = []) {
+  const runner = new Runner(() => project, (type, p) => emitted.push({ type, ...p }))
+  runner.tick = () => {}
+  runner.queue = []
+  const a = {
+    projectId: project.id, taskId, workspace: { cwd: root }, taskRelPath: 'x.md',
+    result: {}, stderr: '', logEvents: [], logBytes: 0, logStream: null,
+  }
+  runner.actives.set(taskId, a)
+  runner.finish(a, 0)
+  return { runner, a, emitted }
+}
+
+test('gate de verificação: comando que falha devolve a task para todo e não entra no ledger', () => {
+  const root = proj(); bootstrapProject(root)
+  const t = createTask(root, { title: 'Quebra o teste', status: 'doing' })
+  const project = { id: 'p1', path: root, verifyCommand: 'echo "1 test failed" && exit 1' }
+
+  const { a, emitted } = finishRun(root, project, t.id)
+
+  const task = findTask(root, t.id)
+  assert.equal(task.status, 'todo')
+  assert.ok(!wasSucceeded(t.id), 'run reprovado não pode entrar no ledger')
+  assert.match(task.body, /Verificação falhou/)
+  assert.match(task.body, /1 test failed/, 'saída do comando fica no log de erros')
+  assert.ok(emitted.some(e => e.type === 'run.finished' && e.verifyFailed))
+  const ev = a.logEvents.find(e => e.type === 'verify')
+  assert.equal(ev.ok, false)
+  assert.match(ev.text, /1 test failed/)
+})
+
+test('gate de verificação: comando que passa segue para done', () => {
+  const root = proj(); bootstrapProject(root)
+  const t = createTask(root, { title: 'Teste passa', status: 'doing' })
+  const project = { id: 'p1', path: root, verifyCommand: 'exit 0' }
+
+  const { a } = finishRun(root, project, t.id)
+
+  assert.equal(findTask(root, t.id).status, 'done')
+  assert.ok(wasSucceeded(t.id))
+  assert.equal(a.logEvents.find(e => e.type === 'verify').ok, true)
+  clearExecuted(t.id)
+})
+
+test('gate de verificação: sem comando configurado o comportamento é o de sempre', () => {
+  const root = proj(); bootstrapProject(root)
+  const t = createTask(root, { title: 'Sem verify', status: 'doing' })
+
+  const { a } = finishRun(root, { id: 'p1', path: root }, t.id)
+
+  assert.equal(findTask(root, t.id).status, 'done')
+  assert.ok(!a.logEvents.some(e => e.type === 'verify'), 'nenhum comando roda')
+  clearExecuted(t.id)
+})
+
 test('sortTasks: default é prioridade desc, empate pela mais antiga', () => {
   const t = (id, priority, created_at) => ({ id, priority, created_at, title: id })
   const tasks = [
@@ -271,4 +419,49 @@ test('fila: task de prioridade mais alta entra na frente das menores', () => {
   const med2 = createTask(root, { title: 'Med 2', priority: 'medium', status: 'todo' })
   runner.enqueue('p1', med2.id, { auto: true })
   assert.deepEqual(runner.queue.map(q => q.taskId), [urgent.id, med.id, med2.id, low.id])
+})
+
+test('templates: bootstrap instala exemplos e não sobrescreve edições do usuário', () => {
+  const root = proj()
+  bootstrapProject(root)
+  const bug = path.join(templatesDir(root), 'bug-report.md')
+  assert.ok(existsSync(bug))
+  assert.ok(existsSync(path.join(templatesDir(root), 'feature.md')))
+
+  writeFileSync(bug, '---\ntitle: Meu bug\n---\n\n## Descrição\n\nmeu\n')
+  bootstrapProject(root) // re-run
+  assert.match(readFileSync(bug, 'utf8'), /Meu bug/)
+})
+
+test('templates: criar task com template preenche corpo, tags e prioridade', () => {
+  const root = proj()
+  bootstrapProject(root)
+  const tpls = listTemplates(root)
+  assert.deepEqual(tpls.map(t => t.id).sort(), ['bug-report', 'feature'])
+
+  const t = createTask(root, { title: 'Login quebrado', description: 'não loga', template: 'bug-report', status: 'todo' })
+  assert.equal(t.priority, 'high')
+  assert.deepEqual(t.tags, ['bug'])
+  assert.match(t.body, /## Passos para reproduzir/)
+  assert.match(t.body, /## Comportamento esperado/)
+  assert.equal(getSection(t.body, 'Descrição'), 'não loga')
+  // as seções que o runner/backend escrevem sobrevivem
+  assert.match(t.body, /## Resultado/)
+  assert.match(t.body, /## Log de erros/)
+
+  // request explícito vence os defaults do template
+  const t2 = createTask(root, { title: 'x', priority: 'low', tags: ['ui'], template: 'feature' })
+  assert.equal(t2.priority, 'low')
+  assert.deepEqual(t2.tags, ['ui'])
+})
+
+test('templates: projeto sem pasta de templates usa o esqueleto padrão', () => {
+  const root = proj()
+  for (const s of ['backlog', 'todo']) mkdirSync(tasksDir(root, s), { recursive: true })
+  assert.deepEqual(listTemplates(root), [])
+  const t = createTask(root, { title: 'Sem template', description: 'oi' })
+  assert.equal(getSection(t.body, 'Descrição'), 'oi')
+  assert.match(t.body, /## Resultado/)
+  // id fora da pasta (path traversal) não resolve
+  assert.equal(findTemplate(root, '../../../etc/passwd'), null)
 })

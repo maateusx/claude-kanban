@@ -68,8 +68,10 @@ function FileDiff({ file }) {
   )
 }
 
-export function DiffDrawer({ projectId, task, onClose }) {
+export function DiffDrawer({ projectId, task, onClose, onResolved }) {
   const [state, setState] = useState({ loading: true, error: null, files: [] })
+  const [action, setAction] = useState(null)      // 'approve' | 'discard' enquanto roda
+  const [actionError, setActionError] = useState(null)
   useEffect(() => {
     let alive = true
     api.taskDiff(projectId, task.id)
@@ -80,6 +82,23 @@ export function DiffDrawer({ projectId, task, onClose }) {
 
   const additions = state.files.reduce((n, f) => n + f.additions, 0)
   const deletions = state.files.reduce((n, f) => n + f.deletions, 0)
+  const branch = task.run?.branch
+
+  const run = (kind, confirmMsg, call) => {
+    if (action) return
+    if (!confirm(confirmMsg)) return
+    setActionError(null)
+    setAction(kind)
+    call()
+      .then(res => onResolved?.(kind, res))
+      .catch(e => { setActionError(e.message); setAction(null) })
+  }
+  const approve = () => run('approve',
+    `Mergear "${branch}" na branch principal e arquivar a task?`,
+    () => api.approveTask(projectId, task.id))
+  const discard = () => run('discard',
+    `Descartar o trabalho da task? A branch "${branch}" e o diff serão apagados. Isso não tem volta.`,
+    () => api.discardTask(projectId, task.id))
 
   return (
     <div className="fixed inset-y-0 right-0 z-40 flex w-[720px] max-w-full flex-col border-l border-line bg-bg">
@@ -101,6 +120,22 @@ export function DiffDrawer({ projectId, task, onClose }) {
         {state.error && <div className="text-body text-danger">{state.error}</div>}
         {state.files.map((f, i) => <FileDiff key={i} file={f} />)}
       </div>
+      {branch && (
+        <div className="border-t border-line px-4 py-3">
+          {actionError && <div className="mb-2 whitespace-pre-wrap text-meta text-danger">{actionError}</div>}
+          <div className="flex items-center gap-2">
+            <button onClick={discard} disabled={!!action}
+              className="rounded-[6px] border border-line px-3 py-1.5 text-meta text-danger hover:bg-hover disabled:opacity-40">
+              {action === 'discard' ? 'Descartando…' : 'Descartar'}
+            </button>
+            <div className="flex-1" />
+            <button onClick={approve} disabled={!!action}
+              className="rounded-[6px] bg-accent px-3 py-1.5 text-meta font-medium text-white hover:bg-accent-hover disabled:opacity-40">
+              {action === 'approve' ? 'Mergeando…' : 'Aprovar (merge)'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
