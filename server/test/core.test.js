@@ -465,3 +465,31 @@ test('templates: projeto sem pasta de templates usa o esqueleto padrão', () => 
   // id fora da pasta (path traversal) não resolve
   assert.equal(findTemplate(root, '../../../etc/passwd'), null)
 })
+
+test('deleteTask apaga arquivo, diff/log e limpa depends_on de outras tasks', async () => {
+  const { deleteTask } = await import('../src/lib/tasks.js')
+  const { diffFile, logFile } = await import('../src/lib/paths.js')
+  const root = proj()
+  bootstrapProject(root)
+  const a = createTask(root, { title: 'Task alvo' })
+  const b = createTask(root, { title: 'Dependente', depends_on: [a.id] })
+  mkdirSync(path.dirname(diffFile(root, a.id)), { recursive: true })
+  writeFileSync(diffFile(root, a.id), 'diff')
+  mkdirSync(path.dirname(logFile(root, a.id)), { recursive: true })
+  writeFileSync(logFile(root, a.id), '{}')
+
+  const removed = deleteTask(root, a.id)
+  assert.equal(removed.id, a.id)
+  assert.ok(!existsSync(removed.filePath))
+  assert.ok(!existsSync(diffFile(root, a.id)))
+  assert.ok(!existsSync(logFile(root, a.id)))
+  assert.equal(findTask(root, a.id), null)
+  assert.deepEqual(findTask(root, b.id).depends_on, [])
+})
+
+test('deleteTask de id inexistente devolve null sem quebrar', async () => {
+  const { deleteTask } = await import('../src/lib/tasks.js')
+  const root = proj()
+  bootstrapProject(root)
+  assert.equal(deleteTask(root, 'nao-existe'), null)
+})

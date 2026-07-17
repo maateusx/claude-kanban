@@ -6,21 +6,27 @@ import { DEFAULT_GIT, gitSettings } from '../lib/git.js'
 import { normalizeModel } from '../lib/models.js'
 import { invalidModelMsg, withProjectRecord, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS } from './helpers.js'
 
+function validateProjectPath(projectPath) {
+  if (!fs.existsSync(projectPath) || !fs.statSync(projectPath).isDirectory()) return 'diretório não existe'
+  try { fs.accessSync(projectPath, fs.constants.W_OK) } catch { return 'diretório não é gravável' }
+  return null
+}
+
 export default function projectRoutes(app, ctx) {
   const { db, runner, devServers, projectView, bootstrapErrors } = ctx
 
   app.get('/api/projects', () => ({ projects: db.projects.map(projectView) }))
 
   app.post('/api/projects', (req, reply) => {
-    const { name, path: projectPath } = req.body || {}
+    const { name, path: projectPath, description } = req.body || {}
     if (!name || !projectPath) return reply.code(400).send({ error: 'name e path são obrigatórios' })
-    if (!fs.existsSync(projectPath) || !fs.statSync(projectPath).isDirectory()) {
-      return reply.code(400).send({ error: 'diretório não existe' })
+    const pathError = validateProjectPath(projectPath)
+    if (pathError) return reply.code(400).send({ error: pathError })
+    const project = {
+      id: nanoid(6), name, path: projectPath,
+      description: String(description || '').trim(),
+      createdAt: new Date().toISOString(), skipPermissions: false,
     }
-    try { fs.accessSync(projectPath, fs.constants.W_OK) } catch {
-      return reply.code(400).send({ error: 'diretório não é gravável' })
-    }
-    const project = { id: nanoid(6), name, path: projectPath, createdAt: new Date().toISOString(), skipPermissions: false }
     db.projects.push(project)
     saveProjects(db)
     try {
@@ -35,8 +41,27 @@ export default function projectRoutes(app, ctx) {
 
   app.patch('/api/projects/:projectId', (req, reply) => {
     const p = withProjectRecord(ctx, req, reply); if (!p) return
-    const { name, skipPermissions, git, defaultModel, autoRun, autoDecompose, devServer, timeoutMs, enrichMode } = req.body || {}
-    if (name !== undefined) p.name = name
+    const { name, description, path: projectPath, skipPermissions, git, defaultModel, autoRun, autoDecompose, devServer, timeoutMs, enrichMode } = req.body || {}
+    if (name !== undefined) {
+      if (!String(name).trim()) return reply.code(400).send({ error: 'name não pode ser vazio' })
+      p.name = String(name).trim()
+    }
+    if (description !== undefined) p.description = String(description || '').trim()
+    if (projectPath !== undefined && projectPath !== p.path) {
+      const pathError = validateProjectPath(projectPath)
+      if (pathError) return reply.code(400).send({ error: pathError })
+      // troca de pasta raiz: para o que aponta para o path antigo e religa no novo
+      ctx.stopWatcher(p.id)
+      devServers.stop(p.id)
+      p.path = projectPath
+      try {
+        bootstrapProject(p.path)
+        bootstrapErrors.delete(p.id)
+      } catch (e) {
+        bootstrapErrors.set(p.id, e.message)
+      }
+      ctx.startWatcher(p)
+    }
     if (skipPermissions !== undefined) p.skipPermissions = !!skipPermissions
     if (timeoutMs !== undefined) {
       if (timeoutMs === null || timeoutMs === '') {

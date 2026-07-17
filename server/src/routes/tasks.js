@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import { diffFile, STATUSES } from '../lib/paths.js'
 import {
-  listTasks, findTask, createTask, updateTask, replaceSection,
+  listTasks, findTask, createTask, updateTask, deleteTask, replaceSection,
   normalizeDependsOn, hasDependencyCycle,
 } from '../lib/tasks.js'
 import { analyzeProject, SUGGESTION_TYPES } from '../lib/analyzer.js'
@@ -112,6 +112,11 @@ export default function taskRoutes(app, ctx) {
     const p = withProject(ctx, req, reply); if (!p) return
     const before = findTask(p.path, req.params.taskId)
     if (!before) return reply.code(404).send({ error: 'task não encontrada' })
+    if (req.query.hard === 'true') {
+      deleteTask(p.path, req.params.taskId)
+      emit('task.removed', { projectId: p.id, taskId: req.params.taskId })
+      return { ok: true }
+    }
     const task = updateTask(p.path, req.params.taskId, { status: 'archived' })
     emit('task.moved', { projectId: p.id, taskId: task.id, from: before.status, to: 'archived' })
     emit('task.upserted', { projectId: p.id, task })

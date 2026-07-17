@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import matter from 'gray-matter'
 import { customAlphabet } from 'nanoid'
-import { STATUSES, tasksDir } from './paths.js'
+import { STATUSES, tasksDir, diffFile, logFile } from './paths.js'
 import { normalizeModel } from './models.js'
 import { findTemplate, bodyFromTemplate } from './templates.js'
 
@@ -213,6 +213,23 @@ export function updateTask(projectPath, taskId, patch) {
     filePath = targetPath
   }
   return loadTask(projectPath, filePath)
+}
+
+// Remove a task do disco de vez (arquivo .md + diff/log associados) e limpa
+// referências em depends_on de outras tasks.
+export function deleteTask(projectPath, taskId) {
+  const task = findTask(projectPath, taskId)
+  if (!task) return null
+  markSelfWrite(task.filePath)
+  fs.rmSync(task.filePath, { force: true })
+  fs.rmSync(diffFile(projectPath, taskId), { force: true })
+  fs.rmSync(logFile(projectPath, taskId), { force: true })
+  for (const t of listTasks(projectPath)) {
+    if ((t.depends_on || []).includes(taskId)) {
+      updateTask(projectPath, t.id, { depends_on: t.depends_on.filter(id => id !== taskId) })
+    }
+  }
+  return task
 }
 
 // Extrai o conteúdo de uma seção "## <header>" do corpo (sem comentários HTML).

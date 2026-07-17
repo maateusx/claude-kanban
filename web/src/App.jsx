@@ -3,6 +3,7 @@ import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors, useDropp
 import { api, connectWS } from './api.js'
 import { reducer, effectsFor, initialState, notificationsFor, pendingIds } from './events.js'
 import * as notifications from './notify.js'
+import * as sounds from './sounds.js'
 import { DiffDrawer } from './Diff.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
 import { MODELS, modelLabel } from './models.js'
@@ -123,6 +124,7 @@ export default function App() {
   const [newTask, setNewTask] = useState(null)     // null | { status }
   const [showPending, setShowPending] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showGlobalSettings, setShowGlobalSettings] = useState(false)
   const [showSuggest, setShowSuggest] = useState(false)
   const [showIssues, setShowIssues] = useState(false)
   const [showClaudeConfig, setShowClaudeConfig] = useState(false)
@@ -141,6 +143,12 @@ export default function App() {
   // sem reconectar a cada render.
   const notifyRef = useRef(notifyOn)
   notifyRef.current = notifyOn
+  const [soundOn, setSoundOn] = useState(sounds.loadSoundEnabled)
+  const soundRef = useRef(soundOn)
+  soundRef.current = soundOn
+  const [soundMap, setSoundMap] = useState(sounds.loadSoundMap)
+  const soundMapRef = useRef(soundMap)
+  soundMapRef.current = soundMap
   const projectsRef = useRef(projects)
   projectsRef.current = projects
   const tasksRef = useRef(tasks)
@@ -163,6 +171,20 @@ export default function App() {
     const on = perm === 'granted'
     setNotifyOn(on)
     notifications.saveNotifyEnabled(on)
+  }, [])
+
+  const setSoundEnabled = useCallback(v => {
+    setSoundOn(v)
+    sounds.saveSoundEnabled(v)
+    if (v) sounds.play('success', soundMapRef.current) // feedback imediato (e destrava o AudioContext no gesto)
+  }, [])
+
+  // Troca o som de uma categoria e já toca o escolhido como preview.
+  const setSoundFor = useCallback((category, variant) => {
+    const map = { ...soundMapRef.current, [category]: variant }
+    setSoundMap(map)
+    sounds.saveSoundMap(map)
+    sounds.playVariant(variant)
   }, [])
 
   const refreshProjects = useCallback(() => api.projects().then(d => {
@@ -189,14 +211,15 @@ export default function App() {
 
     const seen = seenPendingRef.current
     const firstPending = evt.type === 'pending.updated' && !seen.seeded.has(evt.projectId)
-    if (notifyRef.current && !firstPending) {
+    if ((notifyRef.current || soundRef.current) && !firstPending) {
       const ns = notificationsFor(evt, {
         projects: projectsRef.current,
         tasks: tasksRef.current,
         seenPendingIds: seen.ids,
       })
       for (const n of ns) {
-        notifications.notify(n, () => {
+        if (soundRef.current) sounds.play(n.sound, soundMapRef.current)
+        if (notifyRef.current) notifications.notify(n, () => {
           if (n.projectId) setSelectedId(n.projectId)
           if (n.taskId) setDetailId(n.taskId)
         })
@@ -302,7 +325,7 @@ export default function App() {
       <Rail
         projects={projects} selectedId={selectedId} onSelect={setSelectedId} queue={queue} usage={usage}
         onAdd={() => setShowAddProject(true)}
-        onSettings={() => project && setShowSettings(true)}
+        onSettings={() => setShowGlobalSettings(true)}
       />
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {!health.claudeAvailable && (
@@ -367,6 +390,9 @@ export default function App() {
                   onAnswer={text => api.answerHumanRequest(project.id, detail.id, text)}
                   onDiff={() => setDiffTask(detail)}
                   onArchive={() => api.archiveTask(project.id, detail.id).then(() => setDetailId(null))}
+                  onDelete={() => api.deleteTask(project.id, detail.id)
+                    .then(() => { setDetailId(null); api.tasks(project.id).then(d => setTasks(d.tasks)) })
+                    .catch(e => alert(e.message))}
                   onResolve={aid => api.resolvePending(project.id, aid).then(d => setPending(d.actions))} />
               )}
             </div>
@@ -389,7 +415,7 @@ export default function App() {
 
       {showAddProject && (
         <AddProjectModal onClose={() => setShowAddProject(false)}
-          onAdd={(name, path) => api.addProject(name, path)
+          onAdd={(name, path, description) => api.addProject(name, path, description)
             .then(d => { setShowAddProject(false); refreshProjects(); setSelectedId(d.project.id) })
             .catch(e => alert(e.message))} />
       )}
@@ -427,11 +453,16 @@ export default function App() {
       {showClaudeConfig && project && (
         <ClaudeConfigModal project={project} onClose={() => setShowClaudeConfig(false)} />
       )}
-      {showSettings && project && (
-        <SettingsModal project={project} onClose={() => setShowSettings(false)}
+      {showGlobalSettings && (
+        <GlobalSettingsModal onClose={() => setShowGlobalSettings(false)}
           queue={queue} onConcurrency={max => api.setConcurrency(max).then(setQueue)}
           notifyOn={notifyOn} onNotify={setNotifyEnabled}
-          onPatch={patch => api.patchProject(project.id, patch).then(refreshProjects)}
+          soundOn={soundOn} onSound={setSoundEnabled}
+          soundMap={soundMap} onSoundFor={setSoundFor} />
+      )}
+      {showSettings && project && (
+        <SettingsModal project={project} onClose={() => setShowSettings(false)}
+          onPatch={patch => api.patchProject(project.id, patch).then(refreshProjects).catch(e => { alert(e.message); refreshProjects() })}
           onRemove={uninstall => {
             api.removeProject(project.id, uninstall).then(() => { setShowSettings(false); setSelectedId(null); refreshProjects() })
           }} />
@@ -588,10 +619,10 @@ function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue, usage 
         </HoverTip>
       </div>
       <QueueIndicator queue={queue} />
-      <button onClick={onSettings} title="Configurações do projeto"
+      <button onClick={onSettings} title="Configurações globais (valem para todos os projetos)"
         className={`rounded-[6px] p-1.5 text-muted hover:bg-hover hover:text-ink-2 ${expanded ? 'flex items-center gap-2 text-left' : ''}`}>
         <span>⚙</span>
-        {expanded && <span className="text-body">Configurações</span>}
+        {expanded && <span className="text-body">Config. globais</span>}
       </button>
       <UsageRail usage={usage} />
     </aside>
@@ -747,10 +778,13 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
         {project.skipPermissions && <Chip className="text-danger">skip-permissions</Chip>}
         <div className="flex-1" />
         <DevServerButton project={project} onChanged={onChanged} />
+        <button onClick={onSettings} title="Configurações do projeto"
+          className="rounded-[6px] border border-line px-3 py-1.5 text-body text-ink-2 hover:bg-hover">
+          ⚙ Config
+        </button>
         <Menu items={[
           { label: 'Re-rodar bootstrap (guardrails)', onClick: onRerun },
           { label: 'Config do Claude (.claude)', onClick: onClaudeConfig },
-          { label: 'Configurações do projeto', onClick: onSettings },
           { label: '✦ Sugerir tasks com o Claude', onClick: onSuggest, disabled: !health.claudeAvailable },
           { label: 'Importar issues do GitHub', onClick: onImportIssues },
         ]} />
@@ -1177,12 +1211,13 @@ function HumanResponseForm({ onSubmit, disabled, hasSession }) {
   )
 }
 
-function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch, onRun, onDequeue, onDecompose, onKill, onLog, onAnswer, onDiff, onArchive, onResolve, onEnrich, enriching }) {
+function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch, onRun, onDequeue, onDecompose, onKill, onLog, onAnswer, onDiff, onArchive, onDelete, onResolve, onEnrich, enriching }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(task.title)
   const [body, setBody] = useState(task.body ?? '')
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
-  useEffect(() => { setTitle(task.title); setBody(task.body ?? ''); setEditing(false) }, [task.id])
+  useEffect(() => { setTitle(task.title); setBody(task.body ?? ''); setEditing(false); setConfirmDelete(false) }, [task.id])
 
   const running = queue.actives?.some(a => a.taskId === task.id)
   const queued = queue.queue?.some(q => q.taskId === task.id)
@@ -1210,6 +1245,7 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
           { label: 'Ver diff', onClick: onDiff, disabled: !run.has_diff },
           { label: 'Ver PR', onClick: () => window.open(run.pr.url, '_blank', 'noreferrer'), disabled: !run.pr?.url },
           { label: 'Arquivar', onClick: onArchive, danger: true, disabled: task.status === 'archived' },
+          { label: 'Excluir definitivamente', onClick: () => setConfirmDelete(true), danger: true, disabled: running || queued },
         ]} />
         <button onClick={onClose} title="Fechar (esc)" className="rounded-[6px] px-2 py-1 text-muted hover:bg-hover hover:text-ink">✕</button>
       </div>
@@ -1270,6 +1306,18 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
           <div className="mt-1.5 whitespace-pre-wrap text-body text-ink-2">{desc || <Empty>Sem descrição.</Empty>}</div>
           <button onClick={() => setEditing(true)} className="mt-2 self-start text-meta text-accent hover:underline">Editar</button>
         </>
+      )}
+
+      {confirmDelete && (
+        <div className="mt-3 space-y-2 rounded-[8px] border border-danger p-3">
+          <div className="text-body text-danger">
+            Excluir esta task apaga o arquivo .md, o diff e o log de vez — sem como desfazer. Confirma?
+          </div>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={onDelete}>Excluir de vez</Btn>
+            <Btn variant="quiet" onClick={() => setConfirmDelete(false)}>Cancelar</Btn>
+          </div>
+        </div>
       )}
 
       {humanRequest && (
@@ -1565,12 +1613,16 @@ const splitTags = s => s.split(',').map(t => t.trim()).filter(Boolean)
 function AddProjectModal({ onClose, onAdd }) {
   const [name, setName] = useState('')
   const [path, setPath] = useState('')
+  const [description, setDescription] = useState('')
   return (
     <Modal onClose={onClose} title="Cadastrar projeto">
       <form className="space-y-3"
-        onSubmit={e => { e.preventDefault(); if (name && path) onAdd(name, path) }}>
+        onSubmit={e => { e.preventDefault(); if (name && path) onAdd(name, path, description) }}>
         <input autoFocus value={name} onChange={e => setName(e.target.value)} placeholder="Nome do projeto"
           className="w-full rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
+        <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="Descrição (opcional)"
+          rows={2}
+          className="w-full resize-none rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
         <div className="flex gap-2">
           <input value={path} onChange={e => setPath(e.target.value)} placeholder="/caminho/do/projeto"
             className="flex-1 rounded-[6px] border border-line px-3 py-2 font-mono text-body outline-none placeholder:text-muted focus:border-accent" />
@@ -2189,8 +2241,14 @@ function ClaudeConfigModal({ project, onClose }) {
   )
 }
 
-function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurrency, notifyOn, onNotify }) {
+function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const [confirmRemove, setConfirmRemove] = useState(0)
+  const [name, setName] = useState(project.name)
+  const [description, setDescription] = useState(project.description || '')
+  const [projPath, setProjPath] = useState(project.path)
+  // Um PATCH rejeitado (ex.: pasta inexistente) não muda o projeto: re-sincroniza os campos.
+  useEffect(() => { setName(project.name); setDescription(project.description || ''); setProjPath(project.path) },
+    [project.name, project.description, project.path])
   const g = project.git || {}
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
   const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
@@ -2198,7 +2256,6 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
   const retry = project.retry || DEFAULT_RETRY
   const [maxAttempts, setMaxAttempts] = useState(String(retry.maxAttempts))
   const [backoffMin, setBackoffMin] = useState(String(retry.backoffMinutes))
-  const maxConc = queue?.maxConcurrency || 1
   const patchGit = patch => onPatch({ git: patch })
 
   // Campos inválidos voltam ao valor salvo em vez de virar patch — mesmo contrato
@@ -2233,7 +2290,30 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
           <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
         </div>
         <div className="flex-1 space-y-4 overflow-y-auto p-5 text-body">
-        <div className="font-mono text-meta text-muted">{project.path}</div>
+        <label className="flex items-center gap-3">
+          <span>Nome</span>
+          <input value={name} onChange={e => setName(e.target.value)}
+            onBlur={() => { const v = name.trim(); if (!v) return setName(project.name); if (v !== project.name) onPatch({ name: v }) }}
+            onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+            className="flex-1 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
+        </label>
+        <label className="flex items-start gap-3">
+          <span className="mt-1">Descrição</span>
+          <textarea value={description} rows={2} onChange={e => setDescription(e.target.value)}
+            onBlur={() => { if (description.trim() !== (project.description || '')) onPatch({ description: description.trim() }) }}
+            placeholder="Descrição do projeto (opcional)"
+            className="flex-1 resize-none rounded-[6px] border border-line px-2 py-1 text-body outline-none placeholder:text-muted focus:border-accent" />
+        </label>
+        <label className="flex items-center gap-3">
+          <span>Pasta raiz</span>
+          <input value={projPath} onChange={e => setProjPath(e.target.value)}
+            onBlur={() => { const v = projPath.trim(); if (!v) return setProjPath(project.path); if (v !== project.path) onPatch({ path: v }) }}
+            onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+            className="flex-1 rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
+          <Btn type="button" onClick={() => api.pickFolder().then(d => { if (d.path && d.path !== project.path) { setProjPath(d.path); onPatch({ path: d.path }) } }).catch(e => alert(e.message))}>
+            Buscar pasta
+          </Btn>
+        </label>
 
         <label className="flex items-center gap-3">
           <span>Modelo default</span>
@@ -2259,18 +2339,6 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
             </span>
           </span>
         </label>
-
-        <div className="flex items-center gap-3">
-          <span>Tasks simultâneas</span>
-          <div className="flex items-center gap-1 rounded-[6px] border border-line px-1.5 py-0.5 text-meta">
-            <button onClick={() => onConcurrency(maxConc - 1)} disabled={maxConc <= 1}
-              className="px-1 text-muted hover:text-ink disabled:opacity-30">−</button>
-            <span className="font-mono text-ink">{maxConc}×</span>
-            <button onClick={() => onConcurrency(maxConc + 1)} disabled={maxConc >= 8}
-              className="px-1 text-muted hover:text-ink disabled:opacity-30">+</button>
-          </div>
-          <span className="text-meta text-muted">execuções em paralelo (global). Projetos sem worktree isolado ficam limitados a 1 por vez.</span>
-        </div>
 
         <label className="flex items-center gap-3">
           <span>Timeout da execução (minutos)</span>
@@ -2319,8 +2387,6 @@ function SettingsModal({ project, onClose, onPatch, onRemove, queue, onConcurren
             </span>
           </span>
         </div>
-        <NotificationsSetting notifyOn={notifyOn} onNotify={onNotify} />
-
         <div className="rounded-[8px] border border-line p-3">
           <GitCheck label="Desmembrar tasks automaticamente"
             desc="Antes de executar, o Claude avalia cada task sem opção própria de quebra: se ela for grande demais, é desmembrada em subtasks menores em vez de rodar inteira."
@@ -2481,6 +2547,29 @@ function GlobalPauseButton({ queue, usage, onPause, onResume }) {
   )
 }
 
+function GlobalSettingsModal({ onClose, queue, onConcurrency, notifyOn, onNotify, soundOn, onSound, soundMap, onSoundFor }) {
+  const maxConc = queue?.maxConcurrency || 1
+  return (
+    <Modal onClose={onClose} title="Configurações globais">
+      <div className="space-y-4 text-body">
+        <div className="flex items-center gap-3">
+          <span>Tasks simultâneas</span>
+          <div className="flex items-center gap-1 rounded-[6px] border border-line px-1.5 py-0.5 text-meta">
+            <button onClick={() => onConcurrency(maxConc - 1)} disabled={maxConc <= 1}
+              className="px-1 text-muted hover:text-ink disabled:opacity-30">−</button>
+            <span className="font-mono text-ink">{maxConc}×</span>
+            <button onClick={() => onConcurrency(maxConc + 1)} disabled={maxConc >= 8}
+              className="px-1 text-muted hover:text-ink disabled:opacity-30">+</button>
+          </div>
+          <span className="text-meta text-muted">execuções em paralelo entre todos os projetos. Projetos sem worktree isolado ficam limitados a 1 por vez.</span>
+        </div>
+        <NotificationsSetting notifyOn={notifyOn} onNotify={onNotify} />
+        <SoundSetting soundOn={soundOn} onSound={onSound} soundMap={soundMap} onSoundFor={onSoundFor} />
+      </div>
+    </Modal>
+  )
+}
+
 function NotificationsSetting({ notifyOn, onNotify }) {
   const [perm, setPerm] = useState(notifications.permission)
   const supported = notifications.supported()
@@ -2500,6 +2589,42 @@ function NotificationsSetting({ notifyOn, onNotify }) {
         </span>
       </span>
     </label>
+  )
+}
+
+function SoundSetting({ soundOn, onSound, soundMap, onSoundFor }) {
+  const supported = sounds.supported()
+  return (
+    <div className="rounded-[8px] border border-line p-3">
+      <label className="flex items-start gap-3">
+        <input type="checkbox" checked={!!soundOn} disabled={!supported}
+          onChange={e => onSound(e.target.checked)} className="mt-0.5 accent-[var(--color-accent)]" />
+        <span>
+          <span className="font-medium">Sons</span>
+          <span className="mt-1 block text-meta text-muted">
+            {!supported
+              ? 'Este navegador não suporta Web Audio.'
+              : 'Alertas sonoros por categoria de evento. Independente das notificações do sistema. Trocar um som já toca o preview.'}
+          </span>
+        </span>
+      </label>
+      {supported && soundOn && (
+        <div className="mt-3 space-y-2 pl-7">
+          {sounds.CATEGORIES.map(cat => (
+            <div key={cat.key} className="flex items-center gap-2">
+              <span className="w-28 shrink-0">{cat.label}</span>
+              <select value={soundMap[cat.key]} onChange={e => onSoundFor(cat.key, e.target.value)}
+                className="rounded-[6px] border border-line bg-transparent px-1.5 py-0.5 text-meta">
+                {sounds.VARIANTS.map(v => <option key={v.key} value={v.key}>{v.label}</option>)}
+              </select>
+              <button onClick={() => sounds.playVariant(soundMap[cat.key])}
+                className="px-1 text-muted hover:text-ink" title="Ouvir">▶</button>
+              <span className="text-meta text-muted">{cat.hint}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 

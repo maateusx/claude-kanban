@@ -73,7 +73,9 @@ export function notificationsFor(evt, ctx) {
         : evt.exitCode === 0
           ? `✓ Concluída: ${taskLabel(evt.taskId)}`
           : `✕ Falhou: ${taskLabel(evt.taskId)}`
-      return [{ key: `run.finished:${evt.taskId}`, title: projectName, body, projectId: evt.projectId, taskId: evt.taskId }]
+      // Categoria do som: sucesso limpo, pedido de ação manual ou erro.
+      const sound = evt.humanRequest ? 'attention' : evt.exitCode === 0 ? 'success' : 'error'
+      return [{ key: `run.finished:${evt.taskId}`, title: projectName, body, sound, projectId: evt.projectId, taskId: evt.taskId }]
     }
     case 'pending.updated':
       return (evt.actions || [])
@@ -82,6 +84,7 @@ export function notificationsFor(evt, ctx) {
           key: `pending:${a.id}`,
           title: projectName,
           body: `🔒 Ação bloqueada pelos guardrails: ${a.label}`,
+          sound: 'attention',
           projectId: evt.projectId,
           taskId: a.taskId || null,
         }))
