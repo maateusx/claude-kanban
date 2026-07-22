@@ -2,6 +2,8 @@
 
 > [Versão em português](README.pt-BR.md)
 
+> **Disclaimer:** This is an unofficial community project, not affiliated with, endorsed by, or sponsored by Anthropic. "Claude" is a trademark of Anthropic, PBC.
+
 A local task manager (React + Node) for [Claude Code](https://claude.com/claude-code). The kanban board is a visual layer over plain `.md` files in each project's `.claude/claude-kanban/tasks/` folder; tasks are executed in headless sessions (`claude -p`), one at a time, with a live log on the board.
 
 ![claude-kanban board](docs/screenshot.png)
