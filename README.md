@@ -1,69 +1,78 @@
 # claude-kanban
 
-Gerenciador de tasks local (React + Node) para o Claude Code. O kanban é uma camada visual sobre arquivos `.md` em `.claude/claude-kanban/tasks/` de cada projeto; as tasks são executadas em sessões headless (`claude -p`), uma por vez, com log ao vivo no board.
+> [Versão em português](README.pt-BR.md)
 
-Spec completa: [`docs/initial-scope.spec`](docs/initial-scope.spec). Rotas HTTP, eventos WebSocket e layout do estado: [`docs/api.md`](docs/api.md).
+A local task manager (React + Node) for [Claude Code](https://claude.com/claude-code). The kanban board is a visual layer over plain `.md` files in each project's `.claude/claude-kanban/tasks/` folder; tasks are executed in headless sessions (`claude -p`), one at a time, with a live log on the board.
 
-## Requisitos
+![claude-kanban board](docs/screenshot.png)
+
+Full spec: [`docs/initial-scope.spec`](docs/initial-scope.spec). HTTP routes, WebSocket events and state layout: [`docs/api.md`](docs/api.md).
+
+## Requirements
 
 - Node 20+
-- CLI `claude` no PATH (para executar tasks)
+- The `claude` CLI on your PATH (to run tasks)
 
-## Rodando
+## Running
 
 ```bash
 npm install
-npm run dev        # backend em :4400 + frontend em :5544 (proxy /api)
+npm run dev        # backend on :4400 + frontend on :5544 (proxied /api)
 ```
 
-Abra http://localhost:5544, cadastre um projeto (nome + diretório raiz) — isso dispara o **bootstrap**: estrutura de pastas, `guard.mjs`, skill `claude-kanban` e merge dos hooks em `.claude/settings.json` (idempotente, preserva conteúdo existente).
+Open http://localhost:5544 and register a project (name + root directory) — this triggers the **bootstrap**: folder structure, `guard.mjs`, the `claude-kanban` skill, and a merge of the hooks into `.claude/settings.json` (idempotent, preserves existing content).
 
-## Testes
+## Tests
 
 ```bash
-npm test           # suíte do guard.mjs + core (tasks, bootstrap, pending)
+npm test           # guard.mjs suite + core (tasks, bootstrap, pending)
 ```
 
-## Como funciona
+## How it works
 
-- **Fonte da verdade é o filesystem.** Status vive na pasta (`backlog/ todo/ doing/ done/ archived/`) e no frontmatter; em divergência, **a pasta vence** (reconciliação no boot e via watcher).
-- **Sugestão de tasks por análise.** O botão "✨ Sugerir tasks" roda uma sessão headless somente leitura (`Read`/`Glob`/`Grep`) no projeto e sugere tasks dos tipos escolhidos (melhoria, correção, feature, refatoração, teste, documentação). Você seleciona quais viram cards no Backlog — criadas com a tag `sugerida` + o tipo, para filtrar.
-- **Fila global de execução**, concorrência 1. Cada task roda em sessão nova e isolada, `--permission-mode acceptEdits` por padrão, ou `--dangerously-skip-permissions` se o toggle por projeto estiver ligado.
-- **Guardrails determinísticos** (hooks `PreToolUse` com `deny`, valem mesmo sob skip-permissions):
-  - não ler/escrever `.env` (exceto `.example`/`.template`);
-  - não commitar/pushar/mergear em `main`/`master`;
-  - não deletar branches;
-  - não deletar arquivos fora do projeto — ações bloqueadas viram itens em "Ações manuais" (`pending-actions.md`) para o humano.
+- **The filesystem is the source of truth.** Status lives in the folder (`backlog/ todo/ doing/ done/ archived/`) and in the frontmatter; when they disagree, **the folder wins** (reconciled on boot and via the watcher).
+- **Task suggestions by analysis.** The "✨ Suggest tasks" button runs a read-only headless session (`Read`/`Glob`/`Grep`) over the project and suggests tasks of the types you pick (improvement, bugfix, feature, refactor, test, docs). You choose which ones become Backlog cards — created with the `sugerida` tag plus the type, for filtering.
+- **Global execution queue**, concurrency 1. Each task runs in a fresh, isolated session — `--permission-mode acceptEdits` by default, or `--dangerously-skip-permissions` if the per-project toggle is on.
+- **Deterministic guardrails** (`PreToolUse` hooks with `deny`, enforced even under skip-permissions):
+  - no reading/writing `.env` (except `.example`/`.template`);
+  - no committing/pushing/merging to `main`/`master`;
+  - no deleting branches;
+  - no deleting files outside the project — blocked actions become items in "Manual actions" (`pending-actions.md`) for a human to handle.
 
-### Limite honesto dos guardrails
+### Honest limits of the guardrails
 
-O `guard.mjs` funciona por parsing/regex do comando — **não é sandbox**. Comandos ofuscados (variáveis, base64, scripts intermediários) podem escapar. Os guardrails cobrem o caso realista de o modelo tentar a ação diretamente; para isolamento forte, rode o projeto em container/worktree.
+`guard.mjs` works by parsing/regex over the command — **it is not a sandbox**. Obfuscated commands (variables, base64, intermediate scripts) can slip through. The guardrails cover the realistic case of the model attempting the action directly; for strong isolation, run the project in a container/worktree.
 
-## Estrutura
+## Structure
 
 ```
 server/   Fastify + watcher (chokidar) + runner (spawn claude -p) + templates (guard.mjs, SKILL.md)
 web/      React + Vite + Tailwind + dnd-kit
-docs/     spec inicial + docs/api.md (rotas HTTP, eventos WS)
+docs/     initial spec + docs/api.md (HTTP routes, WS events)
 ```
 
-Estado do app em `~/.claude-kanban/`. Sem banco de dados — tudo é arquivo:
+App state lives in `~/.claude-kanban/`. No database — everything is a file:
 
 ```
-projects.json                  projetos cadastrados (path, git, dev server, flags)
-state.json                     fila de execução + concorrência (sobrevive a restarts)
-ledger.json                    tasks que já rodaram com exit 0
-lock                           pid da instância viva (impede duas instâncias)
-worktrees/<projectId>/<taskId> worktree git isolado de cada run
+projects.json                  registered projects (path, git, dev server, flags)
+state.json                     execution queue + concurrency (survives restarts)
+ledger.json                    tasks that have completed with exit 0
+lock                           pid of the live instance (prevents two instances)
+worktrees/<projectId>/<taskId> isolated git worktree for each run
 ```
 
-O **ledger** existe porque o status da task vive na *pasta* do arquivo `.md`, e essas pastas são excluídas dos commits da sessão. Sem ele, uma task concluída cujo `done/` se perdesse (worktree descartado, troca de branch) reapareceria em `todo/` e, com auto-run ligado, re-executaria em loop. Regra: só sucesso entra no ledger; caminhos automáticos nunca re-executam algo registrado (apenas reconciliam o status para `done`); um run pedido explicitamente pelo humano limpa o registro e roda de novo.
+The **ledger** exists because a task's status lives in the *folder* of its `.md` file, and those folders are excluded from session commits. Without it, a completed task whose `done/` entry got lost (discarded worktree, branch switch) would reappear in `todo/` and, with auto-run enabled, re-execute in a loop. The rule: only successes enter the ledger; automated paths never re-run something recorded there (they only reconcile status to `done`); a run explicitly requested by a human clears the record and runs again.
 
-O que é do projeto — e não do app — vive em `<projeto>/.claude/claude-kanban/`: `tasks/<status>/*.md`, `diffs/`, `pending-actions.md`, a skill e o `guard.mjs`.
+What belongs to the project — not the app — lives in `<project>/.claude/claude-kanban/`: `tasks/<status>/*.md`, `diffs/`, `pending-actions.md`, the skill and `guard.mjs`.
 
-### Variáveis de ambiente
+### Environment variables
 
-| Variável | Default | Efeito |
+| Variable | Default | Effect |
 | --- | --- | --- |
-| `PORT` | `4400` | Porta do backend (host fixo em `127.0.0.1`). |
-| `CLAUDE_KANBAN_HOME` | `~/.claude-kanban` | Raiz do estado acima. Aponte para outro diretório para rodar uma instância isolada. |
+| `PORT` | `4400` | Backend port (host fixed at `127.0.0.1`). |
+| `CLAUDE_KANBAN_HOME` | `~/.claude-kanban` | Root of the state above. Point it elsewhere to run an isolated instance. |
+| `CLAUDE_KANBAN_ALLOWED_ORIGINS` | — | Extra allowed `Origin`s (comma-separated) besides `http://localhost:5544` / `http://127.0.0.1:5544`. Requests from other origins or non-localhost hosts get 403. |
+
+## License
+
+[MIT](LICENSE)
