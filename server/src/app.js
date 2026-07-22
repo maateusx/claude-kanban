@@ -59,9 +59,30 @@ export async function buildApp(deps) {
     autoEnqueue: deps.autoEnqueue || (() => {}),
   }
 
+  // O servidor executa código (claude -p) via HTTP: sem essas checagens, qualquer
+  // página aberta no navegador poderia disparar rotas em 127.0.0.1 (CSRF → RCE local).
+  const allowedOrigins = new Set([
+    'http://localhost:5544',
+    'http://127.0.0.1:5544',
+    ...(process.env.CLAUDE_KANBAN_ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean),
+  ])
+  // Host de localhost, qualquer porta (o proxy do Vite preserva o host :5544);
+  // qualquer outro nome indica DNS rebinding.
+  const localHost = h => /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(h || '')
+
   const app = Fastify()
-  await app.register(cors, { origin: true })
+  await app.register(cors, { origin: (origin, cb) => cb(null, !origin || allowedOrigins.has(origin)) })
   await app.register(websocket)
+
+  app.addHook('onRequest', (req, reply, done) => {
+    if (req.headers.origin && !allowedOrigins.has(req.headers.origin)) {
+      return reply.code(403).send({ error: 'origin não permitido' })
+    }
+    if (!localHost(req.headers.host)) {
+      return reply.code(403).send({ error: 'host não permitido' })
+    }
+    done()
+  })
 
   app.get('/api/ws', { websocket: true }, socket => {
     sockets.add(socket)

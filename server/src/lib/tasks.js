@@ -162,7 +162,7 @@ export function findTask(projectPath, taskId) {
   return listTasks(projectPath).find(t => t.id === taskId) || null
 }
 
-export function createTask(projectPath, { title, description, priority = 'medium', tags = [], status = 'backlog', model = null, enrich = null, decompose = null, scheduled_at = null, template = null, depends_on = [] }) {
+export function createTask(projectPath, { title, description, priority = null, tags = [], status = 'backlog', model = null, enrich = null, decompose = null, scheduled_at = null, template = null, depends_on = [] }) {
   if (!STATUSES.includes(status)) status = 'backlog'
   // O template dá o corpo e os defaults de prioridade/tags/modelo; o que veio
   // explícito no request sempre vence.
