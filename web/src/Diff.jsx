@@ -130,7 +130,7 @@ export function DiffDrawer({ projectId, task, onClose, onResolved }) {
             </button>
             <div className="flex-1" />
             <button onClick={approve} disabled={!!action}
-              className="rounded-[6px] bg-accent px-3 py-1.5 text-meta font-medium text-white hover:bg-accent-hover disabled:opacity-40">
+              className="rounded-[6px] bg-accent px-3 py-1.5 text-meta font-medium text-on-accent hover:bg-accent-hover disabled:opacity-40">
               {action === 'approve' ? 'Mergeando…' : 'Aprovar (merge)'}
             </button>
           </div>

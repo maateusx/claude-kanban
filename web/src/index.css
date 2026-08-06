@@ -33,6 +33,13 @@
   --color-chip: #F3F4F6;
   --color-chip-ink: #374151;
 
+  /* Texto que fica por cima de superfícies coloridas (accent, danger, warning).
+     Não é o mesmo que --color-bg: continua branco nos dois temas. */
+  --color-on-accent: #FFFFFF;
+  /* Véu dos modais — já vem com alpha, para não depender de bg-ink/10, que
+     inverteria no tema escuro. */
+  --color-scrim: rgb(17 24 39 / 10%);
+
   --font-sans: Inter, -apple-system, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
 
@@ -41,6 +48,50 @@
   --text-body: 13px;
   --text-meta: 12px;
   --text-key: 11.5px;
+}
+
+/* Tema escuro.
+   Os tokens acima ficam sendo o tema claro (e o fallback); aqui cada um vira
+   light-dark(claro, escuro), que resolve pelo color-scheme do documento. Assim
+   a paleta escura mora num bloco só, e navegador antigo que não conheça
+   light-dark() simplesmente ignora a linha e continua no claro.
+   O color-scheme também acerta de graça scrollbars, form controls e o fundo do
+   canvas. data-theme é escrito por theme.js; sem o atributo, segue o SO. */
+:root { color-scheme: light dark; }
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+:root {
+  --color-bg: light-dark(#FFFFFF, #0F1115);
+  --color-subtle: light-dark(#F9FAFB, #161A20);
+  --color-hover: light-dark(#F3F4F6, #1E242C);
+
+  --color-line: light-dark(#E5E7EB, #272E38);
+  --color-line-strong: light-dark(#D1D5DB, #3A434F);
+
+  --color-ink: light-dark(#111827, #E6E9EE);
+  --color-ink-2: light-dark(#4B5563, #A9B1BD);
+  --color-muted: light-dark(#9CA3AF, #737C88);
+
+  --color-accent: light-dark(#C2410C, #D4550E);
+  --color-accent-hover: light-dark(#9A3412, #EA580C);
+  --color-accent-soft: light-dark(#FFF7ED, #2A1509);
+
+  --color-st-backlog: light-dark(#9CA3AF, #8A929E);
+  --color-st-todo: light-dark(#3B82F6, #60A5FA);
+  --color-st-doing: light-dark(#F59E0B, #FBBF24);
+  --color-st-done: light-dark(#22C55E, #4ADE80);
+  --color-st-archived: light-dark(#6B7280, #6B7280);
+
+  --color-danger: light-dark(#DC2626, #EF4444);
+  --color-success: light-dark(#16A34A, #22C55E);
+  --color-warning: light-dark(#D97706, #D97706);
+  --color-info: light-dark(#8B5CF6, #A78BFA);
+
+  --color-chip: light-dark(#F3F4F6, #1E242C);
+  --color-chip-ink: light-dark(#374151, #C6CCD5);
+
+  --color-scrim: light-dark(rgb(17 24 39 / 10%), rgb(0 0 0 / 45%));
 }
 
 :root {
@@ -78,6 +129,25 @@ button, select, input, textarea { transition: background-color .12s, border-colo
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
   border-radius: 2px;
+}
+
+/* Avatar do projeto: o hue vem do nome (via --ck-h, inline), a luminosidade vem
+   do tema — por isso mora aqui e não no style inline.
+   Como o hue é dinâmico, light-dark() não serve (ela só troca cores inteiras),
+   então aqui a variação de tema é por seletor mesmo. */
+.ck-avatar {
+  background: hsl(var(--ck-h) 62% 92%);
+  color: hsl(var(--ck-h) 45% 30%);
+}
+:root[data-theme="dark"] .ck-avatar {
+  background: hsl(var(--ck-h) 38% 22%);
+  color: hsl(var(--ck-h) 60% 78%);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .ck-avatar {
+    background: hsl(var(--ck-h) 38% 22%);
+    color: hsl(var(--ck-h) 60% 78%);
+  }
 }
 
 /* Dots de atividade do run strip, com stagger. */
