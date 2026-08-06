@@ -36,6 +36,8 @@ export const api = {
   taskLog: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}/log`).then(j),
   approveTask: (pid, tid, archive) => fetch(`/api/projects/${pid}/tasks/${tid}/approve`, opts({ archive })).then(j),
   discardTask: (pid, tid) => fetch(`/api/projects/${pid}/tasks/${tid}/discard`, opts({})).then(j),
+  plugins: pid => fetch(`/api/projects/${pid}/plugins`).then(j),
+  setPlugins: (pid, enabled) => fetch(`/api/projects/${pid}/plugins`, { ...opts({ enabled }), method: 'PUT' }).then(j),
   claudeConfig: pid => fetch(`/api/projects/${pid}/claude-config`).then(j),
   claudeConfigFile: (pid, path) => fetch(`/api/projects/${pid}/claude-config/file?path=${encodeURIComponent(path)}`).then(j),
   saveClaudeConfigFile: (pid, path, content) => fetch(`/api/projects/${pid}/claude-config/file`, { ...opts({ path, content }), method: 'PUT' }).then(j),

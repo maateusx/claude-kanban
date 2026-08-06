@@ -58,16 +58,21 @@ test('backoff reagenda a task no futuro enquanto sobrar tentativa', () => {
   assert.equal(blocked.scheduled_at, null)
 })
 
-test('defaults preservam o comportamento atual: 3 tentativas, sem agendamento', () => {
+// Defaults econômicos: 2 tentativas e backoff de 10 min. A terceira tentativa
+// quase nunca acrescenta informação, e backoff 0 fazia o auto-run repescar a task
+// no mesmo tick — duas sessões inteiras pagas pela mesma falha determinística.
+test('defaults: 2 tentativas, com backoff de 10 min entre elas', () => {
   const { project, runner, taskId } = setup(undefined)
-  for (const attempts of [1, 2]) {
-    updateTask(project.path, taskId, { run: { attempts } })
-    const t = failRun(runner, project, taskId)
-    assert.ok(!t.tags.includes('blocked'))
-    assert.equal(t.scheduled_at, null)
-  }
-  updateTask(project.path, taskId, { run: { attempts: 3 } })
-  assert.ok(failRun(runner, project, taskId).tags.includes('blocked'))
+  updateTask(project.path, taskId, { run: { attempts: 1 } })
+  const retried = failRun(runner, project, taskId)
+  assert.ok(!retried.tags.includes('blocked'))
+  const delta = Date.parse(retried.scheduled_at) - Date.now()
+  assert.ok(delta > 9 * 60_000 && delta <= 10 * 60_000 + 5_000, `delta inesperado: ${delta}`)
+
+  updateTask(project.path, taskId, { run: { attempts: 2 }, scheduled_at: null })
+  const blocked = failRun(runner, project, taskId)
+  assert.ok(blocked.tags.includes('blocked'))
+  assert.equal(blocked.scheduled_at, null)
 })
 
 test('sem auto-run não agenda backoff (o humano é quem re-executa)', () => {
