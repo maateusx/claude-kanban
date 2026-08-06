@@ -87,3 +87,48 @@ test('health responde com claudeAvailable', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/health' })
   assert.deepEqual(json(res), { ok: true, claudeAvailable: true })
 })
+
+// O form de retentativas existia na UI desde sempre, mas o PATCH descartava o
+// campo silenciosamente — não havia como baixar as retentativas de um projeto.
+test('PATCH persiste retry e maxTurns e valida os limites', async () => {
+  const p = db.projects[0]
+
+  const ok = await app.inject({
+    method: 'PATCH', url: `/api/projects/${p.id}`,
+    payload: { retry: { maxAttempts: 1, backoffMinutes: 30 }, maxTurns: 25, auxModel: 'claude-haiku-4-5-20251001' },
+  })
+  assert.equal(ok.statusCode, 200)
+  assert.deepEqual(json(ok).project.retry, { maxAttempts: 1, backoffMinutes: 30 })
+  assert.equal(json(ok).project.maxTurns, 25)
+  assert.equal(json(ok).project.auxModel, 'claude-haiku-4-5-20251001')
+
+  // Patch parcial preserva o outro campo do retry.
+  const partial = await app.inject({
+    method: 'PATCH', url: `/api/projects/${p.id}`, payload: { retry: { maxAttempts: 3 } },
+  })
+  assert.deepEqual(json(partial).project.retry, { maxAttempts: 3, backoffMinutes: 30 })
+
+  // 0 desliga o teto de turnos (volta ao comportamento antigo).
+  const off = await app.inject({ method: 'PATCH', url: `/api/projects/${p.id}`, payload: { maxTurns: 0 } })
+  assert.equal(json(off).project.maxTurns, 0)
+
+  for (const payload of [{ retry: { maxAttempts: 0 } }, { retry: { backoffMinutes: -1 } }, { maxTurns: 9999 }]) {
+    const bad = await app.inject({ method: 'PATCH', url: `/api/projects/${p.id}`, payload })
+    assert.equal(bad.statusCode, 400, `esperava 400 para ${JSON.stringify(payload)}`)
+  }
+})
+
+// Só o caminho de validação: instalar de verdade baixaria repositórios de
+// terceiros, o que não cabe num teste.
+test('PUT /plugins rejeita payload inválido antes de tocar no CLI', async () => {
+  const p = db.projects[0]
+
+  const semArray = await app.inject({ method: 'PUT', url: `/api/projects/${p.id}/plugins`, payload: {} })
+  assert.equal(semArray.statusCode, 400)
+
+  const desconhecido = await app.inject({
+    method: 'PUT', url: `/api/projects/${p.id}/plugins`, payload: { enabled: ['ponytail', 'malware'] },
+  })
+  assert.equal(desconhecido.statusCode, 400)
+  assert.match(json(desconhecido).error, /malware/)
+})

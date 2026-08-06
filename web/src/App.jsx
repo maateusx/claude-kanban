@@ -4,6 +4,7 @@ import { api, connectWS } from './api.js'
 import { reducer, effectsFor, initialState, notificationsFor, pendingIds } from './events.js'
 import * as notifications from './notify.js'
 import * as sounds from './sounds.js'
+import * as theme from './theme.js'
 import { DiffDrawer } from './Diff.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
 import { MODELS, modelLabel } from './models.js'
@@ -37,8 +38,8 @@ const PRIORITY = {
 
 const hash = s => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) | 0; return Math.abs(h) }
 const tagHue = t => hash(t) % 360
-const avatarBg = name => `hsl(${tagHue(name)} 62% 92%)`
-const avatarInk = name => `hsl(${tagHue(name)} 45% 30%)`
+// A cor do avatar do projeto é derivada do hue acima, mas as luminosidades
+// dependem do tema — ficam na classe .ck-avatar (index.css).
 const initials = name => (name || '?').trim().split(/[\s\-_/]+/).slice(0, 2).map(w => w[0]).join('').toUpperCase().slice(0, 2)
 
 // O corpo da task é o .md inteiro; a UI mostra apenas a seção pedida.
@@ -476,7 +477,7 @@ export default function App() {
 const Btn = ({ variant = 'ghost', className = '', ...props }) => {
   const base = 'rounded-[6px] px-3 py-1.5 text-body disabled:opacity-40'
   const styles = {
-    primary: 'bg-accent font-medium text-white hover:bg-accent-hover',
+    primary: 'bg-accent font-medium text-on-accent hover:bg-accent-hover',
     ghost: 'border border-line text-ink-2 hover:bg-hover',
     quiet: 'text-ink-2 hover:bg-hover',
     danger: 'border border-line text-danger hover:bg-hover',
@@ -566,7 +567,7 @@ function HoverTip({ label, disabled, children, className }) {
       {children}
       {rect && (
         <div role="tooltip" style={{ position: 'fixed', left: rect.right + 8, top: rect.top + rect.height / 2 }}
-          className="pointer-events-none z-50 -translate-y-1/2 whitespace-nowrap rounded-[6px] border border-line bg-ink px-2 py-1 text-meta text-white">
+          className="pointer-events-none z-50 -translate-y-1/2 whitespace-nowrap rounded-[6px] border border-line bg-ink px-2 py-1 text-meta text-bg">
           {label}
         </div>
       )}
@@ -581,7 +582,7 @@ function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue, usage 
       className={`flex shrink-0 flex-col gap-2 border-r border-line py-3 ${expanded ? 'items-stretch px-2' : 'items-center'}`}>
       <div className={`flex items-center gap-2 ${expanded ? 'justify-between px-1' : 'flex-col'}`}>
         <span title="claude-kanban"
-          className="flex size-8 shrink-0 items-center justify-center rounded-[8px] bg-accent text-meta font-bold text-white">K</span>
+          className="flex size-8 shrink-0 items-center justify-center rounded-[8px] bg-accent text-meta font-bold text-on-accent">K</span>
         <button onClick={toggle} aria-expanded={expanded}
           title={expanded ? 'Colapsar sidebar' : 'Expandir sidebar'}
           className="rounded-[6px] p-1.5 text-muted hover:bg-hover hover:text-ink-2">{expanded ? '«' : '»'}</button>
@@ -594,12 +595,12 @@ function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue, usage 
               <button onClick={() => onSelect(p.id)}
                 className={`flex w-full items-center gap-2 rounded-[8px] ${expanded ? 'px-1.5 py-1 hover:bg-hover' : 'justify-center'} ${p.id === selectedId ? (expanded ? 'bg-hover' : '') : ''}`}>
                 <span
-                  className={`relative flex size-9 shrink-0 items-center justify-center rounded-[8px] text-meta font-semibold ${p.id === selectedId ? 'ring-2 ring-accent' : ''}`}
-                  style={{ background: avatarBg(p.name), color: avatarInk(p.name) }}>
+                  className={`ck-avatar relative flex size-9 shrink-0 items-center justify-center rounded-[8px] text-meta font-semibold ${p.id === selectedId ? 'ring-2 ring-accent' : ''}`}
+                  style={{ '--ck-h': tagHue(p.name) }}>
                   {initials(p.name)}
                   {!p.available && <span title="diretório indisponível" className="absolute -left-1 -top-1 text-danger">!</span>}
                   {p.pendingCount > 0 && (
-                    <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-warning px-1 text-[10px] font-semibold leading-4 text-white">{p.pendingCount}</span>
+                    <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-warning px-1 text-[10px] font-semibold leading-4 text-on-accent">{p.pendingCount}</span>
                   )}
                   {running && <Dot className="absolute -bottom-0.5 -right-0.5 animate-pulse bg-st-doing" />}
                 </span>
@@ -643,7 +644,8 @@ function QueueIndicator({ queue }) {
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
-const DEFAULT_RETRY = { maxAttempts: 3, backoffMinutes: 0 }
+const DEFAULT_RETRY = { maxAttempts: 2, backoffMinutes: 10 }
+const DEFAULT_MAX_TURNS = 40
 
 const USAGE_LABEL = {
   session: 'Sessão (5h)',
@@ -1161,7 +1163,7 @@ function Section({ title, badge, action, children }) {
         <button onClick={() => setOpen(v => !v)}
           className="flex flex-1 items-center gap-1.5 text-left text-meta font-semibold uppercase tracking-wide text-muted hover:text-ink-2">
           <span>{open ? '▾' : '▸'}</span>{title}
-          {badge ? <span className="rounded-full bg-warning px-1.5 text-[10px] font-semibold text-white">{badge}</span> : null}
+          {badge ? <span className="rounded-full bg-warning px-1.5 text-[10px] font-semibold text-on-accent">{badge}</span> : null}
         </button>
         {action}
       </div>
@@ -2114,6 +2116,77 @@ function GitCheck({ label, desc, checked, disabled, onChange }) {
   )
 }
 
+// Plugins de Claude Code instalados por projeto. Diferente do resto das
+// configurações, marcar a caixa dispara download e instalação de um repositório
+// de terceiro — então o estado vem do CLI (não do que está salvo no projeto) e
+// cada linha mostra o que de fato aconteceu.
+function PluginSettings({ project }) {
+  const [state, setState] = useState(null)
+  const [error, setError] = useState(null)
+  const [busy, setBusy] = useState(null)
+
+  useEffect(() => {
+    let alive = true
+    api.plugins(project.id)
+      .then(d => { if (alive) { setState(d); setError(null) } })
+      .catch(e => { if (alive) setError(e.message) })
+    return () => { alive = false }
+  }, [project.id])
+
+  const toggle = async (key, on) => {
+    const current = (state?.plugins || []).filter(p => p.enabled).map(p => p.key)
+    const next = on ? [...current, key] : current.filter(k => k !== key)
+    setBusy(key)
+    setError(null)
+    try {
+      const res = await api.setPlugins(project.id, next)
+      setState(res)
+      // O backend não aborta no primeiro erro: instala o que dá e reporta o resto.
+      if (res.errors?.length) setError(res.errors.map(e => `${e.key}: ${e.error}`).join('\n'))
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="space-y-3 rounded-[8px] border border-line p-3">
+      <div className="text-meta font-semibold uppercase tracking-wide text-muted">Plugins de Claude Code</div>
+      <p className="text-meta text-muted">
+        Instalados no escopo <code>local</code> — valem só para este projeto, não entram no git e não mexem
+        na sua configuração global. As sessões de execução das tasks herdam o que estiver ligado aqui.
+      </p>
+
+      {!state && !error && <div className="text-meta text-muted">carregando…</div>}
+
+      {state?.plugins?.map(p => (
+        <div key={p.key} className={busy === p.key ? 'opacity-50' : ''}>
+          <GitCheck
+            label={p.label}
+            desc={p.description}
+            checked={p.enabled}
+            disabled={!!busy}
+            onChange={v => toggle(p.key, v)} />
+          <div className="ml-7 mt-1 flex flex-wrap items-center gap-2 text-meta">
+            <span className={p.tokenImpact === 'up' ? 'text-warning' : 'text-st-done'}>
+              {p.tokenImpact === 'up' ? '↑ custo' : '↓ custo'}
+            </span>
+            <span className="text-muted">{p.tokenNote}</span>
+          </div>
+          <div className="ml-7 mt-0.5 font-mono text-meta text-muted">
+            {p.marketplace}
+            {p.enabled && !p.installed && ' — marcado no projeto, mas não encontrado na máquina'}
+            {busy === p.key && ' — instalando…'}
+          </div>
+        </div>
+      ))}
+
+      {error && <pre className="whitespace-pre-wrap rounded-[6px] bg-subtle p-2 text-meta text-danger">{error}</pre>}
+    </div>
+  )
+}
+
 function DevServerSettings({ project, onPatch }) {
   const d = project.devServer || {}
   const [command, setCommand] = useState(d.command || '')
@@ -2188,7 +2261,7 @@ function ClaudeConfigModal({ project, onClose }) {
 
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-ink/10" onMouseDown={onClose} />
+      <div className="fixed inset-0 z-40 bg-scrim" onMouseDown={onClose} />
       <div className="fixed inset-y-0 right-0 z-40 flex w-[900px] max-w-full flex-col border-l border-line bg-bg">
         <div className="flex items-center gap-3 border-b border-line px-5 py-3">
           <h2 className="font-semibold">Config do Claude — {project.name}</h2>
@@ -2256,7 +2329,19 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const retry = project.retry || DEFAULT_RETRY
   const [maxAttempts, setMaxAttempts] = useState(String(retry.maxAttempts))
   const [backoffMin, setBackoffMin] = useState(String(retry.backoffMinutes))
+  const savedMaxTurns = project.maxTurns ?? DEFAULT_MAX_TURNS
+  const [maxTurns, setMaxTurns] = useState(String(savedMaxTurns))
   const patchGit = patch => onPatch({ git: patch })
+
+  const commitMaxTurns = () => {
+    const n = Number(maxTurns)
+    if (!Number.isInteger(n) || n < 0 || n > 500) {
+      setMaxTurns(String(savedMaxTurns))
+      return
+    }
+    if (n === savedMaxTurns) return
+    onPatch({ maxTurns: n })
+  }
 
   // Campos inválidos voltam ao valor salvo em vez de virar patch — mesmo contrato
   // do timeout, e evita mandar NaN para o backend.
@@ -2282,7 +2367,7 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
   }
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-ink/10" onMouseDown={onClose} />
+      <div className="fixed inset-0 z-40 bg-scrim" onMouseDown={onClose} />
       <div className="fixed inset-y-0 right-0 z-40 flex w-[560px] max-w-full flex-col border-l border-line bg-bg">
         <div className="flex items-center gap-3 border-b border-line px-5 py-3">
           <h2 className="font-semibold">Configurações — {project.name}</h2>
@@ -2351,6 +2436,22 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
         </label>
 
         <label className="flex items-start gap-3">
+          <span className="mt-1">Teto de turnos</span>
+          <span className="flex-1">
+            <input type="number" min={0} max={500} value={maxTurns}
+              onChange={e => setMaxTurns(e.target.value)}
+              onBlur={commitMaxTurns}
+              onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+              className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
+            <span className="mt-1 block text-meta text-muted">
+              Cada turno da sessão reenvia todo o histórico, então uma task que se perde custa muito mais que
+              uma task longa e objetiva. Ao estourar o teto a task volta para "A fazer" com <code>blocked</code>,
+              sem nova tentativa automática. 0 = sem limite (só o timeout).
+            </span>
+          </span>
+        </label>
+
+        <label className="flex items-start gap-3">
           <span className="mt-1">Comando de verificação</span>
           <span className="flex-1">
             <input value={verifyCommand} onChange={e => setVerifyCommand(e.target.value)}
@@ -2383,7 +2484,8 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
             </span>
             <span className="mt-1 block text-meta text-muted">
               Com backoff maior que zero e auto-pilot ligado, uma task que falha é reagendada para daqui a
-              N minutos em vez de voltar imediatamente para a fila. 0 = volta no próximo tick (comportamento default).
+              N minutos em vez de voltar imediatamente para a fila. 0 = volta no próximo tick, o que na prática
+              paga duas sessões inteiras pela mesma falha determinística.
             </span>
           </span>
         </div>
@@ -2393,6 +2495,8 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
             checked={!!project.autoDecompose}
             onChange={v => onPatch({ autoDecompose: v })} />
         </div>
+
+        <PluginSettings project={project} />
 
         <DevServerSettings project={project} onPatch={onPatch} />
 
@@ -2471,7 +2575,7 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
               <div className="font-medium text-danger">Última confirmação: desinstalar guardrails e remover o projeto?</div>
               <div className="flex gap-2">
                 <button onClick={() => onRemove(true)}
-                  className="rounded-[6px] bg-danger px-3 py-1.5 text-meta font-semibold text-white">DESINSTALAR</button>
+                  className="rounded-[6px] bg-danger px-3 py-1.5 text-meta font-semibold text-on-accent">DESINSTALAR</button>
                 <Btn variant="quiet" onClick={() => setConfirmRemove(0)}>Cancelar</Btn>
               </div>
             </div>
@@ -2563,10 +2667,31 @@ function GlobalSettingsModal({ onClose, queue, onConcurrency, notifyOn, onNotify
           </div>
           <span className="text-meta text-muted">execuções em paralelo entre todos os projetos. Projetos sem worktree isolado ficam limitados a 1 por vez.</span>
         </div>
+        <ThemeSetting />
         <NotificationsSetting notifyOn={notifyOn} onNotify={onNotify} />
         <SoundSetting soundOn={soundOn} onSound={onSound} soundMap={soundMap} onSoundFor={onSoundFor} />
       </div>
     </Modal>
+  )
+}
+
+function ThemeSetting() {
+  const [mode, setMode] = useState(theme.loadTheme)
+  const pick = m => { setMode(m); theme.saveTheme(m); theme.applyTheme(m) }
+  return (
+    <div className="flex items-start gap-3 rounded-[8px] border border-line p-3">
+      <div className="flex-1">
+        <span className="font-medium">Tema</span>
+        <span className="mt-1 block text-meta text-muted">
+          Claro, escuro ou seguindo o sistema. Vale para todos os projetos.
+        </span>
+      </div>
+      <Segmented value={mode} onChange={pick} options={[
+        { key: 'light', label: 'Claro' },
+        { key: 'dark', label: 'Escuro' },
+        { key: 'system', label: 'Sistema' },
+      ]} />
+    </div>
   )
 }
 
@@ -2670,7 +2795,7 @@ function QueueBar({ queue, tasks, projects, usage, onOpen, onKill, onReorder, on
 
 function Modal({ title, onClose, children }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/10 p-4"
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim p-4"
       onMouseDown={e => e.target === e.currentTarget && onClose()}>
       <div className="w-full max-w-2xl rounded-[8px] border border-line bg-bg p-5">
         <div className="mb-4 flex items-center justify-between">

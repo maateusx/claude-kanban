@@ -157,6 +157,27 @@ function resolveStartPoint(root, base) {
   throw new Error(`branch principal "${base}" não existe no repositório`)
 }
 
+// O worktree precisa do `.claude/` do projeto (hooks, settings, skill, e o
+// arquivo da própria task, que o agente edita). Não precisa do que é artefato
+// puro do orquestrador: os logs de execução são JSONL de até 8MB por task e os
+// diffs acompanham. Copiar isso para dentro do worktree só criava I/O e material
+// para o agente ler por engano num Glob — nada ali ajuda a executar a task.
+// Tasks já concluídas ficam de fora pelo mesmo motivo: o board inteiro dentro do
+// contexto do agente é custo sem retorno.
+const WORKTREE_SKIP = ['logs', 'diffs', path.join('tasks', 'done'), path.join('tasks', 'archived')]
+  .map(p => path.join('.claude', 'claude-kanban', p))
+
+export function copyClaudeDir(root, dest) {
+  fs.cpSync(path.join(root, '.claude'), dest, {
+    recursive: true,
+    force: true,
+    filter: src => {
+      const rel = path.relative(root, src)
+      return !WORKTREE_SKIP.some(skip => rel === skip || rel.startsWith(skip + path.sep))
+    },
+  })
+}
+
 // Prepara o workspace da task conforme as configurações de git do projeto.
 // Retorna { cwd, branch, worktreeDir, startSha } — nulos quando não se aplicam.
 export function prepareWorkspace(project, taskId) {
@@ -180,8 +201,7 @@ export function prepareWorkspace(project, taskId) {
     if (branchExists(root, newBranch)) git(root, 'worktree', 'add', dir, newBranch)
     else git(root, 'worktree', 'add', dir, '-b', newBranch, startPoint)
     // .claude/ pode não estar commitado (hooks, settings, tasks) — copia do projeto
-    const claudeSrc = path.join(root, '.claude')
-    if (fs.existsSync(claudeSrc)) fs.cpSync(claudeSrc, path.join(dir, '.claude'), { recursive: true, force: true })
+    if (fs.existsSync(path.join(root, '.claude'))) copyClaudeDir(root, path.join(dir, '.claude'))
     excludeKanbanFromCommits(dir)
     return { cwd: dir, branch: newBranch, worktreeDir: dir, startSha: headSha(dir) }
   }

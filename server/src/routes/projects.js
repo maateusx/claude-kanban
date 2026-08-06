@@ -4,7 +4,9 @@ import { saveProjects } from '../lib/paths.js'
 import { bootstrapProject, uninstallGuardrails } from '../lib/bootstrap.js'
 import { DEFAULT_GIT, gitSettings } from '../lib/git.js'
 import { normalizeModel } from '../lib/models.js'
-import { invalidModelMsg, withProjectRecord, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS } from './helpers.js'
+import { retrySettings, MAX_MAX_TURNS } from '../lib/runner.js'
+import { pluginsView, syncProjectPlugins, normalizeKeys, PLUGIN_KEYS } from '../lib/plugins.js'
+import { invalidModelMsg, withProject, withProjectRecord, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS } from './helpers.js'
 
 function validateProjectPath(projectPath) {
   if (!fs.existsSync(projectPath) || !fs.statSync(projectPath).isDirectory()) return 'diretório não existe'
@@ -41,7 +43,8 @@ export default function projectRoutes(app, ctx) {
 
   app.patch('/api/projects/:projectId', (req, reply) => {
     const p = withProjectRecord(ctx, req, reply); if (!p) return
-    const { name, description, path: projectPath, skipPermissions, git, defaultModel, autoRun, autoDecompose, devServer, timeoutMs, enrichMode } = req.body || {}
+    const { name, description, path: projectPath, skipPermissions, git, defaultModel, auxModel: auxModelIn,
+      autoRun, autoDecompose, devServer, timeoutMs, enrichMode, retry, maxTurns } = req.body || {}
     if (name !== undefined) {
       if (!String(name).trim()) return reply.code(400).send({ error: 'name não pode ser vazio' })
       p.name = String(name).trim()
@@ -79,6 +82,42 @@ export default function projectRoutes(app, ctx) {
         return reply.code(400).send({ error: invalidModelMsg(defaultModel) })
       }
       p.defaultModel = normalizeModel(defaultModel)
+    }
+    if (auxModelIn !== undefined) {
+      if (auxModelIn && !normalizeModel(auxModelIn)) {
+        return reply.code(400).send({ error: invalidModelMsg(auxModelIn) })
+      }
+      p.auxModel = normalizeModel(auxModelIn)
+    }
+    if (maxTurns !== undefined) {
+      if (maxTurns === null || maxTurns === '') {
+        p.maxTurns = null
+      } else {
+        const n = Number(maxTurns)
+        // 0 desliga o teto (comportamento antigo, sem limite de turnos).
+        if (!Number.isInteger(n) || n < 0 || n > MAX_MAX_TURNS) {
+          return reply.code(400).send({ error: `maxTurns deve ser 0 (sem limite) ou um inteiro até ${MAX_MAX_TURNS}` })
+        }
+        p.maxTurns = n
+      }
+    }
+    if (retry !== undefined && typeof retry === 'object' && retry !== null) {
+      const next = { ...retrySettings(p) }
+      if (retry.maxAttempts !== undefined) {
+        const n = Number(retry.maxAttempts)
+        if (!Number.isInteger(n) || n < 1 || n > 10) {
+          return reply.code(400).send({ error: 'retry.maxAttempts deve ser um inteiro entre 1 e 10' })
+        }
+        next.maxAttempts = n
+      }
+      if (retry.backoffMinutes !== undefined) {
+        const n = Number(retry.backoffMinutes)
+        if (!Number.isFinite(n) || n < 0 || n > 1440) {
+          return reply.code(400).send({ error: 'retry.backoffMinutes deve estar entre 0 e 1440' })
+        }
+        next.backoffMinutes = n
+      }
+      p.retry = next
     }
     if (enrichMode !== undefined) {
       if (!['off', 'auto', 'always'].includes(enrichMode)) {
@@ -132,6 +171,36 @@ export default function projectRoutes(app, ctx) {
       uninstallGuardrails(p.path)
     }
     return { ok: true }
+  })
+
+  // ---- plugins de Claude Code ----
+  // Ficam fora do PATCH porque não são só config: salvar dispara download e
+  // instalação de repositórios de terceiros, que demora e pode falhar por
+  // plugin. O PATCH precisa continuar barato e sem efeito de rede.
+  app.get('/api/projects/:projectId/plugins', async (req, reply) => {
+    const p = withProject(ctx, req, reply); if (!p) return
+    if (!ctx.claudeAvailable()) return reply.code(409).send({ error: 'CLI `claude` não encontrado no PATH' })
+    return await pluginsView(p)
+  })
+
+  app.put('/api/projects/:projectId/plugins', async (req, reply) => {
+    const p = withProject(ctx, req, reply); if (!p) return
+    if (!ctx.claudeAvailable()) return reply.code(409).send({ error: 'CLI `claude` não encontrado no PATH' })
+
+    const requested = req.body?.enabled
+    if (!Array.isArray(requested)) return reply.code(400).send({ error: 'enabled é obrigatório (array)' })
+    const unknown = requested.filter(k => !PLUGIN_KEYS.includes(k))
+    if (unknown.length) {
+      return reply.code(400).send({ error: `plugin desconhecido: ${unknown.join(', ')}. Use: ${PLUGIN_KEYS.join(', ')}` })
+    }
+
+    const wanted = normalizeKeys(requested)
+    const result = await syncProjectPlugins(p.path, wanted)
+    // Só entra na config o que de fato instalou. Gravar a intenção faria a UI
+    // mostrar um plugin ligado que não existe na máquina.
+    p.plugins = wanted.filter(k => !result.errors.some(e => e.key === k))
+    saveProjects(db)
+    return { ...(await pluginsView(p)), ...result, project: projectView(p) }
   })
 
   // ---- dev server ----

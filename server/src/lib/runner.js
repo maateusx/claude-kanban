@@ -11,10 +11,25 @@ import { normalizeModel } from './models.js'
 import { isFuture } from './scheduler.js'
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
-// Política de retentativa. Defaults preservam o comportamento histórico:
-// 3 tentativas antes da tag `blocked` e nenhum backoff (a task volta para todo/
-// e o auto-run a repesca no mesmo tick).
-export const DEFAULT_RETRY = { maxAttempts: 3, backoffMinutes: 0 }
+
+// Teto de turnos da sessão de execução. Sem ele, o único limite era o timeout —
+// e como cada turno reenvia todo o histórico, uma task que se perde consome muito
+// mais que uma que trabalha o dobro do tempo em poucos turnos. 0 = sem limite.
+export const DEFAULT_MAX_TURNS = 40
+export const MAX_MAX_TURNS = 500
+
+export function turnLimit(project) {
+  const n = Number(project?.maxTurns)
+  if (project?.maxTurns === 0) return null // desligado explicitamente
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_MAX_TURNS
+  return Math.min(Math.round(n), MAX_MAX_TURNS)
+}
+
+// Política de retentativa. Uma tentativa extra vale a pena para falha transitória
+// (rede, lock de git); da terceira em diante é quase sempre a mesma falha
+// determinística sendo paga de novo por uma sessão inteira. O backoff evita que o
+// auto-run repesque a task no mesmo tick, sem nenhuma chance de o mundo mudar.
+export const DEFAULT_RETRY = { maxAttempts: 2, backoffMinutes: 10 }
 
 export function retrySettings(project) {
   const r = project?.retry || {}
@@ -329,6 +344,19 @@ export class Runner {
     // entregar: sem ela, o run é uma re-execução do zero.
     const resumeFrom = !noResume && answer && sessionId ? sessionId : null
 
+    // O card vai para doing/ ANTES de preparar o workspace. updateTask move o
+    // arquivo de pasta, e o worktree copia o .claude/ do projeto: preparando
+    // antes, o worktree recebia a task em todo/ enquanto o prompt mandava editar
+    // doing/ — o agente não achava o arquivo e o reescrevia do zero, pagando uma
+    // busca inútil pelo repositório em toda execução.
+    task = updateTask(project.path, taskId, {
+      status: 'doing',
+      run: {
+        started_at: new Date().toISOString(),
+        attempts: (task.run?.attempts || 0) + 1,
+      },
+    })
+
     let workspace
     try {
       workspace = prepareWorkspace(project, taskId)
@@ -345,15 +373,14 @@ export class Runner {
     // que de fato vai para `claude --model` — a sessão roda no modelo escolhido.
     const model = normalizeModel(task.model) || normalizeModel(project.defaultModel) || null
 
-    task = updateTask(project.path, taskId, {
-      status: 'doing',
-      run: {
-        started_at: new Date().toISOString(),
-        attempts: (task.run?.attempts || 0) + 1,
-        ...(workspace.branch ? { branch: workspace.branch } : {}),
-        ...(model ? { model } : {}),
-      },
-    })
+    if (workspace.branch || model) {
+      task = updateTask(project.path, taskId, {
+        run: {
+          ...(workspace.branch ? { branch: workspace.branch } : {}),
+          ...(model ? { model } : {}),
+        },
+      })
+    }
 
     const taskRelPath = path.relative(project.path, task.filePath)
     const md = fs.readFileSync(task.filePath, 'utf8')
@@ -372,11 +399,13 @@ export class Runner {
     const allowRules = [`Edit(${kanbanGlob})`, `Write(${kanbanGlob})`]
     const allowedTools = [project.allowedTools, ...allowRules].filter(Boolean).join(' ')
 
+    const turns = turnLimit(project)
     const args = [
       ...(resumeFrom ? ['--resume', resumeFrom] : []),
       '-p', prompt,
       '--output-format', 'stream-json',
       '--verbose',
+      ...(turns ? ['--max-turns', String(turns)] : []),
       ...(model ? ['--model', model] : []),
       ...(project.skipPermissions
         ? ['--dangerously-skip-permissions']
@@ -636,6 +665,10 @@ export class Runner {
 
     const task = findTask(project.path, a.taskId)
     const attempts = task?.run?.attempts || 0
+    // Teto de turnos estourado: a sessão parou no meio, não falhou por acaso.
+    // Re-executar do zero gastaria tudo de novo para parar no mesmo lugar, então
+    // isso nunca conta como retentativa — vai direto para revisão humana.
+    const maxTurnsHit = a.result?.subtype === 'error_max_turns'
 
     // Resume falhou (sessão expirada, id desconhecido, CLI sem o histórico…):
     // cai no run normal, com o prompt completo, levando junto a pergunta e a
@@ -653,6 +686,19 @@ export class Runner {
       appendToSection(project.path, a.taskId, 'Log de erros',
         `[${runMeta.completed_at}] Sessão morta manualmente pelo usuário.`)
       this.emit('run.killed', { projectId: a.projectId, taskId: a.taskId })
+    } else if (maxTurnsHit && !a.timedOut) {
+      const patch = { status: 'todo', run: runMeta }
+      if (task && !task.tags?.includes('blocked')) patch.tags = [...(task.tags || []), 'blocked']
+      updateTask(project.path, a.taskId, patch)
+      appendToSection(project.path, a.taskId, 'Log de erros',
+        `[${runMeta.completed_at}] Teto de ${turnLimit(project)} turnos atingido — a sessão parou no meio. ` +
+        `Sem nova tentativa automática (repetir gastaria o mesmo para parar no mesmo ponto). ` +
+        `Quebre a task em partes menores ou aumente o limite de turnos do projeto.`)
+      this.emit('run.finished', {
+        projectId: a.projectId, taskId: a.taskId, exitCode, maxTurns: true,
+        costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
+        numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
+      })
     } else if (exitCode === 0 && !a.timedOut && hasHumanRequest(task?.body)) {
       // O agente sinalizou que depende de uma decisão humana: o card volta para
       // todo com a tag human-request (fora do auto-pilot) em vez de concluir.
@@ -669,14 +715,24 @@ export class Runner {
       })
     } else if (verify && !verify.ok && !a.timedOut) {
       // Verificação reprovou: volta para todo (conta como tentativa) e NÃO entra
-      // no ledger — o card precisa ser re-executado até a build passar.
+      // no ledger — o card precisa ser re-executado até a build passar. Segue a
+      // mesma política de retry das falhas de execução (antes ignorava a config
+      // do projeto e retentava 3x fixo, sem nenhum backoff).
+      const { maxAttempts, backoffMinutes } = retrySettings(project)
       const patch = { status: 'todo', run: runMeta }
-      if (attempts >= 3 && task && !task.tags?.includes('blocked')) {
-        patch.tags = [...(task.tags || []), 'blocked']
+      let retryAt = null
+      if (attempts >= maxAttempts) {
+        if (task && !task.tags?.includes('blocked')) patch.tags = [...(task.tags || []), 'blocked']
+      } else if (project.autoRun && backoffMinutes > 0) {
+        retryAt = new Date(Date.parse(runMeta.completed_at) + backoffMinutes * 60_000).toISOString()
+        patch.scheduled_at = retryAt
       }
       updateTask(project.path, a.taskId, patch)
+      const verifyRetryNote = retryAt
+        ? `\nNova tentativa agendada para ${retryAt} (tentativa ${attempts + 1} de ${maxAttempts}).`
+        : ''
       appendToSection(project.path, a.taskId, 'Log de erros',
-        `[${runMeta.completed_at}] Verificação falhou: \`${verify.command}\` (exit ${verify.exitCode}).\n\n\`\`\`\n${verify.output}\n\`\`\``)
+        `[${runMeta.completed_at}] Verificação falhou: \`${verify.command}\` (exit ${verify.exitCode}).${verifyRetryNote}\n\n\`\`\`\n${verify.output}\n\`\`\``)
       this.emit('run.finished', {
         projectId: a.projectId, taskId: a.taskId, exitCode, verifyFailed: true,
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
