@@ -2241,7 +2241,7 @@ function ClaudeConfigModal({ project, onClose }) {
   )
 }
 
-function SettingsModal({ project, onClose, onPatch, onRemove }) {
+export function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const [confirmRemove, setConfirmRemove] = useState(0)
   const [name, setName] = useState(project.name)
   const [description, setDescription] = useState(project.description || '')
@@ -2254,6 +2254,7 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
   const [verifyCommand, setVerifyCommand] = useState(project.verifyCommand || '')
   const [webhookUrl, setWebhookUrl] = useState(project.webhookUrl || '')
+  const whStatuses = project.webhookStatuses || []
   const retry = project.retry || DEFAULT_RETRY
   const [maxAttempts, setMaxAttempts] = useState(String(retry.maxAttempts))
   const [backoffMin, setBackoffMin] = useState(String(retry.backoffMinutes))
@@ -2410,6 +2411,28 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
             </span>
           </span>
         </label>
+
+        <div className="flex items-start gap-3">
+          <span className="mt-1">Status avisados</span>
+          <span className="flex-1">
+            <span className="flex flex-wrap gap-x-4 gap-y-1">
+              {COLUMNS.map(c => {
+                const on = whStatuses.includes(c.key)
+                return (
+                  <label key={c.key} className="flex items-center gap-1.5">
+                    <input type="checkbox" checked={on} className="accent-[var(--color-accent)]"
+                      onChange={() => onPatch({ webhookStatuses: on ? whStatuses.filter(s => s !== c.key) : [...whStatuses, c.key] })} />
+                    <span className={on ? 'text-ink' : 'text-muted'}>{c.label}</span>
+                  </label>
+                )
+              })}
+            </span>
+            <span className="mt-1 block text-meta text-muted">
+              Restringe o <code>task_status_changed</code> aos status marcados — ex.: só <strong>Done</strong> avisa
+              quando a task conclui. Nenhum marcado = <strong>todos</strong>. Os outros eventos passam sempre.
+            </span>
+          </span>
+        </div>
 
         <DevServerSettings project={project} onPatch={onPatch} />
 
