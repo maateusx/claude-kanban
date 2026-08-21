@@ -87,3 +87,12 @@ test('health responde com claudeAvailable', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/health' })
   assert.deepEqual(json(res), { ok: true, claudeAvailable: true })
 })
+
+test('PATCH webhookUrl: aceita http(s), rejeita o resto, vazio desliga', async () => {
+  const p = db.projects[0]
+  const patch = webhookUrl => app.inject({ method: 'PATCH', url: `/api/projects/${p.id}`, payload: { webhookUrl } })
+
+  assert.equal(json(await patch('https://hooks.example.com/x')).project.webhookUrl, 'https://hooks.example.com/x')
+  assert.equal((await patch('ftp://nope')).statusCode, 400)
+  assert.equal(json(await patch('')).project.webhookUrl, '')
+})

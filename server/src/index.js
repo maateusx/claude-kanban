@@ -7,6 +7,8 @@ import { watchProject } from './lib/watcher.js'
 import { Runner } from './lib/runner.js'
 import { DevServers } from './lib/devservers.js'
 import { Scheduler, isFuture } from './lib/scheduler.js'
+import { notifyWebhook } from './lib/webhook.js'
+import { listPendingActions } from './lib/pending.js'
 import { buildApp } from './app.js'
 
 const PORT = Number(process.env.PORT || 4400)
@@ -40,11 +42,14 @@ const db = loadProjects()
 const watchers = new Map()       // projectId -> chokidar watcher
 const bootstrapErrors = new Map() // projectId -> msg
 const sockets = new Set()
+const webhookSeen = new Set() // pending-actions já enviadas por webhook
 
 function emit(type, payload) {
   const msg = JSON.stringify({ type, ...payload })
   for (const ws of sockets) { try { ws.send(msg) } catch {} }
   maybeAutoRun(type, payload)
+  const project = getProject(payload.projectId)
+  if (project) notifyWebhook(project, { type, ...payload }, webhookSeen)
 }
 
 // Auto-executar: com o modo ligado, tudo que está (ou entra) em todo/ vai para a fila.
@@ -93,6 +98,9 @@ try { execFileSync('claude', ['--version'], { stdio: 'ignore' }) } catch { claud
 for (const p of db.projects) {
   if (!fs.existsSync(p.path)) continue
   try { reconcileProject(p.path) } catch {}
+  // Pendências que já existiam não são novidade: entram no visto para o primeiro
+  // pending.updated (que reemite a lista inteira) não disparar webhook do passado.
+  for (const a of listPendingActions(p.path)) webhookSeen.add(a.id)
   startWatcher(p)
 }
 runner.recover(db.projects.filter(p => fs.existsSync(p.path)))

@@ -41,7 +41,7 @@ export default function projectRoutes(app, ctx) {
 
   app.patch('/api/projects/:projectId', (req, reply) => {
     const p = withProjectRecord(ctx, req, reply); if (!p) return
-    const { name, description, path: projectPath, skipPermissions, git, defaultModel, autoRun, autoDecompose, devServer, timeoutMs, enrichMode } = req.body || {}
+    const { name, description, path: projectPath, skipPermissions, git, defaultModel, autoRun, autoDecompose, devServer, timeoutMs, enrichMode, webhookUrl } = req.body || {}
     if (name !== undefined) {
       if (!String(name).trim()) return reply.code(400).send({ error: 'name não pode ser vazio' })
       p.name = String(name).trim()
@@ -85,6 +85,13 @@ export default function projectRoutes(app, ctx) {
         return reply.code(400).send({ error: 'enrichMode deve ser off, auto ou always' })
       }
       p.enrichMode = enrichMode
+    }
+    if (webhookUrl !== undefined) {
+      const u = String(webhookUrl || '').trim()
+      if (u && !/^https?:\/\//i.test(u)) {
+        return reply.code(400).send({ error: 'webhookUrl deve começar com http:// ou https://' })
+      }
+      p.webhookUrl = u
     }
     if (devServer !== undefined && typeof devServer === 'object') {
       const next = { ...(p.devServer || {}) }

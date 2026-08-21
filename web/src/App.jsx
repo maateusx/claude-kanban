@@ -2253,6 +2253,7 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
   const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
   const [verifyCommand, setVerifyCommand] = useState(project.verifyCommand || '')
+  const [webhookUrl, setWebhookUrl] = useState(project.webhookUrl || '')
   const retry = project.retry || DEFAULT_RETRY
   const [maxAttempts, setMaxAttempts] = useState(String(retry.maxAttempts))
   const [backoffMin, setBackoffMin] = useState(String(retry.backoffMinutes))
@@ -2393,6 +2394,21 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
             checked={!!project.autoDecompose}
             onChange={v => onPatch({ autoDecompose: v })} />
         </div>
+
+        <label className="flex items-start gap-3">
+          <span className="mt-1">Webhook</span>
+          <span className="flex-1">
+            <input value={webhookUrl} onChange={e => setWebhookUrl(e.target.value)}
+              onBlur={() => { const v = webhookUrl.trim(); if (v && !/^https?:\/\//i.test(v)) return setWebhookUrl(project.webhookUrl || ''); if (v !== (project.webhookUrl || '')) onPatch({ webhookUrl: v }) }}
+              onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+              placeholder="https://hooks.slack.com/..."
+              className="w-full rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
+            <span className="mt-1 block text-meta text-muted">
+              POST com JSON quando um run <strong>falha</strong> (<code>run_failed</code>) ou <strong>precisa de humano</strong>
+              (<code>human_request</code> e <code>pending_action</code>) — para saber sem o board aberto. Vazio: desligado.
+            </span>
+          </span>
+        </label>
 
         <DevServerSettings project={project} onPatch={onPatch} />
 
