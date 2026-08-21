@@ -112,8 +112,8 @@ Escolha de modelo por task/projeto (Fable 5, Opus 4.8, Sonnet 5, Haiku 4.5), com
 ### 32. UI React completa
 Board com drag-and-drop (dnd-kit), colunas por status, filtros por tag, ordenação configurável, drawer de log, visualização de diff, notificações do sistema e sons. (`web/src/`)
 
-### 33. Webhook de falha e de ação humana
-Com `webhookUrl` configurado no projeto, o servidor faz `POST` de JSON (`{ event, projectId, project, taskId, taskTitle, at, … }`) nos únicos casos em que ninguém pode ficar esperando o board aberto: `run_failed` (exit code ≠ 0, timeout ou verificação reprovada), `human_request` (o agente deixou uma `## Human Request`) e `pending_action` (guardrail bloqueou um comando). Fire-and-forget com timeout de 10s: endpoint fora do ar não trava nem derruba o run. (`server/src/lib/webhook.js`)
+### 33. Webhook de mudança de status, falha e ação humana
+Com `webhookUrl` configurado no projeto, o servidor faz `POST` de JSON (`{ event, projectId, project, taskId, taskTitle, at, … }`) nos casos em que ninguém pode ficar esperando o board aberto: `task_status_changed` (task mudou de status pela UI, pela API ou por move manual de arquivo — com `from` e `to`, incluindo `to: "archived"`), `run_failed` (exit code ≠ 0, timeout ou verificação reprovada), `human_request` (o agente deixou uma `## Human Request`) e `pending_action` (guardrail bloqueou um comando). Fire-and-forget com timeout de 10s: endpoint fora do ar não trava nem derruba o run. (`server/src/lib/webhook.js`)
 
 ---
 

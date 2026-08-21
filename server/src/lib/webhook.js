@@ -1,8 +1,9 @@
 import { findTask } from './tasks.js'
 
 // Webhook de saída: avisa um endpoint externo (Slack, n8n, Zapier, o que for)
-// nos dois casos em que ninguém pode ficar esperando o board estar aberto —
-// o run precisa de um humano ou o run falhou. O resto continua só no WS.
+// nos casos em que ninguém pode ficar esperando o board estar aberto — o run
+// precisa de um humano, o run falhou ou uma task mudou de status. O resto
+// continua só no WS.
 
 const TIMEOUT_MS = 10_000
 
@@ -24,6 +25,8 @@ export function webhookEventsFor(evt, seen = new Set()) {
         return [{ event: 'run_failed', taskId: evt.taskId, exitCode: evt.exitCode, verifyFailed: !!evt.verifyFailed }]
       }
       return []
+    case 'task.moved':
+      return [{ event: 'task_status_changed', taskId: evt.taskId, from: evt.from, to: evt.to }]
     case 'pending.updated':
       return (evt.actions || [])
         .filter(a => a.status === 'pending' && !seen.has(a.id))

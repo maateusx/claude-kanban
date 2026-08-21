@@ -2404,7 +2404,8 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
               placeholder="https://hooks.slack.com/..."
               className="w-full rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
             <span className="mt-1 block text-meta text-muted">
-              POST com JSON quando um run <strong>falha</strong> (<code>run_failed</code>) ou <strong>precisa de humano</strong>
+              POST com JSON quando uma task <strong>muda de status</strong> (<code>task_status_changed</code>), quando um run
+              <strong> falha</strong> (<code>run_failed</code>) ou quando <strong>precisa de humano</strong>
               (<code>human_request</code> e <code>pending_action</code>) — para saber sem o board aberto. Vazio: desligado.
             </span>
           </span>

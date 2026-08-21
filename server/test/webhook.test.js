@@ -40,6 +40,18 @@ test('pending.updated: só pendentes e só uma vez por id', () => {
   assert.deepEqual(webhookEventsFor(evt, seen), [])
 })
 
+test('task.moved vira task_status_changed', () => {
+  assert.deepEqual(
+    webhookEventsFor({ type: 'task.moved', taskId: 't1', from: 'doing', to: 'done' }),
+    [{ event: 'task_status_changed', taskId: 't1', from: 'doing', to: 'done' }],
+  )
+  // arquivar (DELETE sem hard) também é uma mudança de status
+  assert.deepEqual(
+    webhookEventsFor({ type: 'task.moved', taskId: 't2', from: 'todo', to: 'archived' }),
+    [{ event: 'task_status_changed', taskId: 't2', from: 'todo', to: 'archived' }],
+  )
+})
+
 test('eventos sem interesse são ignorados', () => {
   assert.deepEqual(webhookEventsFor({ type: 'run.started', taskId: 't1' }), [])
   assert.deepEqual(webhookEventsFor({ type: 'task.upserted' }), [])

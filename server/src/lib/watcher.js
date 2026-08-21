@@ -36,7 +36,10 @@ export function watchProject(project, emit, chokidarOptions = {}) {
       if (event === 'add' && prev) {
         clearTimeout(prev.timer)
         recentUnlinks.delete(key); recentUnlinks.delete(task.id)
-        emit('task.moved', { projectId: project.id, taskId: task.id, from: prev.status, to: task.status })
+        // unlink+add na mesma pasta é renome de arquivo (título mudou), não move.
+        if (prev.status !== task.status) {
+          emit('task.moved', { projectId: project.id, taskId: task.id, from: prev.status, to: task.status })
+        }
       }
       emit('task.upserted', { projectId: project.id, task })
     } else if (event === 'unlink') {
