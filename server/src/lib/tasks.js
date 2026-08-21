@@ -42,6 +42,13 @@ export function defaultBody(description = '') {
   return `\n## Descrição\n\n${description || 'O que precisa ser feito, critérios de aceite, contexto, links.'}\n\n## Resultado\n<!-- Preenchido pelo Claude ao concluir: resumo, decisões, arquivos alterados, contexto para memória -->\n\n## Log de erros\n<!-- Preenchido pelo backend em caso de falha -->\n`
 }
 
+// gray-matter re-parseia o body ao stringificar: se ele começa com `---`
+// (task com frontmatter duplicado no corpo), o YAML quebrado derruba o processo.
+export function stringifyTask(body, fm) {
+  const safe = /^\s*---/.test(body || '') ? `\n${body}` : body
+  return matter.stringify(safe, fm)
+}
+
 export function serializeTask(task, body) {
   const fm = {
     id: task.id,
@@ -58,7 +65,7 @@ export function serializeTask(task, body) {
     updated_at: task.updated_at,
     run: { ...DEFAULT_RUN, ...(task.run || {}) },
   }
-  return matter.stringify(body ?? defaultBody(), fm)
+  return stringifyTask(body ?? defaultBody(), fm)
 }
 
 // depends_on: lista de ids de tasks que precisam concluir antes desta rodar.
@@ -153,7 +160,7 @@ export function loadTask(projectPath, filePath) {
   if (dirty) {
     fm.updated_at = new Date().toISOString()
     markSelfWrite(filePath)
-    fs.writeFileSync(filePath, matter.stringify(body, fm))
+    fs.writeFileSync(filePath, stringifyTask(body, fm))
   }
   return { ...fm, body, filePath, fileName: path.basename(filePath) }
 }
@@ -201,7 +208,7 @@ export function updateTask(projectPath, taskId, patch) {
 
   let filePath = task.filePath
   markSelfWrite(filePath)
-  fs.writeFileSync(filePath, matter.stringify(newBody, fm))
+  fs.writeFileSync(filePath, stringifyTask(newBody, fm))
 
   // renomeia se título mudou ou pasta mudou
   const targetDir = tasksDir(projectPath, fm.status)
@@ -281,7 +288,7 @@ export function appendToSection(projectPath, taskId, section, text) {
   }
   fm.updated_at = new Date().toISOString()
   markSelfWrite(task.filePath)
-  fs.writeFileSync(task.filePath, matter.stringify(newBody, fm))
+  fs.writeFileSync(task.filePath, stringifyTask(newBody, fm))
   return loadTask(projectPath, task.filePath)
 }
 
@@ -305,7 +312,7 @@ export function reconcileProject(projectPath) {
         fm.id = newId()
         fm.updated_at = new Date().toISOString()
         markSelfWrite(newer)
-        fs.writeFileSync(newer, matter.stringify(body, fm))
+        fs.writeFileSync(newer, stringifyTask(body, fm))
         console.warn(`[reconcile] id duplicado em ${newer}: novo id ${fm.id}`)
         seen.set(fm.id, newer)
         seen.set(task.id, keeper)
