@@ -15,8 +15,9 @@ export function webhookUrl(project) {
 
 // Puro: traduz um evento do emit() em bodies de webhook. `seen` são os ids de
 // pending-actions já enviados — o watcher reemite a lista inteira a cada change,
-// então sem isso toda ação pendente antiga seria reenviada.
-export function webhookEventsFor(evt, seen = new Set()) {
+// então sem isso toda ação pendente antiga seria reenviada. `statuses` filtra
+// mudanças de status (ex.: só `done`); vazio/undefined = todos.
+export function webhookEventsFor(evt, seen = new Set(), statuses = null) {
   switch (evt.type) {
     case 'run.finished':
       if (evt.humanRequest) return [{ event: 'human_request', taskId: evt.taskId }]
@@ -26,6 +27,7 @@ export function webhookEventsFor(evt, seen = new Set()) {
       }
       return []
     case 'task.moved':
+      if (statuses?.length && !statuses.includes(evt.to)) return []
       return [{ event: 'task_status_changed', taskId: evt.taskId, from: evt.from, to: evt.to }]
     case 'pending.updated':
       return (evt.actions || [])
@@ -56,7 +58,7 @@ export async function postWebhook(url, body) {
 export function notifyWebhook(project, evt, seen) {
   const url = webhookUrl(project)
   if (!url) return
-  for (const e of webhookEventsFor(evt, seen)) {
+  for (const e of webhookEventsFor(evt, seen, project.webhookStatuses)) {
     if (e.actionId) seen.add(e.actionId)
     let taskTitle = null
     if (e.taskId) { try { taskTitle = findTask(project.path, e.taskId)?.title || null } catch {} }

@@ -56,3 +56,15 @@ test('eventos sem interesse são ignorados', () => {
   assert.deepEqual(webhookEventsFor({ type: 'run.started', taskId: 't1' }), [])
   assert.deepEqual(webhookEventsFor({ type: 'task.upserted' }), [])
 })
+
+test('webhookStatuses filtra task_status_changed e só ele', () => {
+  const moved = to => ({ type: 'task.moved', taskId: 't1', from: 'doing', to })
+  assert.deepEqual(webhookEventsFor(moved('doing'), new Set(), ['done']), [])
+  assert.equal(webhookEventsFor(moved('done'), new Set(), ['done']).length, 1)
+  // lista vazia/ausente = todos os status (comportamento antigo preservado)
+  assert.equal(webhookEventsFor(moved('doing'), new Set(), []).length, 1)
+  assert.equal(webhookEventsFor(moved('doing')).length, 1)
+  // filtro de status não deve calar falha de run
+  const failed = webhookEventsFor({ type: 'run.finished', taskId: 't1', exitCode: 1 }, new Set(), ['done'])
+  assert.equal(failed[0].event, 'run_failed')
+})
