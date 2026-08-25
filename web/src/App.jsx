@@ -663,6 +663,7 @@ function QueueIndicator({ queue }) {
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 const DEFAULT_RETRY = { maxAttempts: 3, backoffMinutes: 0 }
+const DEFAULT_MAX_TURNS = 40
 
 const USAGE_LABEL = {
   session: 'Sessão (5h)',
@@ -2307,7 +2308,19 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const retry = project.retry || DEFAULT_RETRY
   const [maxAttempts, setMaxAttempts] = useState(String(retry.maxAttempts))
   const [backoffMin, setBackoffMin] = useState(String(retry.backoffMinutes))
+  const savedMaxTurns = project.maxTurns ?? DEFAULT_MAX_TURNS
+  const [maxTurns, setMaxTurns] = useState(String(savedMaxTurns))
   const patchGit = patch => onPatch({ git: patch })
+
+  const commitMaxTurns = () => {
+    const n = Number(maxTurns)
+    if (!Number.isInteger(n) || n < 0 || n > 500) {
+      setMaxTurns(String(savedMaxTurns))
+      return
+    }
+    if (n === savedMaxTurns) return
+    onPatch({ maxTurns: n })
+  }
 
   // Campos inválidos voltam ao valor salvo em vez de virar patch — mesmo contrato
   // do timeout, e evita mandar NaN para o backend.
@@ -2399,6 +2412,22 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
             onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
             className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
           <span className="text-meta text-muted">entre 1 e 240 min. Vale a partir do próximo run.</span>
+        </label>
+
+        <label className="flex items-start gap-3">
+          <span className="mt-1">Teto de turnos</span>
+          <span className="flex-1">
+            <input type="number" min={0} max={500} value={maxTurns}
+              onChange={e => setMaxTurns(e.target.value)}
+              onBlur={commitMaxTurns}
+              onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+              className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
+            <span className="mt-1 block text-meta text-muted">
+              Cada turno da sessão reenvia todo o histórico, então uma task que se perde custa muito mais que
+              uma task longa e objetiva. Ao estourar o teto a task volta para "A fazer" com <code>blocked</code>,
+              sem nova tentativa automática. 0 = sem limite (só o timeout).
+            </span>
+          </span>
         </label>
 
         <label className="flex items-start gap-3">

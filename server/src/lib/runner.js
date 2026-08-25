@@ -11,6 +11,20 @@ import { normalizeModel } from './models.js'
 import { isFuture } from './scheduler.js'
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
+
+// Teto de turnos da sessão de execução. Sem ele, o único limite era o timeout — e
+// como cada turno reenvia todo o histórico, uma task que se perde consome muito mais
+// que uma que trabalha o dobro do tempo em poucos turnos. 0 = sem limite.
+export const DEFAULT_MAX_TURNS = 40
+export const MAX_MAX_TURNS = 500
+
+export function turnLimit(project) {
+  if (project?.maxTurns === 0) return null // desligado explicitamente
+  const n = Number(project?.maxTurns)
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_MAX_TURNS
+  return Math.min(Math.round(n), MAX_MAX_TURNS)
+}
+
 // Política de retentativa. Defaults preservam o comportamento histórico:
 // 3 tentativas antes da tag `blocked` e nenhum backoff (a task volta para todo/
 // e o auto-run a repesca no mesmo tick).
@@ -372,11 +386,13 @@ export class Runner {
     const allowRules = [`Edit(${kanbanGlob})`, `Write(${kanbanGlob})`]
     const allowedTools = [project.allowedTools, ...allowRules].filter(Boolean).join(' ')
 
+    const turns = turnLimit(project)
     const args = [
       ...(resumeFrom ? ['--resume', resumeFrom] : []),
       '-p', prompt,
       '--output-format', 'stream-json',
       '--verbose',
+      ...(turns ? ['--max-turns', String(turns)] : []),
       ...(model ? ['--model', model] : []),
       ...(project.skipPermissions
         ? ['--dangerously-skip-permissions']
@@ -648,11 +664,29 @@ export class Runner {
       return
     }
 
+    // Teto de turnos estourado: a sessão parou no meio, não falhou por acaso.
+    // Re-executar do zero gastaria tudo de novo para parar no mesmo lugar, então isso
+    // nunca conta como retentativa — vai direto para revisão humana.
+    const maxTurnsHit = a.result?.subtype === 'error_max_turns'
+
     if (a.killed && !a.timedOut) {
       updateTask(project.path, a.taskId, { status: 'todo', run: runMeta })
       appendToSection(project.path, a.taskId, 'Log de erros',
         `[${runMeta.completed_at}] Sessão morta manualmente pelo usuário.`)
       this.emit('run.killed', { projectId: a.projectId, taskId: a.taskId })
+    } else if (maxTurnsHit && !a.timedOut) {
+      const patch = { status: 'todo', run: runMeta }
+      if (task && !task.tags?.includes('blocked')) patch.tags = [...(task.tags || []), 'blocked']
+      updateTask(project.path, a.taskId, patch)
+      appendToSection(project.path, a.taskId, 'Log de erros',
+        `[${runMeta.completed_at}] Teto de ${turnLimit(project)} turnos atingido — a sessão parou no meio. ` +
+        `Sem nova tentativa automática (repetir gastaria o mesmo para parar no mesmo ponto). ` +
+        `Quebre a task em partes menores ou aumente o teto de turnos do projeto.`)
+      this.emit('run.finished', {
+        projectId: a.projectId, taskId: a.taskId, exitCode, maxTurns: true,
+        costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
+        numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
+      })
     } else if (exitCode === 0 && !a.timedOut && hasHumanRequest(task?.body)) {
       // O agente sinalizou que depende de uma decisão humana: o card volta para
       // todo com a tag human-request (fora do auto-pilot) em vez de concluir.

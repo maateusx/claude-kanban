@@ -35,7 +35,7 @@ Quebra uma task grande em 2–8 subtasks encadeadas por `depends_on` (tags `subt
 ## Execução
 
 ### 9. Fila global e runner
-Fila FIFO persistida (sobrevive a restart), com inserção por prioridade, reorder manual e kill. Cada task roda em sessão `claude -p` isolada com `--output-format stream-json`, modelo escolhido por task > projeto > default, timeout configurável (default 30 min) e concorrência configurável (default 1, teto 8 — concorrência real exige worktree). (`server/src/lib/runner.js`)
+Fila FIFO persistida (sobrevive a restart), com inserção por prioridade, reorder manual e kill. Cada task roda em sessão `claude -p` isolada com `--output-format stream-json`, modelo escolhido por task > projeto > default, timeout configurável (default 30 min), teto de turnos configurável (`--max-turns`, default 40, 0 desliga) e concorrência configurável (default 1, teto 8 — concorrência real exige worktree). (`server/src/lib/runner.js`)
 
 ### 10. Log de execução ao vivo
 Eventos da sessão são gravados em `.claude/claude-kanban/logs/<id>.jsonl` e transmitidos por WebSocket para o drawer da UI, com replay da última execução. (`runner.js`)

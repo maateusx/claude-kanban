@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { bootstrapStatus } from './lib/bootstrap.js'
 import { listPendingActions } from './lib/pending.js'
 import { gitSettings, projectBranch } from './lib/git.js'
-import { retrySettings } from './lib/runner.js'
+import { retrySettings, DEFAULT_MAX_TURNS } from './lib/runner.js'
 import { getUsage } from './lib/usage.js'
 import { modelsCatalog, refreshModels } from './lib/models.js'
 import projectRoutes from './routes/projects.js'
@@ -38,6 +38,7 @@ export async function buildApp(deps) {
       ...p,
       git: gitSettings(p),
       retry: retrySettings(p),
+      maxTurns: p.maxTurns ?? DEFAULT_MAX_TURNS,
       available,
       bootstrap: bootstrapErrors.has(p.id) ? 'failed' : (available ? bootstrapStatus(p.path) : 'unknown'),
       bootstrapError: bootstrapErrors.get(p.id) || null,
