@@ -35,6 +35,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
   "autoRun": false,
   "queuePausedUntil": null,
   "devServer": { "command": "npm run dev", "url": "http://localhost:3000" },
+  "searchSources": [],
   "git": {
     "baseBranch": "main",
     "pullBeforeStart": false,
@@ -54,7 +55,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 }
 ```
 
-`available` é `false` quando o diretório não existe mais; nesse caso `bootstrap` vira `"unknown"` e `branch` vira `null`. `git` é sempre o objeto completo (defaults + overrides). `queuePausedUntil` (ISO ou `null`) adia a fila **deste projeto**: os itens continuam enfileirados, na ordem, mas nenhum sai da fila antes do horário; o servidor limpa o campo sozinho quando a hora chega.
+`searchSources` é a lista de fontes de busca customizadas do projeto (ver [Search sources](#search-sources)); vem sempre como array (`[]` quando o projeto nunca cadastrou nenhuma). `available` é `false` quando o diretório não existe mais; nesse caso `bootstrap` vira `"unknown"` e `branch` vira `null`. `git` é sempre o objeto completo (defaults + overrides). `queuePausedUntil` (ISO ou `null`) adia a fila **deste projeto**: os itens continuam enfileirados, na ordem, mas nenhum sai da fila antes do horário; o servidor limpa o campo sozinho quando a hora chega.
 
 ### `task`
 
@@ -120,7 +121,9 @@ Fontes de busca customizadas do projeto (endpoints HTTP cadastrados pelo usuári
 
 Formato: `{ id, name, method: "GET"|"POST"|"PUT"|"PATCH"|"DELETE", url, headers: [{ key, value }], queryParams: [{ key, value }], body, bodyType: "json"|"text"|"form", enabled, resultsPath, titleField, descriptionField }`.
 
-Os três últimos mapeiam a resposta JSON da busca: `resultsPath` navega até o array de resultados (ex. `"data.items"`; vazio = a raiz), `titleField`/`descriptionField` apontam o campo de cada item (aceitam caminho com ponto, ex. `"fields.summary"`). Sem eles, cai nos nomes usuais (`title`/`name`/`subject` e `description`/`body`/`summary`/`content`); o link do item sai de `url`/`html_url`/`link`/`permalink`.
+A request é montada exatamente como cadastrada: os `queryParams` são **acrescentados** à query da `url`, os `headers` vão como estão e o `body` só é enviado quando o método não é `GET`/`DELETE` (nesse caso o `content-type` sai do `bodyType` — `application/json`, `text/plain` ou `application/x-www-form-urlencoded` — a menos que você já tenha declarado um header `content-type`).
+
+Os três últimos mapeiam a resposta JSON da busca: `resultsPath` navega até o array de resultados (ex. `"data.items"`; vazio = a raiz), `titleField`/`descriptionField` apontam o campo de cada item (aceitam caminho com ponto, ex. `"fields.summary"`). Sem eles, cai nos nomes usuais (`title`/`name`/`subject` e `description`/`body`/`summary`/`content`); o link do item sai de `url`/`html_url`/`link`/`permalink`. Título é truncado em 200 chars e item sem título é descartado.
 
 | Método | Path | Body | Resposta |
 | --- | --- | --- | --- |
@@ -128,11 +131,13 @@ Os três últimos mapeiam a resposta JSON da busca: `resultsPath` navega até o 
 | `POST` | `/api/projects/:projectId/search-sources` | `{ name, method?, url, headers?, queryParams?, body?, bodyType?, enabled? }` | `{ source, project }`. `id` é gerado. **400** se `name` vazio, `method`/`bodyType` fora do enum ou `url` não for http(s). Pares chave-valor sem `key` são descartados. |
 | `PATCH` | `/api/projects/:projectId/search-sources/:sourceId` | qualquer subconjunto do body de criação | `{ source, project }`. Merge raso campo a campo (listas são substituídas por inteiro). **404** se a fonte não existe; mesmas validações do POST. |
 | `DELETE` | `/api/projects/:projectId/search-sources/:sourceId` | — | `{ ok: true, project }`. **404** se a fonte não existe. |
-| `POST` | `/api/projects/:projectId/search-sources/:sourceId/fetch` | — | `{ items: [{ sourceId, sourceName, title, description, url, tag, already_imported }] }`. Executa a request da fonte (máx. 100 itens, timeout 30s). **404** se a fonte não existe, **502** em erro de rede/HTTP ou resposta que não é JSON/array. |
+| `POST` | `/api/projects/:projectId/search-sources/:sourceId/fetch` | — | `{ items: [{ sourceId, sourceName, title, description, url, tag, already_imported }] }`. Executa a request da fonte (máx. 100 itens, timeout 30s), inclusive se ela estiver desabilitada. **404** se a fonte não existe, **502** em erro de rede/HTTP ou resposta que não é JSON/array. |
 | `POST` | `/api/projects/:projectId/search-sources/fetch-all` | — | `{ items: [...], errors: [{ sourceId, sourceName, error }] }`. Busca em todas as fontes `enabled` em paralelo; uma fonte fora do ar vira erro por fonte em vez de derrubar a busca. |
-| `POST` | `/api/projects/:projectId/search-sources/import` | `{ items: [...], priority?, status? }` | `{ created: [task], skipped: [{ title, tag, reason }] }`. Cria uma task por item com as tags `search` e `search:<sourceId>:<hash>`. **400** se `items` vazio. |
+| `POST` | `/api/projects/:projectId/search-sources/import` | `{ items: [...], priority?, status? }` | `{ created: [task], skipped: [{ title, tag, reason }] }`. Cria uma task por item com as tags `search` e `search:<sourceId>:<hash>`, emitindo um `task.upserted` por task. Defaults: `priority: "medium"`, `status: "backlog"` (valores fora do enum caem no default). Item sem `sourceId`/`title` entra em `skipped` com `reason: "item inválido"`. **400** se `items` vazio. |
 
-O dedupe usa a tag `search:<sourceId>:<hash(title+url)>` — do mesmo jeito que o import de issues usa `gh:<n>`. Buscar de novo devolve `already_imported: true` nos itens já importados, e o `import` recalcula a tag no servidor e ignora (via `skipped`) o que já virou task.
+O dedupe usa a tag `search:<sourceId>:<hash(title+url)>` — do mesmo jeito que o import de issues usa `gh:<n>`. Buscar de novo devolve `already_imported: true` nos itens já importados, e o `import` recalcula a tag no servidor e ignora (via `skipped`) o que já virou task — o cliente manda o item, não a identidade dele.
+
+A descrição da task criada é a descrição do item mais uma linha de referência (`Importada da fonte de busca **<nome>**: <link>`), para a sessão do Claude poder citar a origem.
 
 ### Dev server
 
@@ -226,7 +231,7 @@ Cada mensagem é uma linha JSON no formato `{ "type": "<evento>", ...payload }`.
 | `run.queue` | `queueView` | A fila foi alterada por fora do fluxo normal (remoção de um projeto, cancelamento de um item da fila). |
 | `pending.updated` | `{ projectId, actions }` | `pending-actions.md` mudou (guardrail bloqueou algo, ou uma ação foi resolvida). |
 | `devserver.updated` | `{ projectId, running, pid, startedAt, exitCode? }` | Dev server iniciou ou morreu. `exitCode` só aparece quando o processo terminou. |
-| `project.updated` | `{ projectId }` | Algo do projeto mudou fora do board (checkout de branch, escrita em claude-config). Sinal de "refaça o `GET /api/projects`". |
+| `project.updated` | `{ projectId }` | Algo do projeto mudou fora do board (checkout de branch, escrita em claude-config, CRUD de search source). Sinal de "refaça o `GET /api/projects`". |
 
 ## `~/.claude-kanban/` (ou `$CLAUDE_KANBAN_HOME`)
 
