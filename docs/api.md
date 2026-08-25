@@ -114,6 +114,19 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | `POST` | `/api/projects/:projectId/bootstrap` | — | `{ project }`. Re-roda o bootstrap (idempotente). |
 | `DELETE` | `/api/projects/:projectId?uninstallGuardrails=true` | — | `{ ok: true }`. Remove o projeto do app, esvazia a fila dele, para o dev server e o watcher. Com a query, também desinstala os hooks/guard do projeto. Não apaga tasks nem código. |
 
+### Search sources
+
+Fontes de busca customizadas do projeto (endpoints HTTP cadastrados pelo usuário). Persistem em `p.searchSources` no `~/.claude-kanban/projects.json` e aparecem no `project.searchSources`.
+
+Formato: `{ id, name, method: "GET"|"POST"|"PUT"|"PATCH"|"DELETE", url, headers: [{ key, value }], queryParams: [{ key, value }], body, bodyType: "json"|"text"|"form", enabled }`.
+
+| Método | Path | Body | Resposta |
+| --- | --- | --- | --- |
+| `GET` | `/api/projects/:projectId/search-sources` | — | `{ searchSources: [...] }` |
+| `POST` | `/api/projects/:projectId/search-sources` | `{ name, method?, url, headers?, queryParams?, body?, bodyType?, enabled? }` | `{ source, project }`. `id` é gerado. **400** se `name` vazio, `method`/`bodyType` fora do enum ou `url` não for http(s). Pares chave-valor sem `key` são descartados. |
+| `PATCH` | `/api/projects/:projectId/search-sources/:sourceId` | qualquer subconjunto do body de criação | `{ source, project }`. Merge raso campo a campo (listas são substituídas por inteiro). **404** se a fonte não existe; mesmas validações do POST. |
+| `DELETE` | `/api/projects/:projectId/search-sources/:sourceId` | — | `{ ok: true, project }`. **404** se a fonte não existe. |
+
 ### Dev server
 
 | Método | Path | Body | Resposta |
