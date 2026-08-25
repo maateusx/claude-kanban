@@ -118,7 +118,9 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 
 Fontes de busca customizadas do projeto (endpoints HTTP cadastrados pelo usuário). Persistem em `p.searchSources` no `~/.claude-kanban/projects.json` e aparecem no `project.searchSources`.
 
-Formato: `{ id, name, method: "GET"|"POST"|"PUT"|"PATCH"|"DELETE", url, headers: [{ key, value }], queryParams: [{ key, value }], body, bodyType: "json"|"text"|"form", enabled }`.
+Formato: `{ id, name, method: "GET"|"POST"|"PUT"|"PATCH"|"DELETE", url, headers: [{ key, value }], queryParams: [{ key, value }], body, bodyType: "json"|"text"|"form", enabled, resultsPath, titleField, descriptionField }`.
+
+Os três últimos mapeiam a resposta JSON da busca: `resultsPath` navega até o array de resultados (ex. `"data.items"`; vazio = a raiz), `titleField`/`descriptionField` apontam o campo de cada item (aceitam caminho com ponto, ex. `"fields.summary"`). Sem eles, cai nos nomes usuais (`title`/`name`/`subject` e `description`/`body`/`summary`/`content`); o link do item sai de `url`/`html_url`/`link`/`permalink`.
 
 | Método | Path | Body | Resposta |
 | --- | --- | --- | --- |
@@ -126,6 +128,11 @@ Formato: `{ id, name, method: "GET"|"POST"|"PUT"|"PATCH"|"DELETE", url, headers:
 | `POST` | `/api/projects/:projectId/search-sources` | `{ name, method?, url, headers?, queryParams?, body?, bodyType?, enabled? }` | `{ source, project }`. `id` é gerado. **400** se `name` vazio, `method`/`bodyType` fora do enum ou `url` não for http(s). Pares chave-valor sem `key` são descartados. |
 | `PATCH` | `/api/projects/:projectId/search-sources/:sourceId` | qualquer subconjunto do body de criação | `{ source, project }`. Merge raso campo a campo (listas são substituídas por inteiro). **404** se a fonte não existe; mesmas validações do POST. |
 | `DELETE` | `/api/projects/:projectId/search-sources/:sourceId` | — | `{ ok: true, project }`. **404** se a fonte não existe. |
+| `POST` | `/api/projects/:projectId/search-sources/:sourceId/fetch` | — | `{ items: [{ sourceId, sourceName, title, description, url, tag, already_imported }] }`. Executa a request da fonte (máx. 100 itens, timeout 30s). **404** se a fonte não existe, **502** em erro de rede/HTTP ou resposta que não é JSON/array. |
+| `POST` | `/api/projects/:projectId/search-sources/fetch-all` | — | `{ items: [...], errors: [{ sourceId, sourceName, error }] }`. Busca em todas as fontes `enabled` em paralelo; uma fonte fora do ar vira erro por fonte em vez de derrubar a busca. |
+| `POST` | `/api/projects/:projectId/search-sources/import` | `{ items: [...], priority?, status? }` | `{ created: [task], skipped: [{ title, tag, reason }] }`. Cria uma task por item com as tags `search` e `search:<sourceId>:<hash>`. **400** se `items` vazio. |
+
+O dedupe usa a tag `search:<sourceId>:<hash(title+url)>` — do mesmo jeito que o import de issues usa `gh:<n>`. Buscar de novo devolve `already_imported: true` nos itens já importados, e o `import` recalcula a tag no servidor e ignora (via `skipped`) o que já virou task.
 
 ### Dev server
 

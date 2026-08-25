@@ -22,6 +22,7 @@ export function normalizeSource(input = {}, base = null) {
     id: nanoid(6),
     name: '', method: 'GET', url: '',
     headers: [], queryParams: [], body: '', bodyType: 'json', enabled: true,
+    resultsPath: '', titleField: '', descriptionField: '',
   }
   if (input.name !== undefined) s.name = String(input.name || '').trim()
   if (input.method !== undefined) s.method = String(input.method || '').toUpperCase()
@@ -31,6 +32,10 @@ export function normalizeSource(input = {}, base = null) {
   if (input.body !== undefined) s.body = String(input.body ?? '')
   if (input.bodyType !== undefined) s.bodyType = String(input.bodyType || '').toLowerCase()
   if (input.enabled !== undefined) s.enabled = !!input.enabled
+  // Mapeamento da resposta JSON (ver searchFetch.js): caminhos com ponto, opcionais.
+  for (const k of ['resultsPath', 'titleField', 'descriptionField']) {
+    if (input[k] !== undefined) s[k] = String(input[k] || '').trim()
+  }
 
   if (!s.name) throw new Error('name é obrigatório')
   if (!METHODS.includes(s.method)) throw new Error(`method deve ser um de: ${METHODS.join(', ')}`)
