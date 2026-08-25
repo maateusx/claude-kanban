@@ -202,3 +202,149 @@ export function SearchSourcesModal({ project, onClose }) {
     </div>
   )
 }
+
+// Busca nas fontes cadastradas e importa os resultados como tasks. Mesmo contrato
+// do import de issues do GitHub: `already_imported` vem do server (dedupe por tag
+// `search:<sourceId>:<hash>`), e item já importado aparece desabilitado.
+export function SearchTasksModal({ project, onClose, onImported }) {
+  const [sources, setSources] = useState(null)  // null = carregando
+  const [where, setWhere] = useState('all')     // 'all' | sourceId
+  const [result, setResult] = useState(null)    // null = ainda não buscou | { items, errors }
+  const [selected, setSelected] = useState({})  // tag -> bool
+  const [busy, setBusy] = useState(null)        // null | 'fetching' | 'importing'
+  const [error, setError] = useState(null)
+  const [done, setDone] = useState(null)        // resumo do último import
+
+  useEffect(() => {
+    api.searchSources(project.id).then(d => setSources(d.searchSources))
+      .catch(e => { setError(e.message); setSources([]) })
+  }, [project.id])
+
+  const search = () => {
+    setBusy('fetching'); setError(null); setDone(null); setResult(null)
+    const p = where === 'all' ? api.fetchAllSearchSources(project.id) : api.fetchSearchSource(project.id, where)
+    p.then(d => {
+      setResult({ items: d.items || [], errors: d.errors || [] })
+      setSelected(Object.fromEntries((d.items || []).filter(i => !i.already_imported).map(i => [i.tag, true])))
+    })
+      .catch(e => setError(e.message))
+      .finally(() => setBusy(null))
+  }
+
+  const items = result?.items || []
+  const importable = items.filter(i => !i.already_imported)
+  const chosen = importable.filter(i => selected[i.tag])
+
+  const doImport = () => {
+    setBusy('importing'); setError(null)
+    api.importSearchItems(project.id, chosen.map(({ sourceId, sourceName, title, description, url }) =>
+      ({ sourceId, sourceName, title, description, url })))
+      .then(d => {
+        setDone(d)
+        // Marca localmente o que acabou de entrar, para a lista refletir o dedupe
+        // sem precisar refazer a busca (que bateria de novo no endpoint externo).
+        const imported = new Set(chosen.map(i => i.tag))
+        setResult(r => ({ ...r, items: r.items.map(i => (imported.has(i.tag) ? { ...i, already_imported: true } : i)) }))
+        onImported?.()
+      })
+      .catch(e => setError(e.message))
+      .finally(() => setBusy(null))
+  }
+
+  const enabled = (sources || []).filter(s => s.enabled)
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/10 p-4"
+      onMouseDown={e => e.target === e.currentTarget && !busy && onClose()}>
+      <div className="flex max-h-full w-full max-w-2xl flex-col rounded-[8px] border border-line bg-bg p-5">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="font-semibold">Buscar tasks — {project.name}</h2>
+          <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
+        </div>
+
+        {error && <div className="mb-3 rounded-[6px] border border-line px-3 py-2 text-body text-danger">{error}</div>}
+
+        <div className="mb-3 flex items-end gap-2">
+          <label className="flex-1">
+            <span className="text-meta text-muted">Buscar em</span>
+            <select value={where} onChange={e => setWhere(e.target.value)} aria-label="Buscar em"
+              className="block w-full rounded-[6px] border border-line px-2 py-1 text-body outline-none">
+              <option value="all">todas as habilitadas ({enabled.length})</option>
+              {(sources || []).map(s => (
+                <option key={s.id} value={s.id}>{s.name}{s.enabled ? '' : ' (inativa)'}</option>
+              ))}
+            </select>
+          </label>
+          <button onClick={search} disabled={!!busy || sources === null || !sources.length}
+            className="rounded-[6px] bg-accent px-3 py-1.5 text-body text-white disabled:opacity-50">
+            {busy === 'fetching' ? 'buscando…' : 'Buscar'}
+          </button>
+        </div>
+
+        {sources?.length === 0 && (
+          <div className="text-body text-muted">Nenhuma fonte cadastrada — use "Fontes de busca" para criar uma.</div>
+        )}
+
+        {result?.errors?.map(e => (
+          <div key={e.sourceId} className="mb-2 rounded-[6px] border border-line px-3 py-2 text-meta text-danger">
+            {e.sourceName}: {e.error}
+          </div>
+        ))}
+
+        {done && (
+          <div className="mb-2 rounded-[6px] border border-line px-3 py-2 text-body">
+            {done.created.length} task(s) criada(s) no Backlog
+            {done.skipped.length > 0 && ` · ${done.skipped.length} ignorada(s) (já existiam)`}
+          </div>
+        )}
+
+        {result && (
+          <div className="flex items-center pb-2 text-body text-ink-2">
+            <span>{items.length} resultado(s) — {importable.length} importável(is)</span>
+            <div className="flex-1" />
+            {importable.length > 0 && (
+              <button onClick={() => setSelected(
+                Object.fromEntries(importable.map(i => [i.tag, chosen.length < importable.length])))}
+                className="text-meta text-accent hover:underline">
+                {chosen.length < importable.length ? 'selecionar todos' : 'desmarcar todos'}
+              </button>
+            )}
+          </div>
+        )}
+
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
+          {result && items.length === 0 && !result.errors.length &&
+            <div className="text-body text-muted">Nenhum resultado.</div>}
+          {items.map(i => (
+            <label key={i.tag}
+              className={`flex items-start gap-3 rounded-[8px] border p-3 text-body ${i.already_imported ? 'cursor-default border-line opacity-50' : `cursor-pointer ${selected[i.tag] ? 'border-accent' : 'border-line opacity-60'}`}`}>
+              <input type="checkbox" checked={!!selected[i.tag] && !i.already_imported} disabled={i.already_imported}
+                className="mt-1 accent-[var(--color-accent)]"
+                onChange={e => setSelected(sel => ({ ...sel, [i.tag]: e.target.checked }))} />
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{i.title}</span>
+                  <span className="rounded-[4px] border border-line px-1 text-meta text-muted">{i.sourceName}</span>
+                  {i.already_imported &&
+                    <span className="rounded-[4px] border border-line px-1 text-meta text-muted">já existe</span>}
+                </span>
+                {i.url && <span className="mt-0.5 block truncate font-mono text-meta text-muted">{i.url}</span>}
+                {i.description &&
+                  <span className="mt-1 block line-clamp-3 whitespace-pre-wrap text-meta text-muted">{i.description}</span>}
+              </span>
+            </label>
+          ))}
+        </div>
+
+        <div className="mt-3 flex justify-end gap-2">
+          <button onClick={onClose} disabled={busy === 'importing'}
+            className="rounded-[6px] px-3 py-1.5 text-body text-ink-2 hover:bg-hover">Fechar</button>
+          <button onClick={doImport} disabled={!chosen.length || !!busy}
+            className="rounded-[6px] bg-accent px-3 py-1.5 text-body text-white disabled:opacity-50">
+            {busy === 'importing' ? 'importando…' : `Importar ${chosen.length} no Backlog`}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}

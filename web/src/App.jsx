@@ -6,7 +6,7 @@ import * as notifications from './notify.js'
 import * as sounds from './sounds.js'
 import { DiffDrawer } from './Diff.jsx'
 import { ExtensionsDrawer } from './Extensions.jsx'
-import { SearchSourcesModal } from './SearchSources.jsx'
+import { SearchSourcesModal, SearchTasksModal } from './SearchSources.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
 import { MODELS, setModels, modelLabel } from './models.js'
 
@@ -130,6 +130,7 @@ export default function App() {
   const [showSuggest, setShowSuggest] = useState(false)
   const [showIssues, setShowIssues] = useState(false)
   const [showSources, setShowSources] = useState(false)
+  const [showSearchTasks, setShowSearchTasks] = useState(false)
   const [showClaudeConfig, setShowClaudeConfig] = useState(false)
   // null = fechado; 'global' | 'project' = escopo inicial da tela de extensões
   const [extScope, setExtScope] = useState(null)
@@ -358,6 +359,7 @@ export default function App() {
               onSuggest={() => setShowSuggest(true)}
               onImportIssues={() => setShowIssues(true)}
               onSearchSources={() => setShowSources(true)}
+              onSearchTasks={() => setShowSearchTasks(true)}
               onClaudeConfig={() => setShowClaudeConfig(true)}
               onExtensions={() => setExtScope('project')}
               onSettings={() => setShowSettings(true)}
@@ -464,6 +466,10 @@ export default function App() {
       )}
       {showSources && project && (
         <SearchSourcesModal project={project} onClose={() => setShowSources(false)} />
+      )}
+      {showSearchTasks && project && (
+        <SearchTasksModal project={project} onClose={() => setShowSearchTasks(false)}
+          onImported={() => api.tasks(project.id).then(d => setTasks(d.tasks))} />
       )}
       {showPending && project && (
         <PendingPanel actions={pending} onClose={() => setShowPending(false)}
@@ -794,7 +800,7 @@ function UsageRail({ usage }) {
 /* ------------------------------------------------------------------- header */
 
 function BoardHeader({ project, health, view, onView, query, onQuery, searchRef, pendingCount,
-  onNewTask, onPending, onSuggest, onImportIssues, onSearchSources, onClaudeConfig, onExtensions, onSettings, onRerun, onAutoRun, onChanged }) {
+  onNewTask, onPending, onSuggest, onImportIssues, onSearchSources, onSearchTasks, onClaudeConfig, onExtensions, onSettings, onRerun, onAutoRun, onChanged }) {
   return (
     <header className="border-b border-line px-4 py-3">
       <div className="flex items-center gap-2">
@@ -814,6 +820,7 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
           { label: 'Extensões (skills, hooks, agents, plugins)', onClick: onExtensions },
           { label: '✦ Sugerir tasks com o Claude', onClick: onSuggest, disabled: !health.claudeAvailable },
           { label: 'Importar issues do GitHub', onClick: onImportIssues },
+          { label: 'Buscar tasks (fontes customizadas)', onClick: onSearchTasks },
           { label: 'Fontes de busca', onClick: onSearchSources },
         ]} />
       </div>

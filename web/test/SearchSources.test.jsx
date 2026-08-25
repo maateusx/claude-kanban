@@ -7,11 +7,12 @@ vi.mock('../src/api.js', () => ({
   api: {
     searchSources: vi.fn(), addSearchSource: vi.fn(),
     patchSearchSource: vi.fn(), removeSearchSource: vi.fn(),
+    fetchSearchSource: vi.fn(), fetchAllSearchSources: vi.fn(), importSearchItems: vi.fn(),
   },
 }))
 
 const { api } = await import('../src/api.js')
-const { SearchSourcesModal } = await import('../src/SearchSources.jsx')
+const { SearchSourcesModal, SearchTasksModal } = await import('../src/SearchSources.jsx')
 
 const PROJECT = { id: 'p1', name: 'Proj' }
 const SOURCE = {
@@ -115,5 +116,58 @@ describe('SearchSourcesModal', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Salvar' }))
     await screen.findByText('url deve ser uma URL http(s) válida')
     expect(screen.getByLabelText('Nome')).toBeTruthy()
+  })
+})
+
+// Fluxo de aceite da task: buscar → ver resultados → importar → buscar de novo e
+// confirmar que o item já importado vem desabilitado (dedupe por tag).
+describe('SearchTasksModal', () => {
+  const ITEM = {
+    sourceId: 's1', sourceName: 'HN', title: 'Bug no login',
+    description: 'estoura 500', url: 'https://hn.example/1',
+    tag: 'search:s1:abc123', already_imported: false,
+  }
+
+  it('busca em todas as fontes, importa e não duplica na busca seguinte', async () => {
+    const user = userEvent.setup()
+    api.fetchAllSearchSources.mockResolvedValueOnce({ items: [ITEM], errors: [] })
+    api.importSearchItems.mockResolvedValue({ created: [{ id: 't1' }], skipped: [] })
+    const onImported = vi.fn()
+    render(<SearchTasksModal project={PROJECT} onClose={() => {}} onImported={onImported} />)
+
+    await user.click(await screen.findByRole('button', { name: 'Buscar' }))
+    await screen.findByText('Bug no login')
+    expect(api.fetchAllSearchSources).toHaveBeenCalledWith('p1')
+
+    const box = screen.getByRole('checkbox')
+    expect(box.checked).toBe(true)   // não importado vem pré-selecionado
+    await user.click(screen.getByRole('button', { name: 'Importar 1 no Backlog' }))
+
+    await screen.findByText(/1 task\(s\) criada\(s\)/)
+    expect(api.importSearchItems).toHaveBeenCalledWith('p1', [{
+      sourceId: 's1', sourceName: 'HN', title: 'Bug no login',
+      description: 'estoura 500', url: 'https://hn.example/1',
+    }])
+    expect(onImported).toHaveBeenCalled()
+    // Marcado localmente logo após o import, sem refazer a busca.
+    expect(screen.getByRole('checkbox').disabled).toBe(true)
+
+    // Buscar de novo: o server devolve already_imported e o item fica travado.
+    api.fetchAllSearchSources.mockResolvedValueOnce({ items: [{ ...ITEM, already_imported: true }], errors: [] })
+    await user.click(screen.getByRole('button', { name: 'Buscar' }))
+    await screen.findByText('já existe')
+    expect(screen.getByRole('checkbox').disabled).toBe(true)
+    expect(screen.getByRole('button', { name: /Importar 0/ }).disabled).toBe(true)
+  })
+
+  it('busca em uma fonte específica e mostra erro por fonte', async () => {
+    const user = userEvent.setup()
+    api.fetchSearchSource.mockResolvedValue({ items: [] })
+    render(<SearchTasksModal project={PROJECT} onClose={() => {}} />)
+
+    await user.selectOptions(await screen.findByLabelText('Buscar em'), 's1')
+    await user.click(screen.getByRole('button', { name: 'Buscar' }))
+    await waitFor(() => expect(api.fetchSearchSource).toHaveBeenCalledWith('p1', 's1'))
+    await screen.findByText('Nenhum resultado.')
   })
 })
