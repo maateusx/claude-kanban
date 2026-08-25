@@ -43,6 +43,36 @@
   --text-key: 11.5px;
 }
 
+/* Tema escuro. O JS resolve a preferência (sistema/claro/escuro) e escreve
+   data-theme no <html> — aqui só reescrevemos os tokens; nenhum componente
+   precisa saber de tema. */
+html[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-bg: #0F1115;
+  --color-subtle: #15181E;
+  --color-hover: #1C2027;
+
+  --color-line: #262B33;
+  --color-line-strong: #3A414C;
+
+  --color-ink: #E5E7EB;
+  --color-ink-2: #AFB6C0;
+  --color-muted: #79818D;
+
+  --color-accent: #EA580C;
+  --color-accent-hover: #F97316;
+  --color-accent-soft: #2A1509;
+
+  --color-st-backlog: #79818D;
+  --color-st-archived: #5B6470;
+
+  --color-danger: #EF4444;
+
+  --color-chip: #1C2027;
+  --color-chip-ink: #D1D5DB;
+}
+
 :root {
   --rail-w: 64px;
   --rail-w-open: 220px;

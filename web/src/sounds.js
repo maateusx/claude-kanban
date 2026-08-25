@@ -8,25 +8,27 @@
 export const SOUND_KEY = 'ck.sounds'
 export const SOUND_MAP_KEY = 'ck.sounds.map'
 
+// Só as chaves: label e hint saem de i18n (`sound.category.<key>[.hint]`).
 export const CATEGORIES = [
-  { key: 'success', label: 'Sucesso', hint: 'task concluída' },
-  { key: 'attention', label: 'Ação manual', hint: 'decisão humana ou guardrail' },
-  { key: 'error', label: 'Erro', hint: 'run falhou ou estourou limite' },
+  { key: 'success' },
+  { key: 'attention' },
+  { key: 'error' },
 ]
 
 // Cada som é uma sequência de notas [freq Hz, início s, duração s].
 const LIBRARY = {
-  chime: { label: 'Chime', type: 'sine', vol: 0.06, notes: [[880, 0, 0.12], [1320, 0.13, 0.18]] },
-  ping: { label: 'Ping', type: 'sine', vol: 0.07, notes: [[1568, 0, 0.25]] },
-  blip: { label: 'Blip', type: 'square', vol: 0.03, notes: [[660, 0, 0.06], [990, 0.08, 0.1]] },
-  triplo: { label: 'Triplo', type: 'sine', vol: 0.08, notes: [[587, 0, 0.14], [587, 0.22, 0.14], [466, 0.44, 0.22]] },
-  batida: { label: 'Batida', type: 'triangle', vol: 0.12, notes: [[330, 0, 0.1], [330, 0.16, 0.14]] },
-  sirene: { label: 'Sirene', type: 'sine', vol: 0.08, notes: [[622, 0, 0.12], [466, 0.14, 0.12], [622, 0.28, 0.12], [466, 0.42, 0.2]] },
-  grave: { label: 'Grave', type: 'sawtooth', vol: 0.04, notes: [[196, 0, 0.25], [147, 0.28, 0.35]] },
-  none: { label: 'Sem som', notes: [] },
+  chime: { type: 'sine', vol: 0.06, notes: [[880, 0, 0.12], [1320, 0.13, 0.18]] },
+  ping: { type: 'sine', vol: 0.07, notes: [[1568, 0, 0.25]] },
+  blip: { type: 'square', vol: 0.03, notes: [[660, 0, 0.06], [990, 0.08, 0.1]] },
+  triplo: { type: 'sine', vol: 0.08, notes: [[587, 0, 0.14], [587, 0.22, 0.14], [466, 0.44, 0.22]] },
+  batida: { type: 'triangle', vol: 0.12, notes: [[330, 0, 0.1], [330, 0.16, 0.14]] },
+  sirene: { type: 'sine', vol: 0.08, notes: [[622, 0, 0.12], [466, 0.14, 0.12], [622, 0.28, 0.12], [466, 0.42, 0.2]] },
+  grave: { type: 'sawtooth', vol: 0.04, notes: [[196, 0, 0.25], [147, 0.28, 0.35]] },
+  none: { notes: [] },
 }
 
-export const VARIANTS = Object.entries(LIBRARY).map(([key, v]) => ({ key, label: v.label }))
+// O label de cada variante sai de i18n (`sound.variant.<key>`).
+export const VARIANTS = Object.keys(LIBRARY).map(key => ({ key }))
 
 export const DEFAULT_MAP = { success: 'chime', attention: 'triplo', error: 'grave' }
 
