@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { THEME_KEY } from '../src/theme.js'
+import { LANG_KEY } from '../src/i18n.js'
 
 vi.mock('@dnd-kit/core', () => ({
   DndContext: ({ children }) => <div>{children}</div>,
@@ -68,5 +69,18 @@ describe('configurações globais em abas', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Claro' }))
     expect(document.documentElement.dataset.theme).toBe('light')
     expect(localStorage.getItem(THEME_KEY)).toBe('light')
+  })
+
+  it('a aba Aparência oferece o idioma e persiste a escolha', async () => {
+    const reload = vi.fn()
+    vi.spyOn(window, 'location', 'get').mockReturnValue({ reload })
+    await open()
+    await userEvent.click(screen.getByRole('button', { name: 'Aparência' }))
+    expect(screen.getByText('Idioma')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'English' }))
+    expect(localStorage.getItem(LANG_KEY)).toBe('en')
+    expect(reload).toHaveBeenCalled()   // as strings são resolvidas na importação
+    vi.restoreAllMocks()
   })
 })

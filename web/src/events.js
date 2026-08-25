@@ -2,6 +2,8 @@
 // sem DOM: applyEvent só transforma estado; os efeitos colaterais (refetch de
 // projetos/fila/tasks) saem como uma lista de nomes que o App executa.
 
+import { t } from './i18n.js'
+
 export const LOG_LIMIT = 500
 
 export const initialState = { tasks: [], pending: [], logs: {} }
@@ -69,10 +71,10 @@ export function notificationsFor(evt, ctx) {
   switch (evt.type) {
     case 'run.finished': {
       const body = evt.humanRequest
-        ? `⏸ Precisa de decisão humana: ${taskLabel(evt.taskId)}`
+        ? t('⏸ Precisa de decisão humana: {task}', { task: taskLabel(evt.taskId) })
         : evt.exitCode === 0
-          ? `✓ Concluída: ${taskLabel(evt.taskId)}`
-          : `✕ Falhou: ${taskLabel(evt.taskId)}`
+          ? t('✓ Concluída: {task}', { task: taskLabel(evt.taskId) })
+          : t('✕ Falhou: {task}', { task: taskLabel(evt.taskId) })
       // Categoria do som: sucesso limpo, pedido de ação manual ou erro.
       const sound = evt.humanRequest ? 'attention' : evt.exitCode === 0 ? 'success' : 'error'
       return [{ key: `run.finished:${evt.taskId}`, title: projectName, body, sound, projectId: evt.projectId, taskId: evt.taskId }]
@@ -83,7 +85,7 @@ export function notificationsFor(evt, ctx) {
         .map(a => ({
           key: `pending:${a.id}`,
           title: projectName,
-          body: `🔒 Ação bloqueada pelos guardrails: ${a.label}`,
+          body: t('🔒 Ação bloqueada pelos guardrails: {label}', { label: a.label }),
           sound: 'attention',
           projectId: evt.projectId,
           taskId: a.taskId || null,

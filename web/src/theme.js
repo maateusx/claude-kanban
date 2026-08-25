@@ -2,12 +2,14 @@
 // sons — nada disso é por projeto. O CSS inteiro é feito de tokens, então trocar
 // de tema é só escrever data-theme no <html>: nenhum componente precisa saber.
 
+import { t } from './i18n.js'
+
 export const THEME_KEY = 'ck.theme'
 
 export const THEMES = [
-  { key: 'system', label: 'Sistema', hint: 'segue o tema do sistema operacional' },
-  { key: 'light', label: 'Claro', hint: '' },
-  { key: 'dark', label: 'Escuro', hint: '' },
+  { key: 'system', label: t('Sistema'), hint: t('segue o tema do sistema operacional') },
+  { key: 'light', label: t('Claro'), hint: '' },
+  { key: 'dark', label: t('Escuro'), hint: '' },
 ]
 
 export function loadTheme() {

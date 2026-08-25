@@ -122,6 +122,9 @@ Board com drag-and-drop (dnd-kit), colunas por status, filtros por tag, ordenaç
 ### 34. Configurações globais em abas e tema claro/escuro
 As configurações globais são separadas por tema em abas — **Execução** (concorrência, catálogo de modelos), **Aparência**, **Alertas** (notificações e sons) e **Extensões**. Em Aparência dá para escolher tema **Sistema** (default, acompanha o modo claro/escuro do SO em tempo real via `matchMedia`), **Claro** ou **Escuro**; a preferência vive no `localStorage` do navegador, como notificações e sons. O tema escuro só reatribui os design tokens em `:root[data-theme="dark"]` — nenhum componente tem variante `dark:`. (`web/src/theme.js`, `web/src/index.css`, `GlobalSettingsModal` em `web/src/App.jsx`)
 
+### 35. Interface multi-idioma (pt-BR / inglês)
+Toda a UI passa por `t()` (`web/src/i18n.js`), que resolve o texto num arquivo por língua em `web/src/languages/<lang>.json` — hoje `pt-BR.json` e `en.json`. A chave é o próprio texto em português: `pt-BR.json` é a identidade (serve de template e de lista canônica das strings) e uma chave sem tradução cai no português, então nada some da tela. Placeholders `{var}` cobrem interpolação (`t('Nova task em {col}', { col })`). A escolha fica em **Configurações globais → Aparência → Idioma**, vale para todos os projetos e vive no `localStorage` (`ck.lang`), como tema e sons; trocar recarrega a página, porque boa parte das strings é resolvida na importação dos módulos. O mesmo valor serve de locale para `Intl` (datas e ordenação alfabética) e vai para o atributo `lang` do `<html>`. Para adicionar uma língua: copiar `pt-BR.json`, traduzir os valores e registrar em `LANGUAGES`/`DICTS` no `i18n.js`. (`web/src/i18n.js`, `web/src/languages/`)
+
 ---
 
 ## Fluxo de trabalho típico

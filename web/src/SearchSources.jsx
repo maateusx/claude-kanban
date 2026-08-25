@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { api } from './api.js'
+import { t } from './i18n.js'
 
 // Cadastro das fontes de busca do projeto (endpoints HTTP que viram tasks).
 // Espelha o modelo do server (lib/searchSources.js): method/url/headers/query/body
@@ -24,18 +25,18 @@ function Pairs({ label, rows, onChange }) {
     <div>
       <div className="mb-1 flex items-center gap-2">
         <span className="text-meta text-muted">{label}</span>
-        <button type="button" aria-label={`adicionar ${label}`}
+        <button type="button" aria-label={t('adicionar {label}', { label })}
           onClick={() => onChange([...rows, { key: '', value: '' }])}
-          className="text-meta text-accent hover:underline">+ adicionar</button>
+          className="text-meta text-accent hover:underline">{t('+ adicionar')}</button>
       </div>
-      {rows.length === 0 && <div className="text-meta text-muted">nenhum</div>}
+      {rows.length === 0 && <div className="text-meta text-muted">{t('nenhum')}</div>}
       {rows.map((r, i) => (
         <div key={i} className="mb-1 flex items-center gap-2">
           <input value={r.key} onChange={e => set(i, { key: e.target.value })}
-            aria-label={`${label} chave ${i + 1}`} placeholder="chave" className={`${input} font-mono`} />
+            aria-label={t('{label} chave {i}', { label, i: i + 1 })} placeholder={t('chave')} className={`${input} font-mono`} />
           <input value={r.value} onChange={e => set(i, { value: e.target.value })}
-            aria-label={`${label} valor ${i + 1}`} placeholder="valor" className={`${input} font-mono`} />
-          <button type="button" aria-label={`remover ${label} ${i + 1}`}
+            aria-label={t('{label} valor {i}', { label, i: i + 1 })} placeholder={t('valor')} className={`${input} font-mono`} />
+          <button type="button" aria-label={t('remover {label} {i}', { label, i: i + 1 })}
             onClick={() => onChange(rows.filter((_, j) => j !== i))}
             className="text-muted hover:text-danger">✕</button>
         </div>
@@ -52,11 +53,11 @@ function SourceForm({ source, busy, onSave, onCancel }) {
       onSubmit={e => { e.preventDefault(); onSave(s) }}>
       <div className="flex gap-2">
         <label className="flex-1">
-          <span className="text-meta text-muted">Nome</span>
+          <span className="text-meta text-muted">{t('Nome')}</span>
           <input value={s.name} onChange={e => set({ name: e.target.value })} className={input} />
         </label>
         <label>
-          <span className="text-meta text-muted">Método</span>
+          <span className="text-meta text-muted">{t('Método')}</span>
           <select value={s.method} onChange={e => set({ method: e.target.value })}
             className="block rounded-[6px] border border-line px-2 py-1 text-body outline-none">
             {METHODS.map(m => <option key={m} value={m}>{m}</option>)}
@@ -76,7 +77,7 @@ function SourceForm({ source, busy, onSave, onCancel }) {
         <div>
           <div className="mb-1 flex items-center gap-2">
             <span className="text-meta text-muted">Body</span>
-            <select value={s.bodyType} onChange={e => set({ bodyType: e.target.value })} aria-label="Tipo do body"
+            <select value={s.bodyType} onChange={e => set({ bodyType: e.target.value })} aria-label={t('Tipo do body')}
               className="rounded-[6px] border border-line px-1 py-0.5 text-meta outline-none">
               {BODY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
@@ -87,9 +88,9 @@ function SourceForm({ source, busy, onSave, onCancel }) {
       )}
 
       <div className="flex gap-2">
-        {[['resultsPath', 'Caminho dos resultados', 'data.items'],
-          ['titleField', 'Campo do título', 'title'],
-          ['descriptionField', 'Campo da descrição', 'body']].map(([k, label, ph]) => (
+        {[['resultsPath', t('Caminho dos resultados'), 'data.items'],
+          ['titleField', t('Campo do título'), 'title'],
+          ['descriptionField', t('Campo da descrição'), 'body']].map(([k, label, ph]) => (
           <label key={k} className="flex-1">
             <span className="text-meta text-muted">{label}</span>
             <input value={s[k]} onChange={e => set({ [k]: e.target.value })} placeholder={ph}
@@ -102,14 +103,14 @@ function SourceForm({ source, busy, onSave, onCancel }) {
         <label className="flex items-center gap-2 text-body">
           <input type="checkbox" checked={s.enabled} onChange={e => set({ enabled: e.target.checked })}
             className="accent-[var(--color-accent)]" />
-          Ativa
+          {t('Ativa')}
         </label>
         <div className="flex-1" />
         <button type="button" onClick={onCancel} disabled={busy}
-          className="rounded-[6px] px-3 py-1.5 text-body text-ink-2 hover:bg-hover">Cancelar</button>
+          className="rounded-[6px] px-3 py-1.5 text-body text-ink-2 hover:bg-hover">{t('Cancelar')}</button>
         <button type="submit" disabled={busy}
           className="rounded-[6px] bg-accent px-3 py-1.5 text-body text-white disabled:opacity-50">
-          {busy ? 'salvando…' : 'Salvar'}
+          {busy ? t('salvando…') : t('Salvar')}
         </button>
       </div>
     </form>
@@ -146,16 +147,16 @@ export function SearchSourcesModal({ project, onClose }) {
       onMouseDown={e => e.target === e.currentTarget && onClose()}>
       <div className="flex max-h-full w-full max-w-2xl flex-col rounded-[8px] border border-line bg-bg p-5">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="font-semibold">Fontes de busca — {project.name}</h2>
+          <h2 className="font-semibold">{t('Fontes de busca')} — {project.name}</h2>
           <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
         </div>
 
         {error && <div className="mb-3 rounded-[6px] border border-line px-3 py-2 text-body text-danger">{error}</div>}
 
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
-          {sources === null && <div className="text-body text-muted">carregando…</div>}
+          {sources === null && <div className="text-body text-muted">{t('carregando…')}</div>}
           {sources?.length === 0 && editing !== 'new' &&
-            <div className="text-body text-muted">Nenhuma fonte cadastrada.</div>}
+            <div className="text-body text-muted">{t('Nenhuma fonte cadastrada.')}</div>}
 
           {(sources || []).map(s => (editing === s.id ? (
             <SourceForm key={s.id} source={s} busy={busy} onSave={save} onCancel={() => setEditing(null)} />
@@ -165,23 +166,23 @@ export function SearchSourcesModal({ project, onClose }) {
                 <span className="flex items-center gap-2">
                   <span className="font-medium">{s.name}</span>
                   <span className="rounded-[4px] border border-line px-1 font-mono text-meta text-muted">{s.method}</span>
-                  {!s.enabled && <span className="text-meta text-muted">inativa</span>}
+                  {!s.enabled && <span className="text-meta text-muted">{t('inativa')}</span>}
                 </span>
                 <span className="mt-0.5 block truncate font-mono text-meta text-muted">{s.url}</span>
               </span>
               <button onClick={() => act(() => api.patchSearchSource(project.id, s.id, { enabled: !s.enabled }))}
                 disabled={busy} className="text-meta text-accent hover:underline">
-                {s.enabled ? 'desativar' : 'ativar'}
+                {s.enabled ? t('desativar') : t('ativar')}
               </button>
               <button onClick={() => { setEditing(s.id); setConfirmId(null) }} className="text-meta text-accent hover:underline">
-                editar
+                {t('editar')}
               </button>
               {confirmId === s.id ? (
                 <button onClick={() => act(() => api.removeSearchSource(project.id, s.id))} disabled={busy}
-                  className="text-meta text-danger hover:underline">confirmar</button>
+                  className="text-meta text-danger hover:underline">{t('confirmar')}</button>
               ) : (
                 <button onClick={() => setConfirmId(s.id)} className="text-meta text-muted hover:text-danger">
-                  remover
+                  {t('remover')}
                 </button>
               )}
             </div>
@@ -194,7 +195,7 @@ export function SearchSourcesModal({ project, onClose }) {
           <div className="mt-3 flex justify-end">
             <button onClick={() => { setEditing('new'); setConfirmId(null) }}
               className="rounded-[6px] border border-line px-3 py-1.5 text-body text-ink-2 hover:bg-hover">
-              Nova fonte +
+              {t('Nova fonte +')}
             </button>
           </div>
         )}
@@ -258,7 +259,7 @@ export function SearchTasksModal({ project, onClose, onImported }) {
       onMouseDown={e => e.target === e.currentTarget && !busy && onClose()}>
       <div className="flex max-h-full w-full max-w-2xl flex-col rounded-[8px] border border-line bg-bg p-5">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="font-semibold">Buscar tasks — {project.name}</h2>
+          <h2 className="font-semibold">{t('Buscar tasks')} — {project.name}</h2>
           <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
         </div>
 
@@ -266,23 +267,23 @@ export function SearchTasksModal({ project, onClose, onImported }) {
 
         <div className="mb-3 flex items-end gap-2">
           <label className="flex-1">
-            <span className="text-meta text-muted">Buscar em</span>
-            <select value={where} onChange={e => setWhere(e.target.value)} aria-label="Buscar em"
+            <span className="text-meta text-muted">{t('Buscar em')}</span>
+            <select value={where} onChange={e => setWhere(e.target.value)} aria-label={t('Buscar em')}
               className="block w-full rounded-[6px] border border-line px-2 py-1 text-body outline-none">
-              <option value="all">todas as habilitadas ({enabled.length})</option>
+              <option value="all">{t('todas as habilitadas')} ({enabled.length})</option>
               {(sources || []).map(s => (
-                <option key={s.id} value={s.id}>{s.name}{s.enabled ? '' : ' (inativa)'}</option>
+                <option key={s.id} value={s.id}>{s.name}{s.enabled ? '' : ` (${t('inativa')})`}</option>
               ))}
             </select>
           </label>
           <button onClick={search} disabled={!!busy || sources === null || !sources.length}
             className="rounded-[6px] bg-accent px-3 py-1.5 text-body text-white disabled:opacity-50">
-            {busy === 'fetching' ? 'buscando…' : 'Buscar'}
+            {busy === 'fetching' ? t('buscando…') : t('Buscar')}
           </button>
         </div>
 
         {sources?.length === 0 && (
-          <div className="text-body text-muted">Nenhuma fonte cadastrada — use "Fontes de busca" para criar uma.</div>
+          <div className="text-body text-muted">{t('Nenhuma fonte cadastrada — use "Fontes de busca" para criar uma.')}</div>
         )}
 
         {result?.errors?.map(e => (
@@ -293,20 +294,20 @@ export function SearchTasksModal({ project, onClose, onImported }) {
 
         {done && (
           <div className="mb-2 rounded-[6px] border border-line px-3 py-2 text-body">
-            {done.created.length} task(s) criada(s) no Backlog
-            {done.skipped.length > 0 && ` · ${done.skipped.length} ignorada(s) (já existiam)`}
+            {t('{n} task(s) criada(s) no Backlog', { n: done.created.length })}
+            {done.skipped.length > 0 && ` · ${t('{n} ignorada(s) (já existiam)', { n: done.skipped.length })}`}
           </div>
         )}
 
         {result && (
           <div className="flex items-center pb-2 text-body text-ink-2">
-            <span>{items.length} resultado(s) — {importable.length} importável(is)</span>
+            <span>{t('{n} resultado(s) — {m} importável(is)', { n: items.length, m: importable.length })}</span>
             <div className="flex-1" />
             {importable.length > 0 && (
               <button onClick={() => setSelected(
                 Object.fromEntries(importable.map(i => [i.tag, chosen.length < importable.length])))}
                 className="text-meta text-accent hover:underline">
-                {chosen.length < importable.length ? 'selecionar todos' : 'desmarcar todos'}
+                {chosen.length < importable.length ? t('selecionar todos') : t('desmarcar todos')}
               </button>
             )}
           </div>
@@ -314,7 +315,7 @@ export function SearchTasksModal({ project, onClose, onImported }) {
 
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
           {result && items.length === 0 && !result.errors.length &&
-            <div className="text-body text-muted">Nenhum resultado.</div>}
+            <div className="text-body text-muted">{t('Nenhum resultado.')}</div>}
           {items.map(i => (
             <label key={i.tag}
               className={`flex items-start gap-3 rounded-[8px] border p-3 text-body ${i.already_imported ? 'cursor-default border-line opacity-50' : `cursor-pointer ${selected[i.tag] ? 'border-accent' : 'border-line opacity-60'}`}`}>
@@ -326,7 +327,7 @@ export function SearchTasksModal({ project, onClose, onImported }) {
                   <span className="font-medium">{i.title}</span>
                   <span className="rounded-[4px] border border-line px-1 text-meta text-muted">{i.sourceName}</span>
                   {i.already_imported &&
-                    <span className="rounded-[4px] border border-line px-1 text-meta text-muted">já existe</span>}
+                    <span className="rounded-[4px] border border-line px-1 text-meta text-muted">{t('já existe')}</span>}
                 </span>
                 {i.url && <span className="mt-0.5 block truncate font-mono text-meta text-muted">{i.url}</span>}
                 {i.description &&
@@ -338,10 +339,10 @@ export function SearchTasksModal({ project, onClose, onImported }) {
 
         <div className="mt-3 flex justify-end gap-2">
           <button onClick={onClose} disabled={busy === 'importing'}
-            className="rounded-[6px] px-3 py-1.5 text-body text-ink-2 hover:bg-hover">Fechar</button>
+            className="rounded-[6px] px-3 py-1.5 text-body text-ink-2 hover:bg-hover">{t('Fechar')}</button>
           <button onClick={doImport} disabled={!chosen.length || !!busy}
             className="rounded-[6px] bg-accent px-3 py-1.5 text-body text-white disabled:opacity-50">
-            {busy === 'importing' ? 'importando…' : `Importar ${chosen.length} no Backlog`}
+            {busy === 'importing' ? t('importando…') : t('Importar {n} no Backlog', { n: chosen.length })}
           </button>
         </div>
       </div>

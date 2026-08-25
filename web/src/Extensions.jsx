@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { api } from './api.js'
+import { t } from './i18n.js'
 
 // Tela de extensões do Claude Code: skills, agents, commands, hooks e plugins,
 // em dois escopos — global (~/.claude, vale para todos os projetos) e do projeto
@@ -21,8 +22,8 @@ const MAX_AVAILABLE = 40
 
 const match = (q, ...fields) => !q || fields.some(f => String(f || '').toLowerCase().includes(q.toLowerCase()))
 
-export function ExtensionsDrawer({ project, initialScope = 'global', onClose }) {
-  const [scope, setScope] = useState(project ? initialScope : 'global')
+export function ExtensionsDrawer({ project, initialScope = t('global'), onClose }) {
+  const [scope, setScope] = useState(project ? initialScope : t('global'))
   const [kind, setKind] = useState('skills')
   const [query, setQuery] = useState('')
   const [data, setData] = useState(null)
@@ -72,11 +73,11 @@ export function ExtensionsDrawer({ project, initialScope = 'global', onClose }) 
       <div className="fixed inset-0 z-40 bg-scrim" onMouseDown={onClose} />
       <div className="fixed inset-y-0 right-0 z-40 flex w-[900px] max-w-full flex-col border-l border-line bg-bg">
         <div className="flex items-center gap-3 border-b border-line px-5 py-3">
-          <h2 className="font-semibold">Extensões do Claude</h2>
+          <h2 className="font-semibold">{t('Extensões do Claude')}</h2>
           <div className="flex items-center gap-0.5 rounded-[6px] bg-subtle p-0.5 text-meta">
-            {[{ key: 'global', label: 'Global (~/.claude)' }, { key: 'project', label: project ? `Projeto · ${project.name}` : 'Projeto' }].map(o => (
+            {[{ key: t('global'), label: t('Global (~/.claude)') }, { key: 'project', label: project ? t('Projeto · {name}', { name: project.name }) : t('Projeto') }].map(o => (
               <button key={o.key} onClick={() => setScope(o.key)} disabled={o.key === 'project' && !project}
-                title={o.key === 'project' && !project ? 'Selecione um projeto no board para gerenciar as extensões dele' : ''}
+                title={o.key === 'project' && !project ? t('Selecione um projeto no board para gerenciar as extensões dele') : ''}
                 className={`rounded-[4px] px-2.5 py-1 disabled:opacity-40 ${scope === o.key ? 'border border-line bg-bg text-ink' : 'text-ink-2 hover:text-ink'}`}>
                 {o.label}
               </button>
@@ -95,7 +96,7 @@ export function ExtensionsDrawer({ project, initialScope = 'global', onClose }) 
             </button>
           ))}
           <div className="flex-1" />
-          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar…"
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder={t('Buscar…')}
             className="w-56 rounded-[6px] border border-transparent bg-subtle px-3 py-1 text-meta outline-none placeholder:text-muted focus:border-line focus:bg-bg" />
         </div>
 
@@ -103,9 +104,9 @@ export function ExtensionsDrawer({ project, initialScope = 'global', onClose }) 
           {error && <div className="mb-3 rounded-[6px] border border-line px-3 py-2 text-meta text-danger">{error}</div>}
           {data && (
             <div className="mb-3 text-meta text-muted">
-              {scope === 'global'
-                ? 'Instalado aqui vale para todos os projetos deste computador.'
-                : 'Instalado aqui vale só neste projeto e vai junto no repositório (.claude/).'}
+              {scope === t('global')
+                ? t('Instalado aqui vale para todos os projetos deste computador.')
+                : t('Instalado aqui vale só neste projeto e vai junto no repositório (.claude/).')}
               <span className="ml-1 font-mono">{data.root}</span>
             </div>
           )}
@@ -114,31 +115,31 @@ export function ExtensionsDrawer({ project, initialScope = 'global', onClose }) 
             <PluginsPanel plugins={plugins} err={pluginErr} query={query} busy={busy} scope={scope}
               onRefresh={() => loadPlugins(true)} onAction={plugin} />
           ) : !data ? (
-            <div className="py-8 text-center text-body text-muted">carregando…</div>
+            <div className="py-8 text-center text-body text-muted">{t('carregando…')}</div>
           ) : (
             <>
-              <Section title="Instalados">
-                {items.length === 0 && <Empty>Nada instalado neste escopo.</Empty>}
+              <Section title={t('Instalados')}>
+                {items.length === 0 && <Empty>{t('Nada instalado neste escopo.')}</Empty>}
                 {items.map(i => (
                   <Row key={i.name} title={i.title || i.name} subtitle={i.kind === 'hooks' ? null : i.name} desc={i.description}
                     off={!i.enabled}>
-                    <Tag>{i.enabled ? 'ativo' : 'desativado'}</Tag>
+                    <Tag>{i.enabled ? t('ativo') : t('desativado')}</Tag>
                     <Act busy={busy === i.name} onClick={() => act(i.name, () => api.toggleExtension(pid, kind, i.name, !i.enabled))}>
-                      {i.enabled ? 'desativar' : 'ativar'}
+                      {i.enabled ? t('desativar') : t('ativar')}
                     </Act>
                     <Act danger busy={busy === i.name}
-                      onClick={() => confirm(`Remover "${i.title || i.name}" de vez?`) && act(i.name, () => api.removeExtension(pid, kind, i.name))}>
-                      remover
+                      onClick={() => confirm(t('Remover "{name}" de vez?', { name: i.title || i.name })) && act(i.name, () => api.removeExtension(pid, kind, i.name))}>
+                      {t('remover')}
                     </Act>
                   </Row>
                 ))}
               </Section>
 
-              <Section title="Catálogo">
-                {catalog.length === 0 && <Empty>Nada novo no catálogo para este tipo.</Empty>}
+              <Section title={t('Catálogo')}>
+                {catalog.length === 0 && <Empty>{t('Nada novo no catálogo para este tipo.')}</Empty>}
                 {catalog.map(c => (
                   <Row key={c.id} title={c.title} subtitle={c.name} desc={c.description}>
-                    <Act primary busy={busy === c.id} onClick={() => act(c.id, () => api.installExtension(pid, c.id))}>instalar</Act>
+                    <Act primary busy={busy === c.id} onClick={() => act(c.id, () => api.installExtension(pid, c.id))}>{t('instalar')}</Act>
                   </Row>
                 ))}
               </Section>
@@ -153,10 +154,10 @@ export function ExtensionsDrawer({ project, initialScope = 'global', onClose }) 
 function PluginsPanel({ plugins, err, query, busy, scope, onRefresh, onAction }) {
   if (err) return (
     <div className="rounded-[6px] border border-line px-3 py-2 text-meta text-danger">
-      {err} <button onClick={onRefresh} className="ml-2 underline">tentar de novo</button>
+      {err} <button onClick={onRefresh} className="ml-2 underline">{t('tentar de novo')}</button>
     </div>
   )
-  if (!plugins) return <div className="py-8 text-center text-body text-muted">consultando `claude plugin`…</div>
+  if (!plugins) return <div className="py-8 text-center text-body text-muted">{t('consultando `claude plugin`…')}</div>
 
   const installedIds = new Set(plugins.installed.map(p => p.id))
   const available = plugins.available.filter(p => !installedIds.has(p.id) && match(query, p.name, p.description, p.marketplace))
@@ -164,32 +165,32 @@ function PluginsPanel({ plugins, err, query, busy, scope, onRefresh, onAction })
 
   return (
     <>
-      <Section title="Instalados" action={<Act busy={false} onClick={onRefresh}>atualizar</Act>}>
-        {plugins.installed.length === 0 && <Empty>Nenhum plugin instalado.</Empty>}
+      <Section title={t('Instalados')} action={<Act busy={false} onClick={onRefresh}>{t('atualizar')}</Act>}>
+        {plugins.installed.length === 0 && <Empty>{t('Nenhum plugin instalado.')}</Empty>}
         {plugins.installed.map(p => (
-          <Row key={p.id + p.scope} title={p.id} subtitle={`v${p.version} · escopo ${p.scope}`} off={!p.enabled}>
-            <Tag>{p.enabled ? 'ativo' : 'desativado'}</Tag>
+          <Row key={p.id + p.scope} title={p.id} subtitle={t('v{v} · escopo {s}', { v: p.version, s: p.scope })} off={!p.enabled}>
+            <Tag>{p.enabled ? t('ativo') : t('desativado')}</Tag>
             <Act busy={busy === p.id} onClick={() => onAction(p.enabled ? 'disable' : 'enable', p.id)}>
-              {p.enabled ? 'desativar' : 'ativar'}
+              {p.enabled ? t('desativar') : t('ativar')}
             </Act>
             <Act danger busy={busy === p.id}
-              onClick={() => confirm(`Desinstalar ${p.id}?`) && onAction('uninstall', p.id)}>desinstalar</Act>
+              onClick={() => confirm(t('Desinstalar {id}?', { id: p.id })) && onAction('uninstall', p.id)}>{t('desinstalar')}</Act>
           </Row>
         ))}
       </Section>
 
-      <Section title="Marketplace">
-        {available.length === 0 && <Empty>Nenhum plugin disponível para essa busca.</Empty>}
+      <Section title={t('Marketplace')}>
+        {available.length === 0 && <Empty>{t('Nenhum plugin disponível para essa busca.')}</Empty>}
         {shown.map(p => (
           <Row key={p.id} title={p.name} subtitle={p.marketplace} desc={p.description}>
             <Act primary busy={busy === p.id} onClick={() => onAction('install', p.id)}>
-              instalar {scope === 'project' ? 'no projeto' : 'global'}
+              {t('instalar')} {scope === 'project' ? t('no projeto') : t('global')}
             </Act>
           </Row>
         ))}
         {available.length > shown.length && (
           <div className="px-1 py-2 text-meta text-muted">
-            mostrando {shown.length} de {available.length} — refine a busca para ver o resto.
+            {t('mostrando {n} de {total} — refine a busca para ver o resto.', { n: shown.length, total: available.length })}
           </div>
         )}
       </Section>
