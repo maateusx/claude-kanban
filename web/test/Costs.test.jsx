@@ -1,4 +1,5 @@
 import React from 'react'
+import { MODELS } from '../src/models.js'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -18,7 +19,7 @@ vi.mock('@dnd-kit/core', () => ({
 
 vi.mock('../src/api.js', () => ({
   api: {
-    health: vi.fn(), usage: vi.fn(), projects: vi.fn(), queue: vi.fn(),
+    health: vi.fn(), usage: vi.fn(), projects: vi.fn(), queue: vi.fn(), models: vi.fn(),
     tasks: vi.fn(), pending: vi.fn(), stats: vi.fn(),
   },
   connectWS: vi.fn(handler => { onEvent = handler; return () => {} }),
@@ -45,6 +46,7 @@ beforeEach(() => {
   api.usage.mockResolvedValue({ available: false })
   api.projects.mockResolvedValue({ projects: [PROJECT] })
   api.queue.mockResolvedValue({ actives: [], queue: [], maxConcurrency: 1 })
+  api.models.mockResolvedValue({ models: MODELS, fetchedAt: null, source: 'fallback' })
   api.pending.mockResolvedValue({ actions: [] })
   api.tasks.mockResolvedValue({ tasks: [TASK] })
   api.stats.mockResolvedValue(statsOf(2.5))

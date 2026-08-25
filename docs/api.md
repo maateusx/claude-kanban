@@ -99,6 +99,8 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | --- | --- | --- | --- |
 | `GET` | `/api/health` | — | `{ ok: true, claudeAvailable }` — `claudeAvailable` é falso se o CLI `claude` não estava no PATH no boot. |
 | `GET` | `/api/usage` | — | Limites do plano Claude: `{ available: false }` ou `{ available: true, limits: [{ kind, percent, severity, resetsAt, isActive, model }] }`. `kind` ∈ `session | weekly_all | weekly_scoped`. Cache de 60s; qualquer falha vira `available: false`. |
+| `GET` | `/api/models` | — | Catálogo de modelos: `{ models: [{ id, label }], fetchedAt, source }`. `source` ∈ `api | fallback` — `fallback` é a lista embutida no código, usada enquanto nunca se rodou um refresh. |
+| `POST` | `/api/models/refresh` | — | Busca a lista oficial na Models API da Anthropic (`GET /v1/models`, com o token OAuth do Claude Code) e persiste em `~/.claude-kanban/models.json`. Devolve o mesmo shape de `GET /api/models`. **502** sem credencial do CLI ou se a API falhar — o catálogo anterior é mantido. |
 | `POST` | `/api/pick-folder` | — | Abre o seletor nativo (macOS). `{ path }` (ou `path: null` se cancelado). **501** fora do macOS. |
 | `GET` | `/api/suggestion-types` | — | `{ types: { melhoria: "…", correcao: "…", … } }` — chaves aceitas em `/analyze`. |
 
@@ -132,7 +134,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | Método | Path | Body | Resposta |
 | --- | --- | --- | --- |
 | `GET` | `/api/projects/:projectId/tasks` | — | `{ tasks: [task] }` |
-| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model?, enrich?, decompose?, scheduled_at?, depends_on? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. **400** se `scheduled_at` não é uma data ISO válida. **400** se `depends_on` referencia uma task inexistente ou fecha um ciclo de dependências. `model` (aqui, no PATCH da task e no `defaultModel` do projeto) tem que ser o **slug exato** de um modelo do catálogo (`server/src/lib/models.js`): `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` — é ele que vai para `claude --model`. Apelidos legados (`opus`, `sonnet`…) são convertidos no slug; qualquer outro valor dá **400**. |
+| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model?, enrich?, decompose?, scheduled_at?, depends_on? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. **400** se `scheduled_at` não é uma data ISO válida. **400** se `depends_on` referencia uma task inexistente ou fecha um ciclo de dependências. `model` (aqui, no PATCH da task e no `defaultModel` do projeto) tem que ser o **slug exato** de um modelo do catálogo vigente (`GET /api/models`) — é ele que vai para `claude --model`. Apelidos legados (`opus`, `sonnet`, `haiku`, `fable`) são convertidos no slug mais recente da família; qualquer outro valor dá **400**. |
 | `GET` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }` — **404** se não existe. |
 | `PATCH` | `/api/projects/:projectId/tasks/:taskId` | subconjunto do frontmatter (`title`, `status`, `priority`, `tags`, `model`, `enrich`, `decompose`, `scheduled_at`, `depends_on`, `run`, `body`…) | `{ task }`. Mudar `status` move o arquivo de pasta e emite `task.moved`. `scheduled_at`: ISO agenda, `null`/`""` desagenda, lixo dá **400**. `depends_on`: lista de ids (`[]` limpa); **400** para id inexistente, auto-dependência ou ciclo. |
 | `DELETE` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }`. **Não apaga o arquivo**: move para `archived/`. |
@@ -146,6 +148,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | --- | --- | --- | --- |
 | `GET` | `/api/projects/:projectId/pending-actions` | — | `{ actions: [{ id: "pa-xxxxxx", timestamp, label, command, taskId, status }] }` — parse de `.claude/claude-kanban/pending-actions.md`. |
 | `POST` | `/api/projects/:projectId/pending-actions/:actionId/resolve` | — | `{ actions }` (lista já atualizada). **404** se a ação não existe ou já foi resolvida. Emite `pending.updated`. |
+| `POST` | `/api/projects/:projectId/pending-actions/:actionId/run` | — | `{ ...action, output, exitCode, error }` — executa o comando bloqueado no diretório do projeto (shell, timeout 120s, saída truncada em 20k). Não resolve a ação. **404** se a ação não existe. |
 
 ### Configuração do Claude no projeto
 

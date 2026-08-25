@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import { pendingFile } from './paths.js'
 
@@ -28,4 +29,28 @@ export function resolvePendingAction(projectPath, actionId) {
   if (!re.test(raw)) return false
   fs.writeFileSync(file, raw.replace(re, '$1done'))
   return true
+}
+
+// Executa o comando bloqueado de uma ação pendente no diretório do projeto.
+// É um escape-hatch acionado explicitamente pelo humano na UI: os guardrails
+// barram o Claude, não o operador. Não marca a ação como resolvida — quem
+// decide isso é quem olhou a saída.
+export function runPendingAction(projectPath, actionId, timeout = 120_000) {
+  const action = listPendingActions(projectPath).find(a => a.id === actionId)
+  if (!action) return null
+  if (!action.command) return { ...action, output: '', exitCode: null, error: 'ação sem comando registrado' }
+  return new Promise(resolve => {
+    execFile(action.command, {
+      cwd: projectPath, shell: true, timeout, maxBuffer: 1024 * 1024,
+      env: { ...process.env },
+    }, (err, stdout, stderr) => {
+      const output = `${stdout || ''}${stderr || ''}`
+      resolve({
+        ...action,
+        output: output.slice(-20_000),
+        exitCode: err ? (err.code ?? null) : 0,
+        error: err && typeof err.code !== 'number' ? err.message : null,
+      })
+    })
+  })
 }

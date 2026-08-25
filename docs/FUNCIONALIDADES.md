@@ -70,7 +70,7 @@ Após restart, tasks presas em `doing` sem processo voltam para `todo` (ou recon
 Hooks `PreToolUse` (`guard.mjs`) bloqueiam ações perigosas mesmo sob skip-permissions: leitura/escrita de `.env`, commit/push/merge em `main`/`master`, deleção de branches, deleção de arquivos fora do projeto e `rm -rf` de paths críticos. Limite honesto: é parsing/regex, não sandbox. (`server/templates/guard.mjs`)
 
 ### 20. Ações manuais (pending-actions)
-Ações bloqueadas pelos guardrails viram itens em `pending-actions.md` para um humano resolver; a UI lista e permite marcar como resolvido. (`server/src/lib/pending.js`)
+Ações bloqueadas pelos guardrails viram itens em `pending-actions.md` para um humano resolver; a UI lista, permite executar o comando bloqueado (a saída aparece no próprio item) e marcar como resolvido. (`server/src/lib/pending.js`)
 
 ### 21. Human Request / Human Response
 O agente pode pausar por decisão humana escrevendo `## Human Request`; o card volta para `todo` com a tag `human-request` (fora do auto-pilot). O humano responde pela UI e a sessão retoma via `claude --resume` (com fallback de re-execução levando pergunta e resposta no prompt). (`runner.js`)
@@ -107,7 +107,7 @@ Ver e editar, pela UI, os arquivos de config do projeto: settings, MCP, hooks, s
 Inicia/para o servidor de desenvolvimento do projeto pela UI, com buffer de logs e abertura da URL. (`server/src/lib/devservers.js`)
 
 ### 31. Catálogo de modelos
-Escolha de modelo por task/projeto (Fable 5, Opus 4.8, Sonnet 5, Haiku 4.5), com normalização de aliases para o slug oficial. (`server/src/lib/models.js`)
+Escolha de modelo por task/projeto, com normalização de aliases legados (`opus`, `sonnet`…) para o slug oficial mais recente da família. O catálogo vem da Models API da Anthropic (`GET /v1/models`, autenticada com o login do Claude Code) pelo botão **atualizar modelos** nas configurações globais, e fica em `~/.claude-kanban/models.json`; sem refresh, vale a lista embutida no código. (`server/src/lib/models.js`, `web/src/models.js`)
 
 ### 32. UI React completa
 Board com drag-and-drop (dnd-kit), colunas por status, filtros por tag, ordenação configurável, drawer de log, visualização de diff, notificações do sistema e sons. (`web/src/`)

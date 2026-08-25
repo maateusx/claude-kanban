@@ -5,8 +5,9 @@ import { reducer, effectsFor, initialState, notificationsFor, pendingIds } from 
 import * as notifications from './notify.js'
 import * as sounds from './sounds.js'
 import { DiffDrawer } from './Diff.jsx'
+import { ExtensionsDrawer } from './Extensions.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
-import { MODELS, modelLabel } from './models.js'
+import { MODELS, setModels, modelLabel } from './models.js'
 
 const COLUMNS = [
   { key: 'backlog', label: 'Backlog', dot: 'bg-st-backlog' },
@@ -128,6 +129,8 @@ export default function App() {
   const [showSuggest, setShowSuggest] = useState(false)
   const [showIssues, setShowIssues] = useState(false)
   const [showClaudeConfig, setShowClaudeConfig] = useState(false)
+  // null = fechado; 'global' | 'project' = escopo inicial da tela de extensões
+  const [extScope, setExtScope] = useState(null)
   const [showAddProject, setShowAddProject] = useState(false)
   const [view, setView] = useState('todas')
   const [sorts, setSorts] = useState(loadSorts)  // colKey -> sort key
@@ -192,7 +195,16 @@ export default function App() {
     if (!selectedIdRef.current && d.projects[0]) setSelectedId(d.projects[0].id)
   }), [])
 
-  useEffect(() => { refreshProjects(); api.health().then(setHealth); api.queue().then(setQueue) }, [refreshProjects])
+  // MODELS é mutado no lugar (ver models.js); `modelsInfo` guarda os metadados e
+  // serve de gatilho de re-render para os selects que importam MODELS direto.
+  const [modelsInfo, setModelsInfo] = useState(null)
+  const applyModels = useCallback(d => { setModels(d.models); setModelsInfo(d); return d }, [])
+  const refreshModels = useCallback(() => api.refreshModels().then(applyModels), [applyModels])
+
+  useEffect(() => {
+    refreshProjects(); api.health().then(setHealth); api.queue().then(setQueue)
+    api.models().then(applyModels).catch(() => {}) // sem servidor, fica o fallback embutido
+  }, [refreshProjects, applyModels])
 
   useEffect(() => {
     if (!selectedId) return
@@ -344,6 +356,7 @@ export default function App() {
               onSuggest={() => setShowSuggest(true)}
               onImportIssues={() => setShowIssues(true)}
               onClaudeConfig={() => setShowClaudeConfig(true)}
+              onExtensions={() => setExtScope('project')}
               onSettings={() => setShowSettings(true)}
               onRerun={() => api.rebootstrap(project.id).then(refreshProjects)}
               onAutoRun={() => api.patchProject(project.id, { autoRun: !project.autoRun }).then(refreshProjects)}
@@ -448,14 +461,20 @@ export default function App() {
       )}
       {showPending && project && (
         <PendingPanel actions={pending} onClose={() => setShowPending(false)}
-          onResolve={aid => api.resolvePending(project.id, aid).then(d => setPending(d.actions))} />
+          onResolve={aid => api.resolvePending(project.id, aid).then(d => setPending(d.actions))}
+          onRun={aid => api.runPending(project.id, aid)} />
       )}
       {showClaudeConfig && project && (
         <ClaudeConfigModal project={project} onClose={() => setShowClaudeConfig(false)} />
       )}
+      {extScope && (
+        <ExtensionsDrawer project={project} initialScope={extScope} onClose={() => setExtScope(null)} />
+      )}
       {showGlobalSettings && (
         <GlobalSettingsModal onClose={() => setShowGlobalSettings(false)}
           queue={queue} onConcurrency={max => api.setConcurrency(max).then(setQueue)}
+          onExtensions={() => { setShowGlobalSettings(false); setExtScope('global') }}
+          modelsInfo={modelsInfo} onRefreshModels={refreshModels}
           notifyOn={notifyOn} onNotify={setNotifyEnabled}
           soundOn={soundOn} onSound={setSoundEnabled}
           soundMap={soundMap} onSoundFor={setSoundFor} />
@@ -768,7 +787,7 @@ function UsageRail({ usage }) {
 /* ------------------------------------------------------------------- header */
 
 function BoardHeader({ project, health, view, onView, query, onQuery, searchRef, pendingCount,
-  onNewTask, onPending, onSuggest, onImportIssues, onClaudeConfig, onSettings, onRerun, onAutoRun, onChanged }) {
+  onNewTask, onPending, onSuggest, onImportIssues, onClaudeConfig, onExtensions, onSettings, onRerun, onAutoRun, onChanged }) {
   return (
     <header className="border-b border-line px-4 py-3">
       <div className="flex items-center gap-2">
@@ -785,6 +804,7 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
         <Menu items={[
           { label: 'Re-rodar bootstrap (guardrails)', onClick: onRerun },
           { label: 'Config do Claude (.claude)', onClick: onClaudeConfig },
+          { label: 'Extensões (skills, hooks, agents, plugins)', onClick: onExtensions },
           { label: '✦ Sugerir tasks com o Claude', onClick: onSuggest, disabled: !health.claudeAvailable },
           { label: 'Importar issues do GitHub', onClick: onImportIssues },
         ]} />
@@ -2076,28 +2096,59 @@ const summarize = input => {
   return String(s).slice(0, 80)
 }
 
-function PendingPanel({ actions, onClose, onResolve }) {
+function PendingPanel({ actions, onClose, onResolve, onRun }) {
   const pend = actions.filter(a => a.status === 'pending')
   const done = actions.filter(a => a.status !== 'pending')
   return (
     <Modal onClose={onClose} title="Ações manuais pendentes">
       <div className="max-h-[60vh] space-y-3 overflow-y-auto">
         {pend.length === 0 && <Empty>Nenhuma ação pendente.</Empty>}
-        {pend.map(a => (
-          <div key={a.id} className="rounded-[8px] border border-line p-3 text-body">
-            <div className="flex items-center justify-between gap-3">
-              <span className="flex items-center gap-2 font-medium">
-                <Dot className="bg-warning" />{a.label}
-              </span>
-              <Btn onClick={() => onResolve(a.id)}>Marcar como resolvido</Btn>
-            </div>
-            {a.command && <code className="mt-2 block overflow-x-auto rounded-[4px] bg-subtle p-2 font-mono text-[11px] text-ink-2">{a.command}</code>}
-            <div className="mt-1.5 font-mono text-[11px] text-muted">{a.timestamp}{a.taskId ? ` · task ${a.taskId}` : ''} · {a.id}</div>
-          </div>
-        ))}
+        {pend.map(a => <PendingItem key={a.id} action={a} onResolve={onResolve} onRun={onRun} />)}
         {done.length > 0 && <div className="pt-2 text-meta text-muted">{done.length} resolvida(s)</div>}
       </div>
     </Modal>
+  )
+}
+
+// O comando foi bloqueado para o Claude pelos guardrails; rodar daqui é uma
+// decisao explicita do humano, entao o resultado fica visivel no proprio item.
+function PendingItem({ action: a, onResolve, onRun }) {
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState(null)
+  const run = () => {
+    setRunning(true); setResult(null)
+    onRun(a.id)
+      .then(r => setResult(r))
+      .catch(e => setResult({ exitCode: null, error: e.message, output: '' }))
+      .finally(() => setRunning(false))
+  }
+  const failed = result && (result.exitCode !== 0 || result.error)
+  return (
+    <div className="rounded-[8px] border border-line p-3 text-body">
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-2 font-medium">
+          <Dot className="bg-warning" />{a.label}
+        </span>
+        <span className="flex shrink-0 gap-2">
+          {a.command && (
+            <Btn onClick={run} disabled={running}>{running ? 'Executando…' : 'Executar comando'}</Btn>
+          )}
+          <Btn onClick={() => onResolve(a.id)}>Marcar como resolvido</Btn>
+        </span>
+      </div>
+      {a.command && <code className="mt-2 block overflow-x-auto rounded-[4px] bg-subtle p-2 font-mono text-[11px] text-ink-2">{a.command}</code>}
+      {result && (
+        <div className="mt-2">
+          <div className={`text-meta ${failed ? 'text-danger' : 'text-success'}`}>
+            {result.error ? `erro: ${result.error}` : `exit ${result.exitCode}`}
+          </div>
+          <pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap break-all rounded-[4px] bg-subtle p-2 font-mono text-[11px] text-ink-2">
+            {result.output || '(sem saída)'}
+          </pre>
+        </div>
+      )}
+      <div className="mt-1.5 font-mono text-[11px] text-muted">{a.timestamp}{a.taskId ? ` · task ${a.taskId}` : ''} · {a.id}</div>
+    </div>
   )
 }
 
@@ -2547,7 +2598,7 @@ function GlobalPauseButton({ queue, usage, onPause, onResume }) {
   )
 }
 
-function GlobalSettingsModal({ onClose, queue, onConcurrency, notifyOn, onNotify, soundOn, onSound, soundMap, onSoundFor }) {
+function GlobalSettingsModal({ onClose, queue, onConcurrency, notifyOn, onNotify, soundOn, onSound, soundMap, onSoundFor, modelsInfo, onRefreshModels, onExtensions }) {
   const maxConc = queue?.maxConcurrency || 1
   return (
     <Modal onClose={onClose} title="Configurações globais">
@@ -2563,10 +2614,61 @@ function GlobalSettingsModal({ onClose, queue, onConcurrency, notifyOn, onNotify
           </div>
           <span className="text-meta text-muted">execuções em paralelo entre todos os projetos. Projetos sem worktree isolado ficam limitados a 1 por vez.</span>
         </div>
+        <ModelsSetting info={modelsInfo} onRefresh={onRefreshModels} />
+        <div className="flex items-start gap-3 rounded-[8px] border border-line p-3">
+          <span className="flex-1">
+            <span className="font-medium">Extensões</span>
+            <span className="mt-1 block text-meta text-muted">
+              Skills, agents, commands, hooks e plugins instalados em ~/.claude (valem para todos os projetos).
+              Dentro de cada projeto dá para instalar/ativar só para ele.
+            </span>
+          </span>
+          <button onClick={onExtensions}
+            className="shrink-0 rounded-[6px] border border-line px-2 py-1 text-meta text-ink-2 hover:text-ink">
+            gerenciar
+          </button>
+        </div>
         <NotificationsSetting notifyOn={notifyOn} onNotify={onNotify} />
         <SoundSetting soundOn={soundOn} onSound={onSound} soundMap={soundMap} onSoundFor={onSoundFor} />
       </div>
     </Modal>
+  )
+}
+
+// Busca a lista oficial na Models API da Anthropic (usa o login do Claude Code).
+// Sem refresh nunca feito, a UI roda com o catálogo embutido no código.
+function ModelsSetting({ info, onRefresh }) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState(null)
+  const models = info?.models || MODELS
+  const run = async () => {
+    setBusy(true); setErr(null)
+    try { await onRefresh() } catch (e) { setErr(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <div className="rounded-[8px] border border-line p-3">
+      <div className="flex items-start gap-3">
+        <span className="flex-1">
+          <span className="font-medium">Modelos</span>
+          <span className="mt-1 block text-meta text-muted">
+            {models.length} modelo{models.length === 1 ? '' : 's'} disponíveis para tasks e para o default de cada projeto.{' '}
+            {info?.fetchedAt
+              ? `Atualizado da Anthropic em ${new Date(info.fetchedAt).toLocaleString()}.`
+              : 'Usando a lista embutida no app — atualize para buscar os modelos atuais da Anthropic.'}
+          </span>
+          {err && <span className="mt-1 block text-meta text-danger">{err}</span>}
+        </span>
+        <button onClick={run} disabled={busy}
+          className="shrink-0 rounded-[6px] border border-line px-2 py-1 text-meta text-ink-2 hover:text-ink disabled:opacity-40">
+          {busy ? 'buscando…' : 'atualizar modelos'}
+        </button>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1">
+        {models.map(m => (
+          <span key={m.id} className="rounded-[4px] bg-subtle px-1.5 py-0.5 font-mono text-[10px] text-muted" title={m.label}>{m.id}</span>
+        ))}
+      </div>
+    </div>
   )
 }
 

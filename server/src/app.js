@@ -8,11 +8,13 @@ import { listPendingActions } from './lib/pending.js'
 import { gitSettings, projectBranch } from './lib/git.js'
 import { retrySettings } from './lib/runner.js'
 import { getUsage } from './lib/usage.js'
+import { modelsCatalog, refreshModels } from './lib/models.js'
 import projectRoutes from './routes/projects.js'
 import taskRoutes from './routes/tasks.js'
 import gitRoutes from './routes/git.js'
 import runRoutes from './routes/run.js'
 import configRoutes from './routes/config.js'
+import extensionRoutes from './routes/extensions.js'
 
 // Monta o app Fastify sem side effects (nada de lockfile, watcher ou listen) —
 // é isso que permite testar as rotas com app.inject().
@@ -94,6 +96,15 @@ export async function buildApp(deps) {
   // ---- usage/limites do plano Claude (sessão 5h + semanais) ----
   app.get('/api/usage', () => getUsage())
 
+  // ---- catálogo de modelos ----
+  app.get('/api/models', () => modelsCatalog())
+
+  // Busca a lista oficial na Models API da Anthropic (botão "atualizar modelos").
+  app.post('/api/models/refresh', async (req, reply) => {
+    try { return await refreshModels() }
+    catch (e) { return reply.code(502).send({ error: e.message }) }
+  })
+
   // ---- folder picker (nativo) ----
   app.post('/api/pick-folder', (req, reply) => {
     if (process.platform !== 'darwin') {
@@ -114,6 +125,7 @@ export async function buildApp(deps) {
   gitRoutes(app, ctx)
   taskRoutes(app, ctx)
   configRoutes(app, ctx)
+  extensionRoutes(app, ctx)
   runRoutes(app, ctx)
 
   app.decorate('ctx', ctx)
