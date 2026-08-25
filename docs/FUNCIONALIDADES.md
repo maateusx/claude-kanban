@@ -125,6 +125,15 @@ As configurações globais são separadas por tema em abas — **Execução** (c
 ### 35. Interface multi-idioma (pt-BR / inglês)
 Toda a UI passa por `t()` (`web/src/i18n.js`), que resolve o texto num arquivo por língua em `web/src/languages/<lang>.json` — hoje `pt-BR.json` e `en.json`. A chave é o próprio texto em português: `pt-BR.json` é a identidade (serve de template e de lista canônica das strings) e uma chave sem tradução cai no português, então nada some da tela. Placeholders `{var}` cobrem interpolação (`t('Nova task em {col}', { col })`). A escolha fica em **Configurações globais → Aparência → Idioma**, vale para todos os projetos e vive no `localStorage` (`ck.lang`), como tema e sons; trocar recarrega a página, porque boa parte das strings é resolvida na importação dos módulos. O mesmo valor serve de locale para `Intl` (datas e ordenação alfabética) e vai para o atributo `lang` do `<html>`. Para adicionar uma língua: copiar `pt-BR.json`, traduzir os valores e registrar em `LANGUAGES`/`DICTS` no `i18n.js`. (`web/src/i18n.js`, `web/src/languages/`)
 
+### 36. Gerenciador de extensões (skills, agents, commands, hooks e plugins)
+Um drawer único para **buscar, instalar, ativar/desativar e remover** as extensões do Claude Code, em dois escopos: **Global** (`~/.claude`, vale para todos os projetos deste computador) e **Projeto** (`<projeto>/.claude`, versionado junto com o repo — abre pelo menu do projeto no board). O que o usuário já tinha instalado por fora aparece na lista junto com o que veio do kanban, e é manuseável do mesmo jeito.
+
+Um **catálogo embutido** (`server/src/lib/catalog.js`) oferece skills, agents e hooks prontos para instalar com um clique; um item já instalado some do catálogo — hook é reconhecido por hash do conteúdo (`signature`), não pelo nome.
+
+**Desativar não apaga.** O Claude Code carrega tudo que estiver nas pastas, sem flag de "desativado": então skill/agent/command desativado é movido para a pasta irmã `<kind>-disabled/`, que o Claude não varre e que deixa o estado visível no disco. Hook é entrada de JSON em `settings.json` — desativar tira a entrada de lá e guarda a definição original em `~/.claude-kanban/disabled-hooks.json`, para não perder o que o usuário escreveu.
+
+**Plugins são delegados ao CLI** (`claude plugin list/install/uninstall/enable/disable`), que já sabe resolver marketplaces, cache e escopo — sem projeto vai `--scope user`, com projeto `--scope project` rodando com `cwd` no projeto. A listagem de marketplace é cacheada 60s e a UI mostra os primeiros 40 resultados, avisando quantos ficaram de fora. Sem o CLI `claude` no PATH, as rotas de plugin respondem **503**. (`server/src/lib/extensions.js`, `server/src/lib/catalog.js`, `server/src/lib/plugins.js`, `server/src/routes/extensions.js`, `web/src/Extensions.jsx`)
+
 ---
 
 ## Fluxo de trabalho típico

@@ -22,8 +22,8 @@ const MAX_AVAILABLE = 40
 
 const match = (q, ...fields) => !q || fields.some(f => String(f || '').toLowerCase().includes(q.toLowerCase()))
 
-export function ExtensionsDrawer({ project, initialScope = t('global'), onClose }) {
-  const [scope, setScope] = useState(project ? initialScope : t('global'))
+export function ExtensionsDrawer({ project, initialScope = 'global', onClose }) {
+  const [scope, setScope] = useState(project ? initialScope : 'global')
   const [kind, setKind] = useState('skills')
   const [query, setQuery] = useState('')
   const [data, setData] = useState(null)
@@ -75,7 +75,7 @@ export function ExtensionsDrawer({ project, initialScope = t('global'), onClose 
         <div className="flex items-center gap-3 border-b border-line px-5 py-3">
           <h2 className="font-semibold">{t('Extensões do Claude')}</h2>
           <div className="flex items-center gap-0.5 rounded-[6px] bg-subtle p-0.5 text-meta">
-            {[{ key: t('global'), label: t('Global (~/.claude)') }, { key: 'project', label: project ? t('Projeto · {name}', { name: project.name }) : t('Projeto') }].map(o => (
+            {[{ key: 'global', label: t('Global (~/.claude)') }, { key: 'project', label: project ? t('Projeto · {name}', { name: project.name }) : t('Projeto') }].map(o => (
               <button key={o.key} onClick={() => setScope(o.key)} disabled={o.key === 'project' && !project}
                 title={o.key === 'project' && !project ? t('Selecione um projeto no board para gerenciar as extensões dele') : ''}
                 className={`rounded-[4px] px-2.5 py-1 disabled:opacity-40 ${scope === o.key ? 'border border-line bg-bg text-ink' : 'text-ink-2 hover:text-ink'}`}>
@@ -104,7 +104,7 @@ export function ExtensionsDrawer({ project, initialScope = t('global'), onClose 
           {error && <div className="mb-3 rounded-[6px] border border-line px-3 py-2 text-meta text-danger">{error}</div>}
           {data && (
             <div className="mb-3 text-meta text-muted">
-              {scope === t('global')
+              {scope === 'global'
                 ? t('Instalado aqui vale para todos os projetos deste computador.')
                 : t('Instalado aqui vale só neste projeto e vai junto no repositório (.claude/).')}
               <span className="ml-1 font-mono">{data.root}</span>

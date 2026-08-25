@@ -73,6 +73,33 @@ describe('ExtensionsDrawer', () => {
     expect(screen.queryByText('Hook X')).toBeNull()
   })
 
+  it('a aba Plugins lista instalados, esconde-os do marketplace e instala pelo CLI', async () => {
+    api.plugins.mockResolvedValue({
+      installed: [{ id: 'ja-tenho@mk', name: 'ja-tenho', version: '1.0.0', scope: 'user', enabled: true }],
+      available: [
+        { id: 'ja-tenho@mk', name: 'ja-tenho', description: 'duplicado', marketplace: 'mk' },
+        { id: 'novo@mk', name: 'novo', description: 'plugin novo', marketplace: 'mk' },
+      ],
+    })
+    api.pluginAction.mockResolvedValue({ ok: true })
+    render(<ExtensionsDrawer project={PROJECT} onClose={() => {}} />)
+    await userEvent.click(screen.getByRole('button', { name: /Plugins/ }))
+    await screen.findByText('ja-tenho@mk')
+    expect(screen.getByText('v1.0.0 · escopo user')).toBeTruthy()
+    // o que já está instalado não reaparece no marketplace
+    expect(screen.queryByText('ja-tenho')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: /instalar global/ }))
+    expect(api.pluginAction).toHaveBeenCalledWith(null, 'install', 'novo@mk')
+  })
+
+  it('erro do CLI de plugins aparece com opção de tentar de novo', async () => {
+    api.plugins.mockRejectedValue(new Error('CLI do Claude Code não encontrado no PATH'))
+    render(<ExtensionsDrawer project={PROJECT} onClose={() => {}} />)
+    await userEvent.click(screen.getByRole('button', { name: /Plugins/ }))
+    await screen.findByText(/não encontrado no PATH/)
+    expect(screen.getByRole('button', { name: 'tentar de novo' })).toBeTruthy()
+  })
+
   it('erro do servidor aparece na tela', async () => {
     api.toggleExtension.mockRejectedValue(new Error('item não encontrado'))
     render(<ExtensionsDrawer project={PROJECT} onClose={() => {}} />)

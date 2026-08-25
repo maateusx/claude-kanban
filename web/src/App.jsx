@@ -487,7 +487,7 @@ export default function App() {
       {showGlobalSettings && (
         <GlobalSettingsModal onClose={() => setShowGlobalSettings(false)}
           queue={queue} onConcurrency={max => api.setConcurrency(max).then(setQueue)}
-          onExtensions={() => { setShowGlobalSettings(false); setExtScope(t('global')) }}
+          onExtensions={() => { setShowGlobalSettings(false); setExtScope('global') }}
           modelsInfo={modelsInfo} onRefreshModels={refreshModels}
           notifyOn={notifyOn} onNotify={setNotifyEnabled}
           soundOn={soundOn} onSound={setSoundEnabled}

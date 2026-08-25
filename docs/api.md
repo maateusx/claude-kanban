@@ -183,6 +183,23 @@ A descrição da task criada é a descrição do item mais uma linha de referên
 | `GET` | `/api/projects/:projectId/claude-config/file?path=<rel>` | — | Conteúdo do arquivo. **400** se o `path` estiver fora da allowlist. |
 | `PUT` | `/api/projects/:projectId/claude-config/file` | `{ path, content }` | Grava o arquivo e emite `project.updated`. **400** em path inválido. |
 
+### Extensões e plugins
+
+Uma família de rotas só para os dois escopos: **sem** `projectId` o escopo é global (`~/.claude`), **com** `projectId` é `<projeto>/.claude`. `projectId` vai no query (GET) ou no body (POST). Projeto inexistente → **404**; diretório do projeto sumido → **409**. Toda mutação com escopo de projeto emite `project.updated`.
+
+| Método | Path | Body | Resposta |
+| --- | --- | --- | --- |
+| `GET` | `/api/extensions?projectId=<id>` | — | `{ scope, root, items: { skills, agents, commands, hooks }, catalog }`. Cada item: `{ kind, name, enabled, title, description, path }` (hook tem `event` no lugar de `path`). |
+| `POST` | `/api/extensions/install` | `{ id, projectId? }` | Instala um item do catálogo embutido (grava os arquivos, ou insere o hook em `settings.json`) e devolve a listagem nova. Reinstalar por cima **reativa** o que estava desativado. **400** em id desconhecido. |
+| `POST` | `/api/extensions/toggle` | `{ kind, name, enabled, projectId? }` | Listagem nova. **400** se o item não existe ou o `kind`/`name` é inválido. |
+| `POST` | `/api/extensions/remove` | `{ kind, name, projectId? }` | Listagem nova. Apaga em ambos os estados (ativo e desativado). **400** se não existe. |
+| `GET` | `/api/plugins?refresh=true` | — | `{ installed: [...], available: [{ id, name, description, marketplace, installCount }] }` via `claude plugin list --json --available`. Cache de 60s; `refresh=true` força. **503** sem o CLI, **502** se o CLI falhar. |
+| `POST` | `/api/plugins/:action` | `{ id, projectId? }` | `action` ∈ `install\|uninstall\|enable\|disable`. `{ ok: true, output }`. **503** sem o CLI, **400** em ação/id inválido ou falha do comando. |
+
+`kind` ∈ `skills|agents|commands|hooks`. `name` de skill/agent/command casa `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (barra e `..` são rejeitados — o nome vira caminho); `name` de hook é `<evento>:<sha1 curto do conteúdo>`, id estável que não muda ao ativar/desativar e não colide entre dois hooks do mesmo evento.
+
+Desativar skill/agent/command move para `<kind>-disabled/` no mesmo escopo (o Claude Code não varre essa pasta). Desativar hook tira a entrada de `settings.json` e guarda em `~/.claude-kanban/disabled-hooks.json`, chaveado por escopo.
+
 ### Análise (sugestão de tasks)
 
 | Método | Path | Body | Resposta |
@@ -242,6 +259,8 @@ Todo o estado global do app é arquivo — não há banco de dados.
 ├── projects.json          # { projects: [...] } — os projetos cadastrados (id, path, git, devServer, flags)
 ├── state.json             # { queue: [{projectId, taskId}], maxConcurrency } — a fila sobrevive a restarts
 ├── ledger.json            # { executed: { <taskId>: { exitCode: 0, completedAt, sessionId } } }
+├── models.json            # catálogo de modelos baixado da Models API (opcional)
+├── disabled-hooks.json    # hooks desativados pela tela de extensões, por escopo
 ├── lock                   # pid da instância viva; o boot aborta se o pid ainda responde
 └── worktrees/<projectId>/<taskId>/   # worktree git isolado de cada run
 ```
