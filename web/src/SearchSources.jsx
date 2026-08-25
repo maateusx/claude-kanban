@@ -142,7 +142,7 @@ export function SearchSourcesModal({ project, onClose }) {
     : api.patchSearchSource(project.id, editing, s)))
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/10 p-4"
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim p-4"
       onMouseDown={e => e.target === e.currentTarget && onClose()}>
       <div className="flex max-h-full w-full max-w-2xl flex-col rounded-[8px] border border-line bg-bg p-5">
         <div className="mb-4 flex items-center justify-between">
@@ -254,7 +254,7 @@ export function SearchTasksModal({ project, onClose, onImported }) {
   const enabled = (sources || []).filter(s => s.enabled)
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/10 p-4"
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim p-4"
       onMouseDown={e => e.target === e.currentTarget && !busy && onClose()}>
       <div className="flex max-h-full w-full max-w-2xl flex-col rounded-[8px] border border-line bg-bg p-5">
         <div className="mb-4 flex items-center justify-between">

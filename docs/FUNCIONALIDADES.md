@@ -119,6 +119,9 @@ Escolha de modelo por task/projeto, com normalização de aliases legados (`opus
 ### 33. UI React completa
 Board com drag-and-drop (dnd-kit), colunas por status, filtros por tag, ordenação configurável, drawer de log, visualização de diff, notificações do sistema e sons. (`web/src/`)
 
+### 34. Configurações globais em abas e tema claro/escuro
+As configurações globais são separadas por tema em abas — **Execução** (concorrência, catálogo de modelos), **Aparência**, **Alertas** (notificações e sons) e **Extensões**. Em Aparência dá para escolher tema **Sistema** (default, acompanha o modo claro/escuro do SO em tempo real via `matchMedia`), **Claro** ou **Escuro**; a preferência vive no `localStorage` do navegador, como notificações e sons. O tema escuro só reatribui os design tokens em `:root[data-theme="dark"]` — nenhum componente tem variante `dark:`. (`web/src/theme.js`, `web/src/index.css`, `GlobalSettingsModal` em `web/src/App.jsx`)
+
 ---
 
 ## Fluxo de trabalho típico

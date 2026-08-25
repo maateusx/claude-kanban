@@ -69,7 +69,7 @@ export function ExtensionsDrawer({ project, initialScope = 'global', onClose }) 
 
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-ink/10" onMouseDown={onClose} />
+      <div className="fixed inset-0 z-40 bg-scrim" onMouseDown={onClose} />
       <div className="fixed inset-y-0 right-0 z-40 flex w-[900px] max-w-full flex-col border-l border-line bg-bg">
         <div className="flex items-center gap-3 border-b border-line px-5 py-3">
           <h2 className="font-semibold">Extensões do Claude</h2>

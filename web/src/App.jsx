@@ -4,6 +4,7 @@ import { api, connectWS } from './api.js'
 import { reducer, effectsFor, initialState, notificationsFor, pendingIds } from './events.js'
 import * as notifications from './notify.js'
 import * as sounds from './sounds.js'
+import * as theme from './theme.js'
 import { DiffDrawer } from './Diff.jsx'
 import { ExtensionsDrawer } from './Extensions.jsx'
 import { SearchSourcesModal, SearchTasksModal } from './SearchSources.jsx'
@@ -2254,7 +2255,7 @@ function ClaudeConfigModal({ project, onClose }) {
 
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-ink/10" onMouseDown={onClose} />
+      <div className="fixed inset-0 z-40 bg-scrim" onMouseDown={onClose} />
       <div className="fixed inset-y-0 right-0 z-40 flex w-[900px] max-w-full flex-col border-l border-line bg-bg">
         <div className="flex items-center gap-3 border-b border-line px-5 py-3">
           <h2 className="font-semibold">Config do Claude — {project.name}</h2>
@@ -2360,7 +2361,7 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
   }
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-ink/10" onMouseDown={onClose} />
+      <div className="fixed inset-0 z-40 bg-scrim" onMouseDown={onClose} />
       <div className="fixed inset-y-0 right-0 z-40 flex w-[560px] max-w-full flex-col border-l border-line bg-bg">
         <div className="flex items-center gap-3 border-b border-line px-5 py-3">
           <h2 className="font-semibold">Configurações — {project.name}</h2>
@@ -2641,40 +2642,90 @@ function GlobalPauseButton({ queue, usage, onPause, onResume }) {
   )
 }
 
+const SETTINGS_TABS = [
+  { key: 'execucao', label: 'Execução' },
+  { key: 'aparencia', label: 'Aparência' },
+  { key: 'alertas', label: 'Alertas' },
+  { key: 'extensoes', label: 'Extensões' },
+]
+
 function GlobalSettingsModal({ onClose, queue, onConcurrency, notifyOn, onNotify, soundOn, onSound, soundMap, onSoundFor, modelsInfo, onRefreshModels, onExtensions }) {
+  const [tab, setTab] = useState('execucao')
   const maxConc = queue?.maxConcurrency || 1
   return (
     <Modal onClose={onClose} title="Configurações globais">
+      <div className="-mt-1 mb-4 flex gap-4 border-b border-line">
+        {SETTINGS_TABS.map(t => (
+          <button key={t.key} onClick={() => setTab(t.key)}
+            className={`-mb-px border-b-2 px-0.5 pb-1.5 text-body ${tab === t.key
+              ? 'border-accent text-ink'
+              : 'border-transparent text-muted hover:text-ink-2'}`}>{t.label}</button>
+        ))}
+      </div>
       <div className="space-y-4 text-body">
-        <div className="flex items-center gap-3">
-          <span>Tasks simultâneas</span>
-          <div className="flex items-center gap-1 rounded-[6px] border border-line px-1.5 py-0.5 text-meta">
-            <button onClick={() => onConcurrency(maxConc - 1)} disabled={maxConc <= 1}
-              className="px-1 text-muted hover:text-ink disabled:opacity-30">−</button>
-            <span className="font-mono text-ink">{maxConc}×</span>
-            <button onClick={() => onConcurrency(maxConc + 1)} disabled={maxConc >= 8}
-              className="px-1 text-muted hover:text-ink disabled:opacity-30">+</button>
-          </div>
-          <span className="text-meta text-muted">execuções em paralelo entre todos os projetos. Projetos sem worktree isolado ficam limitados a 1 por vez.</span>
-        </div>
-        <ModelsSetting info={modelsInfo} onRefresh={onRefreshModels} />
-        <div className="flex items-start gap-3 rounded-[8px] border border-line p-3">
-          <span className="flex-1">
-            <span className="font-medium">Extensões</span>
-            <span className="mt-1 block text-meta text-muted">
-              Skills, agents, commands, hooks e plugins instalados em ~/.claude (valem para todos os projetos).
-              Dentro de cada projeto dá para instalar/ativar só para ele.
+        {tab === 'execucao' && (
+          <>
+            <div className="flex items-center gap-3">
+              <span>Tasks simultâneas</span>
+              <div className="flex items-center gap-1 rounded-[6px] border border-line px-1.5 py-0.5 text-meta">
+                <button onClick={() => onConcurrency(maxConc - 1)} disabled={maxConc <= 1}
+                  className="px-1 text-muted hover:text-ink disabled:opacity-30">−</button>
+                <span className="font-mono text-ink">{maxConc}×</span>
+                <button onClick={() => onConcurrency(maxConc + 1)} disabled={maxConc >= 8}
+                  className="px-1 text-muted hover:text-ink disabled:opacity-30">+</button>
+              </div>
+              <span className="text-meta text-muted">execuções em paralelo entre todos os projetos. Projetos sem worktree isolado ficam limitados a 1 por vez.</span>
+            </div>
+            <ModelsSetting info={modelsInfo} onRefresh={onRefreshModels} />
+          </>
+        )}
+        {tab === 'aparencia' && <ThemeSetting />}
+        {tab === 'alertas' && (
+          <>
+            <NotificationsSetting notifyOn={notifyOn} onNotify={onNotify} />
+            <SoundSetting soundOn={soundOn} onSound={onSound} soundMap={soundMap} onSoundFor={onSoundFor} />
+          </>
+        )}
+        {tab === 'extensoes' && (
+          <div className="flex items-start gap-3 rounded-[8px] border border-line p-3">
+            <span className="flex-1">
+              <span className="font-medium">Extensões</span>
+              <span className="mt-1 block text-meta text-muted">
+                Skills, agents, commands, hooks e plugins instalados em ~/.claude (valem para todos os projetos).
+                Dentro de cada projeto dá para instalar/ativar só para ele.
+              </span>
             </span>
-          </span>
-          <button onClick={onExtensions}
-            className="shrink-0 rounded-[6px] border border-line px-2 py-1 text-meta text-ink-2 hover:text-ink">
-            gerenciar
-          </button>
-        </div>
-        <NotificationsSetting notifyOn={notifyOn} onNotify={onNotify} />
-        <SoundSetting soundOn={soundOn} onSound={onSound} soundMap={soundMap} onSoundFor={onSoundFor} />
+            <button onClick={onExtensions}
+              className="shrink-0 rounded-[6px] border border-line px-2 py-1 text-meta text-ink-2 hover:text-ink">
+              gerenciar
+            </button>
+          </div>
+        )}
       </div>
     </Modal>
+  )
+}
+
+// Preferência de tema: mora no localStorage e só mexe no <html>, então o estado
+// não precisa subir para o App.
+function ThemeSetting() {
+  const [pref, setPref] = useState(theme.loadTheme)
+  const pick = v => { theme.saveTheme(v); theme.apply(v); setPref(v) }
+  return (
+    <div className="rounded-[8px] border border-line p-3">
+      <span className="font-medium">Tema</span>
+      <span className="mt-1 block text-meta text-muted">
+        Vale para todos os projetos, neste navegador. “Sistema” acompanha o modo claro/escuro do SO em tempo real.
+      </span>
+      <div className="mt-3 flex gap-2">
+        {theme.THEMES.map(t => (
+          <button key={t.key} onClick={() => pick(t.key)} title={t.hint}
+            className={`rounded-[6px] border px-2.5 py-1 text-meta ${pref === t.key
+              ? 'border-accent text-accent'
+              : 'border-line text-ink-2 hover:text-ink'}`}>{t.label}</button>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -2815,7 +2866,7 @@ function QueueBar({ queue, tasks, projects, usage, onOpen, onKill, onReorder, on
 
 function Modal({ title, onClose, children }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/10 p-4"
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim p-4"
       onMouseDown={e => e.target === e.currentTarget && onClose()}>
       <div className="w-full max-w-2xl rounded-[8px] border border-line bg-bg p-5">
         <div className="mb-4 flex items-center justify-between">
