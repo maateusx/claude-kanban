@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import { nanoid } from 'nanoid'
-import { saveProjects } from '../lib/paths.js'
+import { saveProjects, STATUSES } from '../lib/paths.js'
 import { bootstrapProject, uninstallGuardrails } from '../lib/bootstrap.js'
 import { DEFAULT_GIT, gitSettings } from '../lib/git.js'
 import { normalizeModel } from '../lib/models.js'
@@ -44,7 +44,8 @@ export default function projectRoutes(app, ctx) {
   app.patch('/api/projects/:projectId', (req, reply) => {
     const p = withProjectRecord(ctx, req, reply); if (!p) return
     const { name, description, path: projectPath, skipPermissions, git, defaultModel, auxModel: auxModelIn,
-      autoRun, autoDecompose, devServer, timeoutMs, enrichMode, retry, maxTurns } = req.body || {}
+      autoRun, autoDecompose, devServer, timeoutMs, enrichMode, retry, maxTurns,
+      webhookUrl, webhookStatuses } = req.body || {}
     if (name !== undefined) {
       if (!String(name).trim()) return reply.code(400).send({ error: 'name não pode ser vazio' })
       p.name = String(name).trim()
@@ -124,6 +125,21 @@ export default function projectRoutes(app, ctx) {
         return reply.code(400).send({ error: 'enrichMode deve ser off, auto ou always' })
       }
       p.enrichMode = enrichMode
+    }
+    if (webhookUrl !== undefined) {
+      const u = String(webhookUrl || '').trim()
+      if (u && !/^https?:\/\//i.test(u)) {
+        return reply.code(400).send({ error: 'webhookUrl deve começar com http:// ou https://' })
+      }
+      p.webhookUrl = u
+    }
+    if (webhookStatuses !== undefined) {
+      // lista vazia = todos os status (comportamento default), então null/'' desliga o filtro.
+      const list = webhookStatuses || []
+      if (!Array.isArray(list) || list.some(s => !STATUSES.includes(s))) {
+        return reply.code(400).send({ error: `webhookStatuses deve ser um array de status: ${STATUSES.join(', ')}` })
+      }
+      p.webhookStatuses = list
     }
     if (devServer !== undefined && typeof devServer === 'object') {
       const next = { ...(p.devServer || {}) }

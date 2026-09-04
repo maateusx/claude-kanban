@@ -62,6 +62,19 @@ function waitFor(fn, timeout = WAIT_MS) {
 
 const find = (events, type, pred = () => true) => events.find(e => e.type === type && pred(e))
 
+test('renome na mesma pasta nao emite task.moved', async () => {
+  const root = project()
+  const t = createTask(root, { title: 'Titulo velho', status: 'todo' })
+  const { events, watcher } = await start(root)
+  try {
+    const dest = path.join(tasksDir(root, 'todo'), 'titulo-novo--' + t.id + '.md')
+    renameSync(t.filePath, dest)
+
+    await waitFor(() => find(events, 'task.upserted', e => e.task.id === t.id && e.task.fileName === path.basename(dest)))
+    assert.ok(!find(events, 'task.moved'), 'renome nao e mudanca de status')
+  } finally { await watcher.close() }
+})
+
 test('move manual de todo/ para doing/ emite task.moved com from e to', async () => {
   const root = project()
   const t = createTask(root, { title: 'Mover na mao', status: 'todo' })
