@@ -80,6 +80,15 @@ export async function buildApp(deps) {
   await app.register(cors, { origin: (origin, cb) => cb(null, !origin || allowedOrigins.has(origin)) })
   await app.register(websocket)
 
+  // Uma página em https (ex.: o Launchpad) alcançando 127.0.0.1 é Private Network
+  // Access: o Chrome só aceita se o preflight responder com este header.
+  app.addHook('onSend', (req, reply, payload, done) => {
+    if (req.headers.origin && allowedOrigins.has(req.headers.origin)) {
+      reply.header('Access-Control-Allow-Private-Network', 'true')
+    }
+    done(null, payload)
+  })
+
   app.addHook('onRequest', (req, reply, done) => {
     if (req.headers.origin && !allowedOrigins.has(req.headers.origin)) {
       return reply.code(403).send({ error: 'origin não permitido' })
