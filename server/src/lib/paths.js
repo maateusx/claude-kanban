@@ -7,6 +7,7 @@ export const HOME_DIR = process.env.CLAUDE_KANBAN_HOME || path.join(os.homedir()
 export const PROJECTS_FILE = path.join(HOME_DIR, 'projects.json')
 export const STATE_FILE = path.join(HOME_DIR, 'state.json')
 export const LOCK_FILE = path.join(HOME_DIR, 'lock')
+export const MODELS_FILE = path.join(HOME_DIR, 'models.json')
 
 export const STATUSES = ['backlog', 'todo', 'doing', 'done', 'archived']
 

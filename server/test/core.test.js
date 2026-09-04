@@ -1,12 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, renameSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { createTask, updateTask, listTasks, loadTask, reconcileProject, findTask, hasDependencyCycle, normalizeDependsOn, getSection } from '../src/lib/tasks.js'
 import { bootstrapProject, mergeSettings, uninstallFromSettings, bootstrapStatus } from '../src/lib/bootstrap.js'
-import { listPendingActions, resolvePendingAction } from '../src/lib/pending.js'
+import { listPendingActions, resolvePendingAction, runPendingAction } from '../src/lib/pending.js'
 import { tasksDir, pendingFile, loadState, templatesDir } from '../src/lib/paths.js'
 import { listTemplates, findTemplate } from '../src/lib/templates.js'
 import { Runner, consumeHumanAnswer, hasHumanRequest, hasHumanResponse } from '../src/lib/runner.js'
@@ -145,6 +145,37 @@ test('pending-actions: parse e resolve', () => {
   actions = listPendingActions(root)
   assert.equal(actions[0].status, 'done')
   assert.ok(!resolvePendingAction(root, 'pa-abc123'), 'não resolve duas vezes')
+})
+
+test('pending-actions: executa o comando no diretório do projeto', async () => {
+  const root = proj(); bootstrapProject(root)
+  writeFileSync(pendingFile(root), `
+## [pa-ok0001] 2026-07-10T16:02:11Z — echo
+- comando bloqueado: \`echo ola && pwd\`
+- status: pending
+
+## [pa-bad001] 2026-07-10T16:02:11Z — falha
+- comando bloqueado: \`exit 3\`
+- status: pending
+
+## [pa-nocmd1] 2026-07-10T16:02:11Z — sem comando
+- status: pending
+`)
+  const ok = await runPendingAction(root, 'pa-ok0001')
+  assert.equal(ok.exitCode, 0)
+  assert.match(ok.output, /ola/)
+  assert.ok(ok.output.includes(realpathSync(root)), 'roda com cwd no projeto')
+
+  const bad = await runPendingAction(root, 'pa-bad001')
+  assert.equal(bad.exitCode, 3)
+
+  const nocmd = await runPendingAction(root, 'pa-nocmd1')
+  assert.equal(nocmd.exitCode, null)
+  assert.ok(nocmd.error)
+
+  assert.equal(await runPendingAction(root, 'pa-zzzzzz'), null)
+  // executar não resolve: quem decide é quem olhou a saída
+  assert.equal(listPendingActions(root)[0].status, 'pending')
 })
 
 test('ledger: sucesso trava re-execução automática; explícito libera', () => {

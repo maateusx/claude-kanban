@@ -78,6 +78,36 @@ export default function projectRoutes(app, ctx) {
         p.timeoutMs = Math.round(ms)
       }
     }
+    if (maxTurns !== undefined) {
+      if (maxTurns === null || maxTurns === '') {
+        p.maxTurns = null
+      } else {
+        const n = Number(maxTurns)
+        // 0 desliga o teto (comportamento antigo: só o timeout limita a sessão).
+        if (!Number.isInteger(n) || n < 0 || n > MAX_MAX_TURNS) {
+          return reply.code(400).send({ error: `maxTurns deve ser 0 (sem limite) ou um inteiro até ${MAX_MAX_TURNS}` })
+        }
+        p.maxTurns = n
+      }
+    }
+    if (retry !== undefined && typeof retry === 'object') {
+      const next = { ...(p.retry || {}) }
+      if (retry.maxAttempts !== undefined) {
+        const n = Number(retry.maxAttempts)
+        if (!Number.isInteger(n) || n < 1 || n > 10) {
+          return reply.code(400).send({ error: 'retry.maxAttempts deve ser um inteiro entre 1 e 10' })
+        }
+        next.maxAttempts = n
+      }
+      if (retry.backoffMinutes !== undefined) {
+        const n = Number(retry.backoffMinutes)
+        if (!Number.isFinite(n) || n < 0 || n > 1440) {
+          return reply.code(400).send({ error: 'retry.backoffMinutes deve estar entre 0 e 1440' })
+        }
+        next.backoffMinutes = n
+      }
+      p.retry = next
+    }
     if (defaultModel !== undefined) {
       if (defaultModel && !normalizeModel(defaultModel)) {
         return reply.code(400).send({ error: invalidModelMsg(defaultModel) })

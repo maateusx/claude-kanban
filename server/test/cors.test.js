@@ -73,3 +73,19 @@ test('host que não é localhost recebe 403 (DNS rebinding)', async () => {
   })
   assert.equal(res.statusCode, 403)
 })
+
+test('origin permitido recebe o header de Private Network Access', async () => {
+  const allowed = await app.inject({
+    method: 'GET',
+    url: '/api/health',
+    headers: { origin: 'http://localhost:5544', host: 'localhost:5544' },
+  })
+  assert.equal(allowed.headers['access-control-allow-private-network'], 'true')
+
+  const noOrigin = await app.inject({
+    method: 'GET',
+    url: '/api/health',
+    headers: { host: '127.0.0.1:4400' },
+  })
+  assert.equal(noOrigin.headers['access-control-allow-private-network'], undefined)
+})

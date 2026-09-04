@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { api } from './api.js'
+import { t } from './i18n.js'
 
 // Parser de unified diff: quebra em arquivos e hunks para renderizar estilo PR.
 function parseDiff(text) {
@@ -58,7 +59,7 @@ function FileDiff({ file }) {
       {open && (
         <div className="overflow-x-auto font-mono text-meta leading-5">
           {file.binary
-            ? <div className="px-3 py-2 text-muted">arquivo binário</div>
+            ? <div className="px-3 py-2 text-muted">{t('arquivo binário')}</div>
             : file.lines.map((l, i) => (
                 <div key={i} className={`whitespace-pre px-3 ${LINE_STYLE[l.type]}`}>{l.text || ' '}</div>
               ))}
@@ -94,10 +95,10 @@ export function DiffDrawer({ projectId, task, onClose, onResolved }) {
       .catch(e => { setActionError(e.message); setAction(null) })
   }
   const approve = () => run('approve',
-    `Mergear "${branch}" na branch principal e arquivar a task?`,
+    t('Mergear "{branch}" na branch principal e arquivar a task?', { branch }),
     () => api.approveTask(projectId, task.id))
   const discard = () => run('discard',
-    `Descartar o trabalho da task? A branch "${branch}" e o diff serão apagados. Isso não tem volta.`,
+    t('Descartar o trabalho da task? A branch "{branch}" e o diff serão apagados. Isso não tem volta.', { branch }),
     () => api.discardTask(projectId, task.id))
 
   return (
@@ -108,7 +109,7 @@ export function DiffDrawer({ projectId, task, onClose, onResolved }) {
         <div className="flex-1" />
         {!state.loading && !state.error && (
           <span className="font-mono text-meta">
-            {state.files.length} arquivo{state.files.length === 1 ? '' : 's'} ·{' '}
+            {t('{n} arquivo(s)', { n: state.files.length })} ·{' '}
             <span className="text-success">+{additions}</span>{' '}
             <span className="text-danger">−{deletions}</span>
           </span>
@@ -116,7 +117,7 @@ export function DiffDrawer({ projectId, task, onClose, onResolved }) {
         <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
       </div>
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
-        {state.loading && <div className="text-body text-muted">Carregando diff…</div>}
+        {state.loading && <div className="text-body text-muted">{t('Carregando diff…')}</div>}
         {state.error && <div className="text-body text-danger">{state.error}</div>}
         {state.files.map((f, i) => <FileDiff key={i} file={f} />)}
       </div>
@@ -126,12 +127,12 @@ export function DiffDrawer({ projectId, task, onClose, onResolved }) {
           <div className="flex items-center gap-2">
             <button onClick={discard} disabled={!!action}
               className="rounded-[6px] border border-line px-3 py-1.5 text-meta text-danger hover:bg-hover disabled:opacity-40">
-              {action === 'discard' ? 'Descartando…' : 'Descartar'}
+              {action === 'discard' ? t('Descartando…') : t('Descartar')}
             </button>
             <div className="flex-1" />
             <button onClick={approve} disabled={!!action}
               className="rounded-[6px] bg-accent px-3 py-1.5 text-meta font-medium text-on-accent hover:bg-accent-hover disabled:opacity-40">
-              {action === 'approve' ? 'Mergeando…' : 'Aprovar (merge)'}
+              {action === 'approve' ? t('Mergeando…') : t('Aprovar (merge)')}
             </button>
           </div>
         </div>

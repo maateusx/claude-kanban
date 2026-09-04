@@ -1,4 +1,4 @@
-import { listPendingActions, resolvePendingAction } from '../lib/pending.js'
+import { listPendingActions, resolvePendingAction, runPendingAction } from '../lib/pending.js'
 import { listConfigFiles, readConfigFile, writeConfigFile } from '../lib/claudeConfig.js'
 import { withProject } from './helpers.js'
 
@@ -18,6 +18,13 @@ export default function configRoutes(app, ctx) {
     const actions = listPendingActions(p.path)
     emit('pending.updated', { projectId: p.id, actions })
     return { actions }
+  })
+
+  app.post('/api/projects/:projectId/pending-actions/:actionId/run', async (req, reply) => {
+    const p = withProject(ctx, req, reply); if (!p) return
+    const res = await runPendingAction(p.path, req.params.actionId)
+    if (!res) return reply.code(404).send({ error: 'ação não encontrada' })
+    return res
   })
 
   // ---- claude config (settings, mcp, hooks, skills, agents, commands…) ----

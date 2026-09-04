@@ -11,7 +11,8 @@ const CACHE_MS = 60_000
 
 let cache = null // { at, data }
 
-function readToken() {
+// exportado: o catálogo de modelos usa o mesmo token para falar com a Models API
+export function readToken() {
   // macOS: token fica no Keychain; Linux/fallback: ~/.claude/.credentials.json
   let raw = null
   if (process.platform === 'darwin') {

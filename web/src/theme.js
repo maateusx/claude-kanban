@@ -5,18 +5,18 @@
 // escrito em data-theme no <html>; 'system' não escreve nada e deixa o
 // @media (prefers-color-scheme) do index.css decidir.
 
-const KEY = 'ck.theme'
+export const THEME_KEY = 'ck.theme'
 export const MODES = ['light', 'dark', 'system']
 
 export function loadTheme() {
   try {
-    const v = localStorage.getItem(KEY)
+    const v = localStorage.getItem(THEME_KEY)
     return MODES.includes(v) ? v : 'system'
   } catch { return 'system' }
 }
 
 export function saveTheme(mode) {
-  try { localStorage.setItem(KEY, mode) } catch { /* storage indisponível */ }
+  try { localStorage.setItem(THEME_KEY, mode) } catch { /* storage indisponível */ }
 }
 
 // Aplica no documento. Chamado no boot (antes do render, para não piscar branco)
