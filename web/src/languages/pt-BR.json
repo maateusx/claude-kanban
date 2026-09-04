@@ -70,7 +70,6 @@
   "Claro": "Claro",
   "Claude decide": "Claude decide",
   "Colapsar sidebar": "Colapsar sidebar",
-  "Com backoff maior que zero e auto-pilot ligado, uma task que falha é reagendada para daqui a N minutos em vez de voltar imediatamente para a fila. 0 = volta no próximo tick (comportamento default).": "Com backoff maior que zero e auto-pilot ligado, uma task que falha é reagendada para daqui a N minutos em vez de voltar imediatamente para a fila. 0 = volta no próximo tick (comportamento default).",
   "Com o auto ligado, toda task em To Do entra na fila sozinha (respeitando a concorrência configurada).": "Com o auto ligado, toda task em To Do entra na fila sozinha (respeitando a concorrência configurada).",
   "Com worktree ativo a branch nova é obrigatória (exigência do git).": "Com worktree ativo a branch nova é obrigatória (exigência do git).",
   "Comando": "Comando",
@@ -415,5 +414,8 @@
   "✦ Sugerir tasks com o Claude": "✦ Sugerir tasks com o Claude",
   "✦ enriquecer": "✦ enriquecer",
   "✦ não enriquecer": "✦ não enriquecer",
-  "🔒 Ação bloqueada pelos guardrails: {label}": "🔒 Ação bloqueada pelos guardrails: {label}"
+  "🔒 Ação bloqueada pelos guardrails: {label}": "🔒 Ação bloqueada pelos guardrails: {label}",
+  "Com backoff maior que zero e auto-pilot ligado, uma task que falha é reagendada para daqui a N minutos em vez de voltar imediatamente para a fila. 0 = volta no próximo tick, o que na prática paga duas sessões inteiras pela mesma falha determinística.": "Com backoff maior que zero e auto-pilot ligado, uma task que falha é reagendada para daqui a N minutos em vez de voltar imediatamente para a fila. 0 = volta no próximo tick, o que na prática paga duas sessões inteiras pela mesma falha determinística.",
+  "Remover projeto do quadro": "Remover projeto do quadro",
+  "Remover \"{name}\" do quadro? As tasks e o código continuam no disco.": "Remover \"{name}\" do quadro? As tasks e o código continuam no disco."
 }

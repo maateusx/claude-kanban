@@ -342,6 +342,12 @@ export default function App() {
       <Rail
         projects={projects} selectedId={selectedId} onSelect={setSelectedId} queue={queue} usage={usage}
         onAdd={() => setShowAddProject(true)}
+        onRemove={p => {
+          if (!confirm(t('Remover "{name}" do quadro? As tasks e o código continuam no disco.', { name: p.name }))) return
+          api.removeProject(p.id, false)
+            .then(() => { if (p.id === selectedIdRef.current) setSelectedId(null); refreshProjects() })
+            .catch(e => alert(e.message))
+        }}
         onSettings={() => setShowGlobalSettings(true)}
       />
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -607,7 +613,7 @@ function HoverTip({ label, disabled, children, className }) {
   )
 }
 
-function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue, usage }) {
+function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onSettings, queue, usage }) {
   const [expanded, toggle] = useRailExpanded()
   return (
     <aside style={{ width: expanded ? 'var(--rail-w-open)' : 'var(--rail-w)' }}
@@ -623,7 +629,7 @@ function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue, usage 
         {projects.map(p => {
           const running = queue.actives?.some(a => a.projectId === p.id)
           return (
-            <HoverTip key={p.id} label={p.name} disabled={expanded}>
+            <HoverTip key={p.id} label={p.name} disabled={expanded} className="group">
               <button onClick={() => onSelect(p.id)}
                 className={`flex w-full items-center gap-2 rounded-[8px] ${expanded ? 'px-1.5 py-1 hover:bg-hover' : 'justify-center'} ${p.id === selectedId ? (expanded ? 'bg-hover' : '') : ''}`}>
                 <span
@@ -640,6 +646,11 @@ function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue, usage 
                   <span className={`truncate text-body ${p.id === selectedId ? 'font-semibold text-ink' : 'text-ink-2'}`}>{p.name}</span>
                 )}
               </button>
+              {expanded && (
+                <button onClick={() => onRemove(p)} title={t('Remover projeto do quadro')}
+                  aria-label={t('Remover projeto do quadro')}
+                  className="absolute right-1 top-1/2 hidden -translate-y-1/2 rounded-[6px] px-1.5 py-0.5 text-muted hover:bg-hover hover:text-danger group-hover:block">×</button>
+              )}
             </HoverTip>
           )
         })}
