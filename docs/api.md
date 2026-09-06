@@ -35,6 +35,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
   "autoRun": false,
   "queuePausedUntil": null,
   "devServer": { "command": "npm run dev", "url": "http://localhost:3000" },
+  "searchSources": [],
   "git": {
     "baseBranch": "main",
     "pullBeforeStart": false,
@@ -54,7 +55,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 }
 ```
 
-`available` é `false` quando o diretório não existe mais; nesse caso `bootstrap` vira `"unknown"` e `branch` vira `null`. `git` é sempre o objeto completo (defaults + overrides). `queuePausedUntil` (ISO ou `null`) adia a fila **deste projeto**: os itens continuam enfileirados, na ordem, mas nenhum sai da fila antes do horário; o servidor limpa o campo sozinho quando a hora chega.
+`searchSources` é a lista de fontes de busca customizadas do projeto (ver [Search sources](#search-sources)); vem sempre como array (`[]` quando o projeto nunca cadastrou nenhuma). `available` é `false` quando o diretório não existe mais; nesse caso `bootstrap` vira `"unknown"` e `branch` vira `null`. `git` é sempre o objeto completo (defaults + overrides). `queuePausedUntil` (ISO ou `null`) adia a fila **deste projeto**: os itens continuam enfileirados, na ordem, mas nenhum sai da fila antes do horário; o servidor limpa o campo sozinho quando a hora chega.
 
 ### `task`
 
@@ -99,6 +100,8 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | --- | --- | --- | --- |
 | `GET` | `/api/health` | — | `{ ok: true, claudeAvailable }` — `claudeAvailable` é falso se o CLI `claude` não estava no PATH no boot. |
 | `GET` | `/api/usage` | — | Limites do plano Claude: `{ available: false }` ou `{ available: true, limits: [{ kind, percent, severity, resetsAt, isActive, model }] }`. `kind` ∈ `session | weekly_all | weekly_scoped`. Cache de 60s; qualquer falha vira `available: false`. |
+| `GET` | `/api/models` | — | Catálogo de modelos: `{ models: [{ id, label }], fetchedAt, source }`. `source` ∈ `api | fallback` — `fallback` é a lista embutida no código, usada enquanto nunca se rodou um refresh. |
+| `POST` | `/api/models/refresh` | — | Busca a lista oficial na Models API da Anthropic (`GET /v1/models`, com o token OAuth do Claude Code) e persiste em `~/.claude-kanban/models.json`. Devolve o mesmo shape de `GET /api/models`. **502** sem credencial do CLI ou se a API falhar — o catálogo anterior é mantido. |
 | `POST` | `/api/pick-folder` | — | Abre o seletor nativo (macOS). `{ path }` (ou `path: null` se cancelado). **501** fora do macOS. |
 | `GET` | `/api/suggestion-types` | — | `{ types: { melhoria: "…", correcao: "…", … } }` — chaves aceitas em `/analyze`. |
 
@@ -108,11 +111,35 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | --- | --- | --- | --- |
 | `GET` | `/api/projects` | — | `{ projects: [project] }` |
 | `POST` | `/api/projects` | `{ name, path }` | `{ project }`. Roda o bootstrap (pastas, `guard.mjs`, skill, hooks) e inicia o watcher. **400** se falta campo, o diretório não existe ou não é gravável. Falha de bootstrap **não** falha a rota: aparece em `bootstrap: "failed"` + `bootstrapError`. |
-| `PATCH` | `/api/projects/:projectId` | qualquer subconjunto de `{ name, skipPermissions, defaultModel, auxModel, autoRun, enrichMode, verifyCommand, maxTurns, retry: { maxAttempts, backoffMinutes }, devServer: { command, url }, git: {…} }` | `{ project }`. `devServer` e `git` são merges rasos. `verifyCommand`: comando (testes/lint) rodado no worktree da task após um run com `exit 0`; se falhar, a task volta para `todo/` com a saída no `## Log de erros` e não entra no ledger. String vazia desliga. `enrichMode`: `"off" | "auto" | "always"` — política de enriquecimento da descrição na hora do run (**400** fora desses valores). Ligar `autoRun` enfileira imediatamente tudo que está em `todo/` (exceto tasks com as tags `blocked` ou `human-request`). `maxTurns`: teto de turnos da sessão de execução (default `40`, máximo `500`); ao estourar, a task volta para `todo/` com a tag `blocked` e **sem** nova tentativa automática — repetir pararia no mesmo ponto pelo mesmo custo. `0` desliga o teto. `retry`: merge raso, `maxAttempts` de 1 a 10 (default `2`) e `backoffMinutes` de 0 a 1440 (default `10`); o backoff só vale com `autoRun` ligado. `auxModel`: modelo das sessões auxiliares somente leitura (desmembrar/enriquecer/analisar), default `claude-sonnet-5` — elas não herdam o `defaultModel` para não pagar preço de modelo caro por um JSON pequeno. |
+| `PATCH` | `/api/projects/:projectId` | qualquer subconjunto de `{ name, skipPermissions, defaultModel, auxModel, autoRun, enrichMode, verifyCommand, timeoutMs, maxTurns, retry: { maxAttempts, backoffMinutes }, webhookUrl, webhookStatuses, devServer: { command, url }, git: {…} }` | `{ project }`. `devServer` e `git` são merges rasos. `verifyCommand`: comando (testes/lint) rodado no worktree da task após um run com `exit 0`; se falhar, a task volta para `todo/` com a saída no `## Log de erros` e não entra no ledger. String vazia desliga. `enrichMode`: `"off" | "auto" | "always"` — política de enriquecimento da descrição na hora do run (**400** fora desses valores). Ligar `autoRun` enfileira imediatamente tudo que está em `todo/` (exceto tasks com as tags `blocked` ou `human-request`). `maxTurns`: teto de turnos da sessão de execução (default `40`, máximo `500`); ao estourar, a task volta para `todo/` com a tag `blocked` e **sem** nova tentativa automática — repetir pararia no mesmo ponto pelo mesmo custo. `0` desliga o teto. `retry`: merge raso, `maxAttempts` de 1 a 10 (default `2`) e `backoffMinutes` de 0 a 1440 (default `10`); o backoff só vale com `autoRun` ligado. `auxModel`: modelo das sessões auxiliares somente leitura (desmembrar/enriquecer/analisar), default `claude-sonnet-5` — elas não herdam o `defaultModel` para não pagar preço de modelo caro por um JSON pequeno. `webhookUrl`: endpoint avisado quando uma task muda de status, um run falha ou um run pede humano (**400** se não começar com `http://`/`https://`); string vazia desliga. `webhookStatuses`: array de status (`backlog, todo, doing, done, archived`) que disparam `task_status_changed` — ex.: `["done"]` só avisa quando a task conclui (**400** se não for array ou trouxer status inválido); array vazio volta a avisar todos. Não afeta os demais eventos. |
 | `POST` | `/api/projects/:projectId/bootstrap` | — | `{ project }`. Re-roda o bootstrap (idempotente). |
 | `GET` | `/api/projects/:projectId/plugins` | — | `{ scope, plugins: [{ key, label, description, marketplace, tokenImpact, tokenNote, enabled, installed }] }`. `enabled` é o que está salvo no projeto; `installed` é o que o CLI de fato tem — divergem quando um install falhou ou o plugin foi removido por fora. **409** se o CLI `claude` não estiver no PATH. |
 | `PUT` | `/api/projects/:projectId/plugins` | `{ enabled: ["ponytail", …] }` | `{ scope, plugins, installed, removed, errors, project }`. Sincroniza: instala o que falta (`claude plugin marketplace add` + `claude plugin install`) e desinstala o que saiu da lista, sempre no escopo `local` (`.claude/settings.local.json` do projeto, fora do git e sem tocar no `~/.claude`). Não aborta no primeiro erro — instala o que dá e devolve o resto em `errors: [{ key, error }]`; só entra na config do projeto o que instalou de fato. Chaves válidas: `ponytail`, `claude-mem`, `obsidian-second-brain` (**400** fora disso). |
 | `DELETE` | `/api/projects/:projectId?uninstallGuardrails=true` | — | `{ ok: true }`. Remove o projeto do app, esvazia a fila dele, para o dev server e o watcher. Com a query, também desinstala os hooks/guard do projeto. Não apaga tasks nem código. |
+
+### Search sources
+
+Fontes de busca customizadas do projeto (endpoints HTTP cadastrados pelo usuário). Persistem em `p.searchSources` no `~/.claude-kanban/projects.json` e aparecem no `project.searchSources`.
+
+Formato: `{ id, name, method: "GET"|"POST"|"PUT"|"PATCH"|"DELETE", url, headers: [{ key, value }], queryParams: [{ key, value }], body, bodyType: "json"|"text"|"form", enabled, resultsPath, titleField, descriptionField }`.
+
+A request é montada exatamente como cadastrada: os `queryParams` são **acrescentados** à query da `url`, os `headers` vão como estão e o `body` só é enviado quando o método não é `GET`/`DELETE` (nesse caso o `content-type` sai do `bodyType` — `application/json`, `text/plain` ou `application/x-www-form-urlencoded` — a menos que você já tenha declarado um header `content-type`).
+
+Os três últimos mapeiam a resposta JSON da busca: `resultsPath` navega até o array de resultados (ex. `"data.items"`; vazio = a raiz), `titleField`/`descriptionField` apontam o campo de cada item (aceitam caminho com ponto, ex. `"fields.summary"`). Sem eles, cai nos nomes usuais (`title`/`name`/`subject` e `description`/`body`/`summary`/`content`); o link do item sai de `url`/`html_url`/`link`/`permalink`. Título é truncado em 200 chars e item sem título é descartado.
+
+| Método | Path | Body | Resposta |
+| --- | --- | --- | --- |
+| `GET` | `/api/projects/:projectId/search-sources` | — | `{ searchSources: [...] }` |
+| `POST` | `/api/projects/:projectId/search-sources` | `{ name, method?, url, headers?, queryParams?, body?, bodyType?, enabled? }` | `{ source, project }`. `id` é gerado. **400** se `name` vazio, `method`/`bodyType` fora do enum ou `url` não for http(s). Pares chave-valor sem `key` são descartados. |
+| `PATCH` | `/api/projects/:projectId/search-sources/:sourceId` | qualquer subconjunto do body de criação | `{ source, project }`. Merge raso campo a campo (listas são substituídas por inteiro). **404** se a fonte não existe; mesmas validações do POST. |
+| `DELETE` | `/api/projects/:projectId/search-sources/:sourceId` | — | `{ ok: true, project }`. **404** se a fonte não existe. |
+| `POST` | `/api/projects/:projectId/search-sources/:sourceId/fetch` | — | `{ items: [{ sourceId, sourceName, title, description, url, tag, already_imported }] }`. Executa a request da fonte (máx. 100 itens, timeout 30s), inclusive se ela estiver desabilitada. **404** se a fonte não existe, **502** em erro de rede/HTTP ou resposta que não é JSON/array. |
+| `POST` | `/api/projects/:projectId/search-sources/fetch-all` | — | `{ items: [...], errors: [{ sourceId, sourceName, error }] }`. Busca em todas as fontes `enabled` em paralelo; uma fonte fora do ar vira erro por fonte em vez de derrubar a busca. |
+| `POST` | `/api/projects/:projectId/search-sources/import` | `{ items: [...], priority?, status? }` | `{ created: [task], skipped: [{ title, tag, reason }] }`. Cria uma task por item com as tags `search` e `search:<sourceId>:<hash>`, emitindo um `task.upserted` por task. Defaults: `priority: "medium"`, `status: "backlog"` (valores fora do enum caem no default). Item sem `sourceId`/`title` entra em `skipped` com `reason: "item inválido"`. **400** se `items` vazio. |
+
+O dedupe usa a tag `search:<sourceId>:<hash(title+url)>` — do mesmo jeito que o import de issues usa `gh:<n>`. Buscar de novo devolve `already_imported: true` nos itens já importados, e o `import` recalcula a tag no servidor e ignora (via `skipped`) o que já virou task — o cliente manda o item, não a identidade dele.
+
+A descrição da task criada é a descrição do item mais uma linha de referência (`Importada da fonte de busca **<nome>**: <link>`), para a sessão do Claude poder citar a origem.
 
 ### Dev server
 
@@ -134,7 +161,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | Método | Path | Body | Resposta |
 | --- | --- | --- | --- |
 | `GET` | `/api/projects/:projectId/tasks` | — | `{ tasks: [task] }` |
-| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model?, enrich?, decompose?, scheduled_at?, depends_on? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. **400** se `scheduled_at` não é uma data ISO válida. **400** se `depends_on` referencia uma task inexistente ou fecha um ciclo de dependências. `model` (aqui, no PATCH da task e no `defaultModel` do projeto) tem que ser o **slug exato** de um modelo do catálogo (`server/src/lib/models.js`): `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` — é ele que vai para `claude --model`. Apelidos legados (`opus`, `sonnet`…) são convertidos no slug; qualquer outro valor dá **400**. |
+| `POST` | `/api/projects/:projectId/tasks` | `{ title, description?, priority?, tags?, status?, model?, enrich?, decompose?, scheduled_at?, depends_on? }` | `{ task }`. Só `title` é obrigatório (**400** sem ele). Default: `priority: "medium"`, `status: "backlog"`. **400** se `scheduled_at` não é uma data ISO válida. **400** se `depends_on` referencia uma task inexistente ou fecha um ciclo de dependências. `model` (aqui, no PATCH da task e no `defaultModel` do projeto) tem que ser o **slug exato** de um modelo do catálogo vigente (`GET /api/models`) — é ele que vai para `claude --model`. Apelidos legados (`opus`, `sonnet`, `haiku`, `fable`) são convertidos no slug mais recente da família; qualquer outro valor dá **400**. |
 | `GET` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }` — **404** se não existe. |
 | `PATCH` | `/api/projects/:projectId/tasks/:taskId` | subconjunto do frontmatter (`title`, `status`, `priority`, `tags`, `model`, `enrich`, `decompose`, `scheduled_at`, `depends_on`, `run`, `body`…) | `{ task }`. Mudar `status` move o arquivo de pasta e emite `task.moved`. `scheduled_at`: ISO agenda, `null`/`""` desagenda, lixo dá **400**. `depends_on`: lista de ids (`[]` limpa); **400** para id inexistente, auto-dependência ou ciclo. |
 | `DELETE` | `/api/projects/:projectId/tasks/:taskId` | — | `{ task }`. **Não apaga o arquivo**: move para `archived/`. |
@@ -148,6 +175,7 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | --- | --- | --- | --- |
 | `GET` | `/api/projects/:projectId/pending-actions` | — | `{ actions: [{ id: "pa-xxxxxx", timestamp, label, command, taskId, status }] }` — parse de `.claude/claude-kanban/pending-actions.md`. |
 | `POST` | `/api/projects/:projectId/pending-actions/:actionId/resolve` | — | `{ actions }` (lista já atualizada). **404** se a ação não existe ou já foi resolvida. Emite `pending.updated`. |
+| `POST` | `/api/projects/:projectId/pending-actions/:actionId/run` | — | `{ ...action, output, exitCode, error }` — executa o comando bloqueado no diretório do projeto (shell, timeout 120s, saída truncada em 20k). Não resolve a ação. **404** se a ação não existe. |
 
 ### Configuração do Claude no projeto
 
@@ -156,6 +184,23 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
 | `GET` | `/api/projects/:projectId/claude-config` | — | `{ files: [...] }` — metadados dos arquivos editáveis (`CLAUDE.md`, `.claude/settings.json`, `.mcp.json`, skills, agents, hooks…), sem conteúdo. |
 | `GET` | `/api/projects/:projectId/claude-config/file?path=<rel>` | — | Conteúdo do arquivo. **400** se o `path` estiver fora da allowlist. |
 | `PUT` | `/api/projects/:projectId/claude-config/file` | `{ path, content }` | Grava o arquivo e emite `project.updated`. **400** em path inválido. |
+
+### Extensões e plugins
+
+Uma família de rotas só para os dois escopos: **sem** `projectId` o escopo é global (`~/.claude`), **com** `projectId` é `<projeto>/.claude`. `projectId` vai no query (GET) ou no body (POST). Projeto inexistente → **404**; diretório do projeto sumido → **409**. Toda mutação com escopo de projeto emite `project.updated`.
+
+| Método | Path | Body | Resposta |
+| --- | --- | --- | --- |
+| `GET` | `/api/extensions?projectId=<id>` | — | `{ scope, root, items: { skills, agents, commands, hooks }, catalog }`. Cada item: `{ kind, name, enabled, title, description, path }` (hook tem `event` no lugar de `path`). |
+| `POST` | `/api/extensions/install` | `{ id, projectId? }` | Instala um item do catálogo embutido (grava os arquivos, ou insere o hook em `settings.json`) e devolve a listagem nova. Reinstalar por cima **reativa** o que estava desativado. **400** em id desconhecido. |
+| `POST` | `/api/extensions/toggle` | `{ kind, name, enabled, projectId? }` | Listagem nova. **400** se o item não existe ou o `kind`/`name` é inválido. |
+| `POST` | `/api/extensions/remove` | `{ kind, name, projectId? }` | Listagem nova. Apaga em ambos os estados (ativo e desativado). **400** se não existe. |
+| `GET` | `/api/plugins?refresh=true` | — | `{ installed: [...], available: [{ id, name, description, marketplace, installCount }] }` via `claude plugin list --json --available`. Cache de 60s; `refresh=true` força. **503** sem o CLI, **502** se o CLI falhar. |
+| `POST` | `/api/plugins/:action` | `{ id, projectId? }` | `action` ∈ `install\|uninstall\|enable\|disable`. `{ ok: true, output }`. **503** sem o CLI, **400** em ação/id inválido ou falha do comando. |
+
+`kind` ∈ `skills|agents|commands|hooks`. `name` de skill/agent/command casa `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (barra e `..` são rejeitados — o nome vira caminho); `name` de hook é `<evento>:<sha1 curto do conteúdo>`, id estável que não muda ao ativar/desativar e não colide entre dois hooks do mesmo evento.
+
+Desativar skill/agent/command move para `<kind>-disabled/` no mesmo escopo (o Claude Code não varre essa pasta). Desativar hook tira a entrada de `settings.json` e guarda em `~/.claude-kanban/disabled-hooks.json`, chaveado por escopo.
 
 ### Análise (sugestão de tasks)
 
@@ -199,13 +244,13 @@ Cada mensagem é uma linha JSON no formato `{ "type": "<evento>", ...payload }`.
 | `run.queued` | `{ projectId, taskId, position }` | Task entrou na fila. `position` é o índice no momento. |
 | `run.started` | `{ projectId, taskId, pid, resumedFrom }` | Sessão `claude -p` iniciou. `resumedFrom` é o `session_id` continuado (`claude --resume`) quando o run está entregando uma resposta humana a uma sessão anterior; `null` num run normal. |
 | `run.log` | `{ projectId, taskId, event }` | Uma linha do `--output-format stream-json` da sessão. `event` é o objeto do próprio Claude Code (`assistant`, `user`, `result`…); linhas não-JSON viram `{ type: "raw", text }`. Este é o evento de alto volume. |
-| `run.finished` | `{ projectId, taskId, exitCode, humanRequest?, costUsd, durationMs, numTurns, sessionId, pr? }` | Sessão terminou (sucesso, erro ou timeout). `exitCode: 0` ⇒ task foi para `done/` e registrada no ledger — exceto se o agente deixou uma seção `## Human Request` preenchida: nesse caso `humanRequest: true`, a task volta para `todo/` com a tag `human-request` (fora do auto-pilot) e aguarda decisão do humano; qualquer outro valor ⇒ volta para `todo/` e o motivo é anexado ao "## Log de erros" da task. `exitCode: -1` também cobre falha ao preparar o workspace git. `pr` é `{ url, number, state }` da PR aberta pela sessão (`autoPR`), ou `null` — o mesmo valor gravado em `run.pr` no frontmatter. |
+| `run.finished` | `{ projectId, taskId, exitCode, humanRequest?, maxTurns?, costUsd, durationMs, numTurns, sessionId, pr? }` | Sessão terminou (sucesso, erro ou timeout). `exitCode: 0` ⇒ task foi para `done/` e registrada no ledger — exceto se o agente deixou uma seção `## Human Request` preenchida: nesse caso `humanRequest: true`, a task volta para `todo/` com a tag `human-request` (fora do auto-pilot) e aguarda decisão do humano; qualquer outro valor ⇒ volta para `todo/` e o motivo é anexado ao "## Log de erros" da task. `maxTurns: true` ⇒ o teto de turnos do projeto estourou: a task volta para `todo/` com a tag `blocked`, sem retentativa automática. `exitCode: -1` também cobre falha ao preparar o workspace git. `pr` é `{ url, number, state }` da PR aberta pela sessão (`autoPR`), ou `null` — o mesmo valor gravado em `run.pr` no frontmatter. |
 | `run.killed` | `{ projectId, taskId }` | Sessão morta manualmente (`/api/run/kill`). A task volta para `todo/` e **não** re-entra sozinha na fila, mesmo com auto-run ligado. |
 | `run.dequeued` | `{ projectId, taskId }` | Task cancelada antes de começar (`/api/run/dequeue`): saiu da fila. Vem seguido de um `run.queue`. |
 | `run.queue` | `queueView` | A fila foi alterada por fora do fluxo normal (remoção de um projeto, cancelamento de um item da fila). |
 | `pending.updated` | `{ projectId, actions }` | `pending-actions.md` mudou (guardrail bloqueou algo, ou uma ação foi resolvida). |
 | `devserver.updated` | `{ projectId, running, pid, startedAt, exitCode? }` | Dev server iniciou ou morreu. `exitCode` só aparece quando o processo terminou. |
-| `project.updated` | `{ projectId }` | Algo do projeto mudou fora do board (checkout de branch, escrita em claude-config). Sinal de "refaça o `GET /api/projects`". |
+| `project.updated` | `{ projectId }` | Algo do projeto mudou fora do board (checkout de branch, escrita em claude-config, CRUD de search source). Sinal de "refaça o `GET /api/projects`". |
 
 ## `~/.claude-kanban/` (ou `$CLAUDE_KANBAN_HOME`)
 
@@ -216,6 +261,8 @@ Todo o estado global do app é arquivo — não há banco de dados.
 ├── projects.json          # { projects: [...] } — os projetos cadastrados (id, path, git, devServer, flags)
 ├── state.json             # { queue: [{projectId, taskId}], maxConcurrency } — a fila sobrevive a restarts
 ├── ledger.json            # { executed: { <taskId>: { exitCode: 0, completedAt, sessionId } } }
+├── models.json            # catálogo de modelos baixado da Models API (opcional)
+├── disabled-hooks.json    # hooks desativados pela tela de extensões, por escopo
 ├── lock                   # pid da instância viva; o boot aborta se o pid ainda responde
 └── worktrees/<projectId>/<taskId>/   # worktree git isolado de cada run
 ```

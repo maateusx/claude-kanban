@@ -1,0 +1,70 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { webhookUrl, webhookEventsFor } from '../src/lib/webhook.js'
+
+test('webhookUrl só aceita http(s)', () => {
+  assert.equal(webhookUrl({}), null)
+  assert.equal(webhookUrl({ webhookUrl: '  ' }), null)
+  assert.equal(webhookUrl({ webhookUrl: 'file:///etc/passwd' }), null)
+  assert.equal(webhookUrl({ webhookUrl: ' https://x.dev/h ' }), 'https://x.dev/h')
+})
+
+test('run.finished: só falha e human-request viram webhook', () => {
+  const ok = { type: 'run.finished', taskId: 't1', exitCode: 0 }
+  assert.deepEqual(webhookEventsFor(ok), [])
+
+  const human = webhookEventsFor({ ...ok, humanRequest: true })
+  assert.equal(human[0].event, 'human_request')
+
+  const failed = webhookEventsFor({ ...ok, exitCode: 1 })
+  assert.deepEqual(failed, [{ event: 'run_failed', taskId: 't1', exitCode: 1, verifyFailed: false }])
+
+  // verificação reprovada vem com exitCode 0 e ainda assim é falha
+  const verify = webhookEventsFor({ ...ok, verifyFailed: true })
+  assert.equal(verify[0].event, 'run_failed')
+})
+
+test('pending.updated: só pendentes e só uma vez por id', () => {
+  const evt = {
+    type: 'pending.updated',
+    actions: [
+      { id: 'pa-1', status: 'pending', label: 'rm -rf', command: 'rm -rf /', taskId: 't1' },
+      { id: 'pa-2', status: 'done', label: 'resolvida' },
+    ],
+  }
+  const seen = new Set()
+  const first = webhookEventsFor(evt, seen)
+  assert.equal(first.length, 1)
+  assert.deepEqual(first[0], { event: 'pending_action', taskId: 't1', actionId: 'pa-1', label: 'rm -rf', command: 'rm -rf /' })
+  seen.add('pa-1')
+  assert.deepEqual(webhookEventsFor(evt, seen), [])
+})
+
+test('task.moved vira task_status_changed', () => {
+  assert.deepEqual(
+    webhookEventsFor({ type: 'task.moved', taskId: 't1', from: 'doing', to: 'done' }),
+    [{ event: 'task_status_changed', taskId: 't1', from: 'doing', to: 'done' }],
+  )
+  // arquivar (DELETE sem hard) também é uma mudança de status
+  assert.deepEqual(
+    webhookEventsFor({ type: 'task.moved', taskId: 't2', from: 'todo', to: 'archived' }),
+    [{ event: 'task_status_changed', taskId: 't2', from: 'todo', to: 'archived' }],
+  )
+})
+
+test('eventos sem interesse são ignorados', () => {
+  assert.deepEqual(webhookEventsFor({ type: 'run.started', taskId: 't1' }), [])
+  assert.deepEqual(webhookEventsFor({ type: 'task.upserted' }), [])
+})
+
+test('webhookStatuses filtra task_status_changed e só ele', () => {
+  const moved = to => ({ type: 'task.moved', taskId: 't1', from: 'doing', to })
+  assert.deepEqual(webhookEventsFor(moved('doing'), new Set(), ['done']), [])
+  assert.equal(webhookEventsFor(moved('done'), new Set(), ['done']).length, 1)
+  // lista vazia/ausente = todos os status (comportamento antigo preservado)
+  assert.equal(webhookEventsFor(moved('doing'), new Set(), []).length, 1)
+  assert.equal(webhookEventsFor(moved('doing')).length, 1)
+  // filtro de status não deve calar falha de run
+  const failed = webhookEventsFor({ type: 'run.finished', taskId: 't1', exitCode: 1 }, new Set(), ['done'])
+  assert.equal(failed[0].event, 'run_failed')
+})

@@ -132,3 +132,22 @@ test('PUT /plugins rejeita payload inválido antes de tocar no CLI', async () =>
   assert.equal(desconhecido.statusCode, 400)
   assert.match(json(desconhecido).error, /malware/)
 })
+
+test('PATCH webhookUrl: aceita http(s), rejeita o resto, vazio desliga', async () => {
+  const p = db.projects[0]
+  const patch = webhookUrl => app.inject({ method: 'PATCH', url: `/api/projects/${p.id}`, payload: { webhookUrl } })
+
+  assert.equal(json(await patch('https://hooks.example.com/x')).project.webhookUrl, 'https://hooks.example.com/x')
+  assert.equal((await patch('ftp://nope')).statusCode, 400)
+  assert.equal(json(await patch('')).project.webhookUrl, '')
+})
+
+test('PATCH webhookStatuses: só status válidos, vazio volta a notificar tudo', async () => {
+  const p = db.projects[0]
+  const patch = webhookStatuses => app.inject({ method: 'PATCH', url: `/api/projects/${p.id}`, payload: { webhookStatuses } })
+
+  assert.deepEqual(json(await patch(['done'])).project.webhookStatuses, ['done'])
+  assert.equal((await patch(['nao_existe'])).statusCode, 400)
+  assert.equal((await patch('done')).statusCode, 400)
+  assert.deepEqual(json(await patch([])).project.webhookStatuses, [])
+})

@@ -5,13 +5,15 @@
 // Três categorias de evento (sucesso, ação manual, erro), cada uma com um som
 // escolhível da biblioteca abaixo. A escolha persiste em localStorage.
 
+import { t } from './i18n.js'
+
 export const SOUND_KEY = 'ck.sounds'
 export const SOUND_MAP_KEY = 'ck.sounds.map'
 
 export const CATEGORIES = [
-  { key: 'success', label: 'Sucesso', hint: 'task concluída' },
-  { key: 'attention', label: 'Ação manual', hint: 'decisão humana ou guardrail' },
-  { key: 'error', label: 'Erro', hint: 'run falhou ou estourou limite' },
+  { key: 'success', label: t('Sucesso'), hint: t('task concluída') },
+  { key: 'attention', label: t('Ação manual'), hint: t('decisão humana ou guardrail') },
+  { key: 'error', label: t('Erro'), hint: t('run falhou ou estourou limite') },
 ]
 
 // Cada som é uma sequência de notas [freq Hz, início s, duração s].
@@ -19,11 +21,11 @@ const LIBRARY = {
   chime: { label: 'Chime', type: 'sine', vol: 0.06, notes: [[880, 0, 0.12], [1320, 0.13, 0.18]] },
   ping: { label: 'Ping', type: 'sine', vol: 0.07, notes: [[1568, 0, 0.25]] },
   blip: { label: 'Blip', type: 'square', vol: 0.03, notes: [[660, 0, 0.06], [990, 0.08, 0.1]] },
-  triplo: { label: 'Triplo', type: 'sine', vol: 0.08, notes: [[587, 0, 0.14], [587, 0.22, 0.14], [466, 0.44, 0.22]] },
-  batida: { label: 'Batida', type: 'triangle', vol: 0.12, notes: [[330, 0, 0.1], [330, 0.16, 0.14]] },
-  sirene: { label: 'Sirene', type: 'sine', vol: 0.08, notes: [[622, 0, 0.12], [466, 0.14, 0.12], [622, 0.28, 0.12], [466, 0.42, 0.2]] },
-  grave: { label: 'Grave', type: 'sawtooth', vol: 0.04, notes: [[196, 0, 0.25], [147, 0.28, 0.35]] },
-  none: { label: 'Sem som', notes: [] },
+  triplo: { label: t('Triplo'), type: 'sine', vol: 0.08, notes: [[587, 0, 0.14], [587, 0.22, 0.14], [466, 0.44, 0.22]] },
+  batida: { label: t('Batida'), type: 'triangle', vol: 0.12, notes: [[330, 0, 0.1], [330, 0.16, 0.14]] },
+  sirene: { label: t('Sirene'), type: 'sine', vol: 0.08, notes: [[622, 0, 0.12], [466, 0.14, 0.12], [622, 0.28, 0.12], [466, 0.42, 0.2]] },
+  grave: { label: t('Grave'), type: 'sawtooth', vol: 0.04, notes: [[196, 0, 0.25], [147, 0.28, 0.35]] },
+  none: { label: t('Sem som'), notes: [] },
 }
 
 export const VARIANTS = Object.entries(LIBRARY).map(([key, v]) => ({ key, label: v.label }))

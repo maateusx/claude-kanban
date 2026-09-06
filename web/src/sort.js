@@ -3,6 +3,8 @@
 // é o que roda primeiro.
 // Espelhado em server/src/lib/sort.js — mudou aqui, muda lá.
 
+import { t, locale } from './i18n.js'
+
 export const PRIORITY_RANK = { urgent: 3, high: 2, medium: 1, low: 0 }
 
 const rank = t => PRIORITY_RANK[t?.priority] ?? PRIORITY_RANK.medium
@@ -13,15 +15,15 @@ export const SORTS = {
   created: (a, b) => time(a.created_at) - time(b.created_at),
   recent: (a, b) => time(b.created_at) - time(a.created_at),
   updated: (a, b) => time(b.updated_at) - time(a.updated_at),
-  title: (a, b) => String(a.title || '').localeCompare(String(b.title || ''), 'pt-BR'),
+  title: (a, b) => String(a.title || '').localeCompare(String(b.title || ''), locale()),
 }
 
 export const SORT_OPTIONS = [
-  { key: 'priority', label: 'Prioridade' },
-  { key: 'created', label: 'Mais antigas' },
-  { key: 'recent', label: 'Mais recentes' },
-  { key: 'updated', label: 'Atualizadas' },
-  { key: 'title', label: 'Título (A–Z)' },
+  { key: 'priority', label: t('Prioridade') },
+  { key: 'created', label: t('Mais antigas') },
+  { key: 'recent', label: t('Mais recentes') },
+  { key: 'updated', label: t('Atualizadas') },
+  { key: 'title', label: t('Título (A–Z)') },
 ]
 
 export const DEFAULT_SORT = 'priority'

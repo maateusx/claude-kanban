@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import { nanoid } from 'nanoid'
-import { saveProjects } from '../lib/paths.js'
+import { saveProjects, STATUSES } from '../lib/paths.js'
 import { bootstrapProject, uninstallGuardrails } from '../lib/bootstrap.js'
 import { DEFAULT_GIT, gitSettings } from '../lib/git.js'
 import { normalizeModel } from '../lib/models.js'
@@ -44,7 +44,8 @@ export default function projectRoutes(app, ctx) {
   app.patch('/api/projects/:projectId', (req, reply) => {
     const p = withProjectRecord(ctx, req, reply); if (!p) return
     const { name, description, path: projectPath, skipPermissions, git, defaultModel, auxModel: auxModelIn,
-      autoRun, autoDecompose, devServer, timeoutMs, enrichMode, retry, maxTurns } = req.body || {}
+      autoRun, autoDecompose, devServer, timeoutMs, enrichMode, retry, maxTurns,
+      webhookUrl, webhookStatuses } = req.body || {}
     if (name !== undefined) {
       if (!String(name).trim()) return reply.code(400).send({ error: 'name não pode ser vazio' })
       p.name = String(name).trim()
@@ -76,6 +77,36 @@ export default function projectRoutes(app, ctx) {
         }
         p.timeoutMs = Math.round(ms)
       }
+    }
+    if (maxTurns !== undefined) {
+      if (maxTurns === null || maxTurns === '') {
+        p.maxTurns = null
+      } else {
+        const n = Number(maxTurns)
+        // 0 desliga o teto (comportamento antigo: só o timeout limita a sessão).
+        if (!Number.isInteger(n) || n < 0 || n > MAX_MAX_TURNS) {
+          return reply.code(400).send({ error: `maxTurns deve ser 0 (sem limite) ou um inteiro até ${MAX_MAX_TURNS}` })
+        }
+        p.maxTurns = n
+      }
+    }
+    if (retry !== undefined && typeof retry === 'object') {
+      const next = { ...(p.retry || {}) }
+      if (retry.maxAttempts !== undefined) {
+        const n = Number(retry.maxAttempts)
+        if (!Number.isInteger(n) || n < 1 || n > 10) {
+          return reply.code(400).send({ error: 'retry.maxAttempts deve ser um inteiro entre 1 e 10' })
+        }
+        next.maxAttempts = n
+      }
+      if (retry.backoffMinutes !== undefined) {
+        const n = Number(retry.backoffMinutes)
+        if (!Number.isFinite(n) || n < 0 || n > 1440) {
+          return reply.code(400).send({ error: 'retry.backoffMinutes deve estar entre 0 e 1440' })
+        }
+        next.backoffMinutes = n
+      }
+      p.retry = next
     }
     if (defaultModel !== undefined) {
       if (defaultModel && !normalizeModel(defaultModel)) {
@@ -124,6 +155,21 @@ export default function projectRoutes(app, ctx) {
         return reply.code(400).send({ error: 'enrichMode deve ser off, auto ou always' })
       }
       p.enrichMode = enrichMode
+    }
+    if (webhookUrl !== undefined) {
+      const u = String(webhookUrl || '').trim()
+      if (u && !/^https?:\/\//i.test(u)) {
+        return reply.code(400).send({ error: 'webhookUrl deve começar com http:// ou https://' })
+      }
+      p.webhookUrl = u
+    }
+    if (webhookStatuses !== undefined) {
+      // lista vazia = todos os status (comportamento default), então null/'' desliga o filtro.
+      const list = webhookStatuses || []
+      if (!Array.isArray(list) || list.some(s => !STATUSES.includes(s))) {
+        return reply.code(400).send({ error: `webhookStatuses deve ser um array de status: ${STATUSES.join(', ')}` })
+      }
+      p.webhookStatuses = list
     }
     if (devServer !== undefined && typeof devServer === 'object') {
       const next = { ...(p.devServer || {}) }

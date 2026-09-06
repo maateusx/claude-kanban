@@ -6,8 +6,11 @@ import * as notifications from './notify.js'
 import * as sounds from './sounds.js'
 import * as theme from './theme.js'
 import { DiffDrawer } from './Diff.jsx'
+import { ExtensionsDrawer } from './Extensions.jsx'
+import { SearchSourcesModal, SearchTasksModal } from './SearchSources.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
-import { MODELS, modelLabel } from './models.js'
+import { MODELS, setModels, modelLabel } from './models.js'
+import { t, locale, getLang, setLang, LANGUAGES } from './i18n.js'
 
 const COLUMNS = [
   { key: 'backlog', label: 'Backlog', dot: 'bg-st-backlog' },
@@ -17,16 +20,16 @@ const COLUMNS = [
   { key: 'archived', label: 'Archived', dot: 'bg-st-archived' },
 ]
 const HUMAN_REQUEST_TAG = 'human-request'
-const ENRICH_LABEL = { off: 'não enriquecer', auto: 'Claude decide', always: 'sempre enriquecer' }
+const ENRICH_LABEL = { off: t('não enriquecer'), auto: t('Claude decide'), always: t('sempre enriquecer') }
 
 // Cada view escolhe as colunas visíveis. Archived nunca aparece por padrão.
 const VIEWS = [
-  { key: 'ativas', label: 'Ativas', columns: ['todo', 'doing', 'done'] },
-  { key: 'todas', label: 'Todas', columns: ['backlog', 'todo', 'doing', 'done'] },
+  { key: 'ativas', label: t('Ativas'), columns: ['todo', 'doing', 'done'] },
+  { key: 'todas', label: t('Todas'), columns: ['backlog', 'todo', 'doing', 'done'] },
   { key: 'backlog', label: 'Backlog', columns: ['backlog'] },
-  { key: 'arquivadas', label: 'Arquivadas', columns: ['archived'] },
+  { key: 'arquivadas', label: t('Arquivadas'), columns: ['archived'] },
   // Não é um board: renderiza o painel de custos no lugar das colunas.
-  { key: 'custos', label: 'Custos', columns: [] },
+  { key: 'custos', label: t('Custos'), columns: [] },
 ]
 
 const PRIORITY = {
@@ -84,13 +87,13 @@ export const isFuture = iso => {
 export const fmtWhen = iso => {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
-  const hhmm = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  const hhmm = d.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' })
   const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
   const today = day(new Date())
   const diff = Math.round((day(d) - today) / 86400000)
-  if (diff === 0) return `hoje ${hhmm}`
-  if (diff === 1) return `amanhã ${hhmm}`
-  return `${d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} ${hhmm}`
+  if (diff === 0) return t('hoje {time}', { time: hhmm })
+  if (diff === 1) return t('amanhã {time}', { time: hhmm })
+  return `${d.toLocaleDateString(locale(), { day: '2-digit', month: '2-digit' })} ${hhmm}`
 }
 // Presets de adiamento relativos ao agora, arredondando ao minuto.
 export const inHours = h => new Date(Math.round((Date.now() + h * 3600_000) / 60000) * 60000).toISOString()
@@ -107,10 +110,10 @@ export const nextAt = hour => {
 const ago = iso => {
   if (!iso) return ''
   const min = Math.round((Date.now() - new Date(iso).getTime()) / 60000)
-  if (min < 1) return 'agora'
-  if (min < 60) return `há ${min}min`
-  if (min < 1440) return `há ${Math.round(min / 60)}h`
-  return `há ${Math.round(min / 1440)}d`
+  if (min < 1) return t('agora')
+  if (min < 60) return t('há {n}min', { n: min })
+  if (min < 1440) return t('há {n}h', { n: Math.round(min / 60) })
+  return t('há {n}d', { n: Math.round(min / 1440) })
 }
 
 export default function App() {
@@ -128,7 +131,11 @@ export default function App() {
   const [showGlobalSettings, setShowGlobalSettings] = useState(false)
   const [showSuggest, setShowSuggest] = useState(false)
   const [showIssues, setShowIssues] = useState(false)
+  const [showSources, setShowSources] = useState(false)
+  const [showSearchTasks, setShowSearchTasks] = useState(false)
   const [showClaudeConfig, setShowClaudeConfig] = useState(false)
+  // null = fechado; t('global') | 'project' = escopo inicial da tela de extensões
+  const [extScope, setExtScope] = useState(null)
   const [showAddProject, setShowAddProject] = useState(false)
   const [view, setView] = useState('todas')
   const [sorts, setSorts] = useState(loadSorts)  // colKey -> sort key
@@ -193,7 +200,16 @@ export default function App() {
     if (!selectedIdRef.current && d.projects[0]) setSelectedId(d.projects[0].id)
   }), [])
 
-  useEffect(() => { refreshProjects(); api.health().then(setHealth); api.queue().then(setQueue) }, [refreshProjects])
+  // MODELS é mutado no lugar (ver models.js); `modelsInfo` guarda os metadados e
+  // serve de gatilho de re-render para os selects que importam MODELS direto.
+  const [modelsInfo, setModelsInfo] = useState(null)
+  const applyModels = useCallback(d => { setModels(d.models); setModelsInfo(d); return d }, [])
+  const refreshModels = useCallback(() => api.refreshModels().then(applyModels), [applyModels])
+
+  useEffect(() => {
+    refreshProjects(); api.health().then(setHealth); api.queue().then(setQueue)
+    api.models().then(applyModels).catch(() => {}) // sem servidor, fica o fallback embutido
+  }, [refreshProjects, applyModels])
 
   useEffect(() => {
     if (!selectedId) return
@@ -264,7 +280,7 @@ export default function App() {
     setEnriching(tid)
     api.enrichTask(project.id, tid)
       .then(d => {
-        if (!d.enriched) alert(`Nada alterado${d.reason ? `: ${d.reason}` : '.'}`)
+        if (!d.enriched) alert(d.reason ? t('Nada alterado: {reason}', { reason: d.reason }) : t('Nada alterado.'))
         return api.tasks(project.id).then(x => setTasks(x.tasks))
       })
       .catch(e => alert(e.message))
@@ -326,12 +342,18 @@ export default function App() {
       <Rail
         projects={projects} selectedId={selectedId} onSelect={setSelectedId} queue={queue} usage={usage}
         onAdd={() => setShowAddProject(true)}
+        onRemove={p => {
+          if (!confirm(t('Remover "{name}" do quadro? As tasks e o código continuam no disco.', { name: p.name }))) return
+          api.removeProject(p.id, false)
+            .then(() => { if (p.id === selectedIdRef.current) setSelectedId(null); refreshProjects() })
+            .catch(e => alert(e.message))
+        }}
         onSettings={() => setShowGlobalSettings(true)}
       />
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {!health.claudeAvailable && (
           <div className="border-b border-line bg-accent-soft px-4 py-2 text-body text-danger">
-            CLI <code className="font-mono">claude</code> não encontrado no PATH — execução de tasks indisponível.
+            CLI <code className="font-mono">claude</code> {t('não encontrado no PATH — execução de tasks indisponível.')}
           </div>
         )}
         {project ? (
@@ -344,7 +366,10 @@ export default function App() {
               onPending={() => setShowPending(true)}
               onSuggest={() => setShowSuggest(true)}
               onImportIssues={() => setShowIssues(true)}
+              onSearchSources={() => setShowSources(true)}
+              onSearchTasks={() => setShowSearchTasks(true)}
               onClaudeConfig={() => setShowClaudeConfig(true)}
+              onExtensions={() => setExtScope('project')}
               onSettings={() => setShowSettings(true)}
               onRerun={() => api.rebootstrap(project.id).then(refreshProjects)}
               onAutoRun={() => api.patchProject(project.id, { autoRun: !project.autoRun }).then(refreshProjects)}
@@ -430,7 +455,7 @@ export default function App() {
         <DiffDrawer projectId={project.id} task={diffTask} onClose={() => setDiffTask(null)}
           onResolved={(kind, res) => {
             setDiffTask(null)
-            if (kind === 'approve' && res.pushError) alert(`Merge feito, mas o push falhou:\n${res.pushError}`)
+            if (kind === 'approve' && res.pushError) alert(t('Merge feito, mas o push falhou:\n{err}', { err: res.pushError }))
             api.tasks(project.id).then(d => setTasks(d.tasks))
             refreshProjects()
           }} />
@@ -447,16 +472,29 @@ export default function App() {
         <ImportIssuesModal project={project} onClose={() => setShowIssues(false)}
           onImported={() => { setShowIssues(false); api.tasks(project.id).then(d => setTasks(d.tasks)) }} />
       )}
+      {showSources && project && (
+        <SearchSourcesModal project={project} onClose={() => setShowSources(false)} />
+      )}
+      {showSearchTasks && project && (
+        <SearchTasksModal project={project} onClose={() => setShowSearchTasks(false)}
+          onImported={() => api.tasks(project.id).then(d => setTasks(d.tasks))} />
+      )}
       {showPending && project && (
         <PendingPanel actions={pending} onClose={() => setShowPending(false)}
-          onResolve={aid => api.resolvePending(project.id, aid).then(d => setPending(d.actions))} />
+          onResolve={aid => api.resolvePending(project.id, aid).then(d => setPending(d.actions))}
+          onRun={aid => api.runPending(project.id, aid)} />
       )}
       {showClaudeConfig && project && (
         <ClaudeConfigModal project={project} onClose={() => setShowClaudeConfig(false)} />
       )}
+      {extScope && (
+        <ExtensionsDrawer project={project} initialScope={extScope} onClose={() => setExtScope(null)} />
+      )}
       {showGlobalSettings && (
         <GlobalSettingsModal onClose={() => setShowGlobalSettings(false)}
           queue={queue} onConcurrency={max => api.setConcurrency(max).then(setQueue)}
+          onExtensions={() => { setShowGlobalSettings(false); setExtScope('global') }}
+          modelsInfo={modelsInfo} onRefreshModels={refreshModels}
           notifyOn={notifyOn} onNotify={setNotifyEnabled}
           soundOn={soundOn} onSound={setSoundEnabled}
           soundMap={soundMap} onSoundFor={setSoundFor} />
@@ -522,7 +560,7 @@ function Menu({ items, label = '···' }) {
   }, [open])
   return (
     <div className="relative" ref={ref}>
-      <button onClick={() => setOpen(v => !v)} title="Mais ações"
+      <button onClick={() => setOpen(v => !v)} title={t('Mais ações')}
         className="rounded-[6px] px-2 py-1 text-ink-2 hover:bg-hover">{label}</button>
       {open && (
         <div className="absolute right-0 z-30 mt-1 w-60 rounded-[8px] border border-line bg-bg py-1">
@@ -575,7 +613,7 @@ function HoverTip({ label, disabled, children, className }) {
   )
 }
 
-function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue, usage }) {
+function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onSettings, queue, usage }) {
   const [expanded, toggle] = useRailExpanded()
   return (
     <aside style={{ width: expanded ? 'var(--rail-w-open)' : 'var(--rail-w)' }}
@@ -584,21 +622,21 @@ function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue, usage 
         <span title="claude-kanban"
           className="flex size-8 shrink-0 items-center justify-center rounded-[8px] bg-accent text-meta font-bold text-on-accent">K</span>
         <button onClick={toggle} aria-expanded={expanded}
-          title={expanded ? 'Colapsar sidebar' : 'Expandir sidebar'}
+          title={expanded ? t('Colapsar sidebar') : t('Expandir sidebar')}
           className="rounded-[6px] p-1.5 text-muted hover:bg-hover hover:text-ink-2">{expanded ? '«' : '»'}</button>
       </div>
       <div className={`mt-2 flex flex-1 flex-col gap-2 overflow-y-auto ${expanded ? '' : 'items-center'}`}>
         {projects.map(p => {
           const running = queue.actives?.some(a => a.projectId === p.id)
           return (
-            <HoverTip key={p.id} label={p.name} disabled={expanded}>
+            <HoverTip key={p.id} label={p.name} disabled={expanded} className="group">
               <button onClick={() => onSelect(p.id)}
                 className={`flex w-full items-center gap-2 rounded-[8px] ${expanded ? 'px-1.5 py-1 hover:bg-hover' : 'justify-center'} ${p.id === selectedId ? (expanded ? 'bg-hover' : '') : ''}`}>
                 <span
                   className={`ck-avatar relative flex size-9 shrink-0 items-center justify-center rounded-[8px] text-meta font-semibold ${p.id === selectedId ? 'ring-2 ring-accent' : ''}`}
                   style={{ '--ck-h': tagHue(p.name) }}>
                   {initials(p.name)}
-                  {!p.available && <span title="diretório indisponível" className="absolute -left-1 -top-1 text-danger">!</span>}
+                  {!p.available && <span title={t('diretório indisponível')} className="absolute -left-1 -top-1 text-danger">!</span>}
                   {p.pendingCount > 0 && (
                     <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-warning px-1 text-[10px] font-semibold leading-4 text-on-accent">{p.pendingCount}</span>
                   )}
@@ -608,22 +646,27 @@ function Rail({ projects, selectedId, onSelect, onAdd, onSettings, queue, usage 
                   <span className={`truncate text-body ${p.id === selectedId ? 'font-semibold text-ink' : 'text-ink-2'}`}>{p.name}</span>
                 )}
               </button>
+              {expanded && (
+                <button onClick={() => onRemove(p)} title={t('Remover projeto do quadro')}
+                  aria-label={t('Remover projeto do quadro')}
+                  className="absolute right-1 top-1/2 hidden -translate-y-1/2 rounded-[6px] px-1.5 py-0.5 text-muted hover:bg-hover hover:text-danger group-hover:block">×</button>
+              )}
             </HoverTip>
           )
         })}
-        <HoverTip label="Cadastrar projeto" disabled={expanded}>
+        <HoverTip label={t('Cadastrar projeto')} disabled={expanded}>
           <button onClick={onAdd}
             className={`flex items-center gap-2 rounded-[8px] text-muted hover:bg-hover hover:text-ink-2 ${expanded ? 'w-full px-1.5 py-1' : 'size-9 justify-center border border-dashed border-line-strong'}`}>
             <span className={expanded ? 'flex size-9 shrink-0 items-center justify-center rounded-[8px] border border-dashed border-line-strong' : ''}>+</span>
-            {expanded && <span className="truncate text-body">Cadastrar projeto</span>}
+            {expanded && <span className="truncate text-body">{t('Cadastrar projeto')}</span>}
           </button>
         </HoverTip>
       </div>
       <QueueIndicator queue={queue} />
-      <button onClick={onSettings} title="Configurações globais (valem para todos os projetos)"
+      <button onClick={onSettings} title={t('Configurações globais (valem para todos os projetos)')}
         className={`rounded-[6px] p-1.5 text-muted hover:bg-hover hover:text-ink-2 ${expanded ? 'flex items-center gap-2 text-left' : ''}`}>
         <span>⚙</span>
-        {expanded && <span className="text-body">Config. globais</span>}
+        {expanded && <span className="text-body">{t('Config. globais')}</span>}
       </button>
       <UsageRail usage={usage} />
     </aside>
@@ -635,7 +678,7 @@ function QueueIndicator({ queue }) {
   const waiting = queue.queue?.length || 0
   if (!actives && !waiting) return null
   return (
-    <div title={`${actives} ativa(s) · ${waiting} na fila`}
+    <div title={t('{a} ativa(s) · {q} na fila', { a: actives, q: waiting })}
       className="flex flex-col items-center gap-0.5 text-[10px] text-muted">
       <Dot className="animate-pulse bg-st-doing" />
       <span className="font-mono">{actives}/{actives + waiting}</span>
@@ -648,32 +691,32 @@ const DEFAULT_RETRY = { maxAttempts: 2, backoffMinutes: 10 }
 const DEFAULT_MAX_TURNS = 40
 
 const USAGE_LABEL = {
-  session: 'Sessão (5h)',
-  weekly_all: 'Semanal',
-  weekly_scoped: 'Semanal', // recebe o nome do modelo via scope
+  session: t('Sessão (5h)'),
+  weekly_all: t('Semanal'),
+  weekly_scoped: t('Semanal'), // recebe o nome do modelo via scope
 }
 
 function usageResetLabel(iso) {
   if (!iso) return ''
   const d = new Date(iso)
   const now = new Date()
-  const time = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-  if (d.toDateString() === now.toDateString()) return `reseta ${time}`
-  return `reseta ${d.toLocaleDateString('pt-BR', { weekday: 'short' })} ${time}`
+  const time = d.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' })
+  if (d.toDateString() === now.toDateString()) return t('reseta {time}', { time })
+  return t('reseta {day} {time}', { day: d.toLocaleDateString(locale(), { weekday: 'short' }), time })
 }
 
 // "reseta em 2h 13min" — mais acionável que a hora absoluta quando o reset está perto.
 function usageResetIn(iso) {
   if (!iso) return ''
   const ms = new Date(iso).getTime() - Date.now()
-  if (!Number.isFinite(ms) || ms <= 0) return 'a qualquer momento'
+  if (!Number.isFinite(ms) || ms <= 0) return t('a qualquer momento')
   const mins = Math.round(ms / 60_000)
   const d = Math.floor(mins / 1440)
   const h = Math.floor((mins % 1440) / 60)
   const m = mins % 60
-  if (d) return `em ${d}d ${h}h`
-  if (h) return `em ${h}h ${m}min`
-  return `em ${m}min`
+  if (d) return t('em {d}d {h}h', { d, h })
+  if (h) return t('em {h}h {m}min', { h, m })
+  return t('em {m}min', { m })
 }
 
 function usageBarColor(l) {
@@ -728,7 +771,7 @@ function UsageRail({ usage }) {
 
   return (
     <div className="relative" ref={ref}>
-      <button onClick={() => setOpen(v => !v)} title={`${usageName(session)}: ${pct}% — ver detalhes do uso`}
+      <button onClick={() => setOpen(v => !v)} title={t('{name}: {pct}% — ver detalhes do uso', { name: usageName(session), pct })}
         className="flex w-8 flex-col items-center gap-1 rounded-[6px] pb-1 pt-1 hover:bg-hover">
         <div className="h-1 w-full overflow-hidden rounded-full bg-line">
           <div className={`h-full ${usageBarColor(session)}`} style={{ width: `${pct}%` }} />
@@ -738,7 +781,7 @@ function UsageRail({ usage }) {
       {open && (
         <div className="absolute bottom-0 left-full z-30 ml-2 w-72 rounded-[8px] border border-line bg-bg p-3">
           <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-meta font-semibold text-ink">Uso do plano Claude</h3>
+            <h3 className="text-meta font-semibold text-ink">{t('Uso do plano Claude')}</h3>
             <button onClick={() => setOpen(false)} className="text-muted hover:text-ink">✕</button>
           </div>
           <div className="flex flex-col gap-3">
@@ -759,7 +802,7 @@ function UsageRail({ usage }) {
             ))}
           </div>
           <p className="mt-3 border-t border-line pt-2 text-[10px] text-muted">
-            Percentual da janela consumido. Atualiza a cada 60s.
+            {t('Percentual da janela consumido. Atualiza a cada 60s.')}
           </p>
         </div>
       )}
@@ -770,7 +813,7 @@ function UsageRail({ usage }) {
 /* ------------------------------------------------------------------- header */
 
 function BoardHeader({ project, health, view, onView, query, onQuery, searchRef, pendingCount,
-  onNewTask, onPending, onSuggest, onImportIssues, onClaudeConfig, onSettings, onRerun, onAutoRun, onChanged }) {
+  onNewTask, onPending, onSuggest, onImportIssues, onSearchSources, onSearchTasks, onClaudeConfig, onExtensions, onSettings, onRerun, onAutoRun, onChanged }) {
   return (
     <header className="border-b border-line px-4 py-3">
       <div className="flex items-center gap-2">
@@ -780,34 +823,37 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
         {project.skipPermissions && <Chip className="text-danger">skip-permissions</Chip>}
         <div className="flex-1" />
         <DevServerButton project={project} onChanged={onChanged} />
-        <button onClick={onSettings} title="Configurações do projeto"
+        <button onClick={onSettings} title={t('Configurações do projeto')}
           className="rounded-[6px] border border-line px-3 py-1.5 text-body text-ink-2 hover:bg-hover">
           ⚙ Config
         </button>
         <Menu items={[
-          { label: 'Re-rodar bootstrap (guardrails)', onClick: onRerun },
-          { label: 'Config do Claude (.claude)', onClick: onClaudeConfig },
-          { label: '✦ Sugerir tasks com o Claude', onClick: onSuggest, disabled: !health.claudeAvailable },
-          { label: 'Importar issues do GitHub', onClick: onImportIssues },
+          { label: t('Re-rodar bootstrap (guardrails)'), onClick: onRerun },
+          { label: t('Config do Claude (.claude)'), onClick: onClaudeConfig },
+          { label: t('Extensões (skills, hooks, agents, plugins)'), onClick: onExtensions },
+          { label: t('✦ Sugerir tasks com o Claude'), onClick: onSuggest, disabled: !health.claudeAvailable },
+          { label: t('Importar issues do GitHub'), onClick: onImportIssues },
+          { label: t('Buscar tasks (fontes customizadas)'), onClick: onSearchTasks },
+          { label: t('Fontes de busca'), onClick: onSearchSources },
         ]} />
       </div>
       <div className="mt-3 flex items-center gap-2">
         <Segmented value={view} onChange={onView} options={VIEWS} />
         <input ref={searchRef} value={query} onChange={e => onQuery(e.target.value)}
-          placeholder="Buscar tasks…   /"
+          placeholder={t('Buscar tasks…   /')}
           className="w-64 rounded-[6px] border border-transparent bg-subtle px-3 py-1.5 text-body outline-none placeholder:text-muted focus:border-line focus:bg-bg" />
         <div className="flex-1" />
         <QueuePauseButton project={project} onChanged={onChanged} />
         <button onClick={onAutoRun}
-          title="Com o auto ligado, toda task em To Do entra na fila sozinha (respeitando a concorrência configurada)."
+          title={t('Com o auto ligado, toda task em To Do entra na fila sozinha (respeitando a concorrência configurada).')}
           className={`rounded-[6px] border px-3 py-1.5 text-body ${project.autoRun ? 'border-line bg-subtle text-ink' : 'border-line text-ink-2 hover:bg-hover'}`}>
           {project.autoRun ? <Dot className="mr-1.5 inline-block bg-success" /> : null}
           Auto-pilot {project.autoRun ? 'on' : 'off'}
         </button>
         <Btn onClick={onPending} className={pendingCount ? 'border-warning text-warning' : ''}>
-          Ações manuais{pendingCount ? ` (${pendingCount})` : ''}
+          {t('Ações manuais')}{pendingCount ? ` (${pendingCount})` : ''}
         </Btn>
-        <Btn variant="primary" onClick={onNewTask}>Nova task +</Btn>
+        <Btn variant="primary" onClick={onNewTask}>{t('Nova task +')}</Btn>
       </div>
     </header>
   )
@@ -818,7 +864,7 @@ function DevServerButton({ project, onChanged }) {
   const running = !!project.devServerRunning
   const configured = !!project.devServer?.command
   const launch = () => {
-    if (!configured) { alert('Configure o comando do dev server em Config.'); return }
+    if (!configured) { alert(t('Configure o comando do dev server em Config.')); return }
     setBusy(true)
     api.launchDevServer(project.id).then(onChanged).catch(e => alert(e.message)).finally(() => setBusy(false))
   }
@@ -829,13 +875,13 @@ function DevServerButton({ project, onChanged }) {
   return (
     <div className="flex items-center overflow-hidden rounded-[6px] border border-line">
       <button onClick={launch} disabled={busy}
-        title={configured ? project.devServer.command : 'Configure o comando do dev server em Config'}
+        title={configured ? project.devServer.command : t('Configure o comando do dev server em Config')}
         className="px-3 py-1.5 text-body text-ink-2 hover:bg-hover disabled:opacity-40">
         {running && <Dot className="mr-1.5 inline-block animate-pulse bg-success" />}
         Dev server
       </button>
       {running && (
-        <button onClick={stop} disabled={busy} title="Parar dev server"
+        <button onClick={stop} disabled={busy} title={t('Parar dev server')}
           className="border-l border-line px-2 py-1.5 text-body text-danger hover:bg-hover disabled:opacity-40">✕</button>
       )}
     </div>
@@ -860,7 +906,7 @@ function BranchSelector({ project, onChanged }) {
   const load = doFetch => {
     setBranches(b => doFetch ? b : null)
     api.branches(project.id, doFetch)
-      .then(d => { setBranches(d.branches); if (d.fetchError) alert(`fetch falhou: ${d.fetchError}`) })
+      .then(d => { setBranches(d.branches); if (d.fetchError) alert(t('fetch falhou: {err}', { err: d.fetchError })) })
       .catch(() => setBranches([]))
   }
 
@@ -873,9 +919,9 @@ function BranchSelector({ project, onChanged }) {
     if (name === project.branch) { setOpen(false); return }
     setBusy(true)
     api.checkoutBranch(project.id, name, stash)
-      .then(res => { setOpen(false); if (res.stashed) alert('Mudanças guardadas no stash (git stash) antes de trocar.'); onChanged() })
+      .then(res => { setOpen(false); if (res.stashed) alert(t('Mudanças guardadas no stash (git stash) antes de trocar.')); onChanged() })
       .catch(e => {
-        if (e.canStash && confirm('Há mudanças não commitadas que impedem a troca.\nGuardar no stash e trocar mesmo assim?')) {
+        if (e.canStash && confirm(t('Há mudanças não commitadas que impedem a troca.\nGuardar no stash e trocar mesmo assim?'))) {
           switchTo(name, true); return
         }
         alert(e.message)
@@ -885,7 +931,7 @@ function BranchSelector({ project, onChanged }) {
 
   return (
     <div className="relative" ref={ref}>
-      <button title="Branch atual — clique para trocar" onClick={toggle} disabled={busy}
+      <button title={t('Branch atual — clique para trocar')} onClick={toggle} disabled={busy}
         className="flex items-center gap-1 rounded-[6px] bg-chip px-2 py-0.5 text-meta text-chip-ink hover:bg-line disabled:opacity-40">
         <span className="text-muted">⑃</span>
         <span className="max-w-[16rem] truncate font-mono">{project.branch}</span>
@@ -896,12 +942,12 @@ function BranchSelector({ project, onChanged }) {
           <div className="flex items-center justify-between border-b border-line px-3 py-1.5">
             <span className="text-meta text-muted">branches</span>
             <button onClick={() => load(true)} disabled={busy}
-              title="Buscar branches remotas (git fetch)"
+              title={t('Buscar branches remotas (git fetch)')}
               className="rounded px-1.5 py-0.5 text-meta text-ink-2 hover:bg-hover disabled:opacity-40">↻ fetch</button>
           </div>
           <div className="max-h-72 overflow-auto py-1">
-            {branches === null && <div className="px-3 py-1.5 text-meta text-muted">carregando…</div>}
-            {branches?.length === 0 && <div className="px-3 py-1.5 text-meta text-muted">nenhuma branch</div>}
+            {branches === null && <div className="px-3 py-1.5 text-meta text-muted">{t('carregando…')}</div>}
+            {branches?.length === 0 && <div className="px-3 py-1.5 text-meta text-muted">{t('nenhuma branch')}</div>}
             {branches?.map(b => (
               <button key={b.name} onClick={() => switchTo(b.name)} disabled={busy}
                 className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-meta hover:bg-hover disabled:opacity-40 ${b.current ? 'text-accent' : 'text-ink-2'}`}>
@@ -919,11 +965,11 @@ function BranchSelector({ project, onChanged }) {
 
 function BootstrapBadge({ project, onRerun }) {
   const map = {
-    ok: ['text-success', 'bootstrap ok'],
-    outdated: ['text-warning', 'bootstrap desatualizado — clique para atualizar'],
-    failed: ['text-danger', project.bootstrapError || 'bootstrap falhou — clique para tentar de novo'],
-    missing: ['text-muted', 'sem bootstrap — clique para rodar'],
-    unknown: ['text-muted', 'diretório indisponível'],
+    ok: ['text-success', t('bootstrap ok')],
+    outdated: ['text-warning', t('bootstrap desatualizado — clique para atualizar')],
+    failed: ['text-danger', project.bootstrapError || t('bootstrap falhou — clique para tentar de novo')],
+    missing: ['text-muted', t('sem bootstrap — clique para rodar')],
+    unknown: ['text-muted', t('diretório indisponível')],
   }
   const [cls, title] = map[project.bootstrap] || map.unknown
   return (
@@ -948,11 +994,11 @@ function SortMenu({ value, onChange }) {
   const current = SORT_OPTIONS.find(o => o.key === value) || SORT_OPTIONS[0]
   return (
     <div className="relative" ref={ref}>
-      <button onClick={() => setOpen(v => !v)} title={`Ordenar por — ${current.label}`}
+      <button onClick={() => setOpen(v => !v)} title={t('Ordenar por — {sort}', { sort: current.label })}
         className="rounded-[4px] px-1.5 text-meta text-muted hover:bg-hover hover:text-ink-2">⇅</button>
       {open && (
         <div className="absolute right-0 z-30 mt-1 w-48 rounded-[8px] border border-line bg-bg py-1">
-          <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-muted">Ordenar por</div>
+          <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-muted">{t('Ordenar por')}</div>
           {SORT_OPTIONS.map(o => (
             <button key={o.key} onClick={() => { onChange(o.key); setOpen(false) }}
               className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-meta hover:bg-hover ${o.key === value ? 'text-accent' : 'text-ink-2'}`}>
@@ -972,7 +1018,7 @@ function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pendi
   const ordered = useMemo(() => sortTasks(tasks, sort), [tasks, sort])
   const [archiving, setArchiving] = useState(false)
   const archiveAll = () => {
-    if (!confirm(`Arquivar ${tasks.length} task(s) de ${col.label}?`)) return
+    if (!confirm(t('Arquivar {n} task(s) de {col}?', { n: tasks.length, col: col.label }))) return
     setArchiving(true)
     Promise.resolve(onArchiveAll(ordered.map(t => t.id))).finally(() => setArchiving(false))
   }
@@ -987,13 +1033,13 @@ function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pendi
         <SortMenu value={sort} onChange={onSort} />
         {onArchiveAll && tasks.length > 0 && (
           <button onClick={archiveAll} disabled={archiving}
-            title={`Arquivar todas as tasks de ${col.label}`}
+            title={t('Arquivar todas as tasks de {col}', { col: col.label })}
             className="rounded-[4px] px-1.5 text-meta text-ink-2 hover:bg-hover disabled:opacity-50">
-            {archiving ? 'Arquivando…' : 'Arquivar todas'}
+            {archiving ? t('Arquivando…') : t('Arquivar todas')}
           </button>
         )}
         {onAddTask && (
-          <button onClick={onAddTask} title={`Nova task em ${col.label}`}
+          <button onClick={onAddTask} title={t('Nova task em {col}', { col: col.label })}
             className="rounded-[4px] px-1.5 text-ink-2 hover:bg-hover">+</button>
         )}
       </div>
@@ -1004,13 +1050,13 @@ function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pendi
         ))}
         {tasks.length === 0 && (
           onAddTask ? (
-            <button onClick={onAddTask} title={`Nova task em ${col.label}`}
+            <button onClick={onAddTask} title={t('Nova task em {col}', { col: col.label })}
               className="w-full rounded-[8px] border border-dashed border-line px-3 py-6 text-center text-meta text-muted hover:border-accent hover:text-ink-2">
-              Arraste uma task ou crie com +
+              {t('Arraste uma task ou crie com +')}
             </button>
           ) : (
             <div className="rounded-[8px] border border-dashed border-line px-3 py-6 text-center text-meta text-muted">
-              Nada arquivado
+              {t('Nada arquivado')}
             </div>
           )
         )}
@@ -1057,26 +1103,26 @@ function CardBody({ task, queue, onRun, onOpen, selected, defaultModel, pending 
         <span title={prio.label} className={`text-body ${prio.cls}`}>{prio.arrow}</span>
         {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG).map(tag => <TagChip key={tag} tag={tag} />)}
         {(task.tags || []).includes(HUMAN_REQUEST_TAG) && (
-          <Chip className="text-warning" title="O agente precisa de uma decisão sua — veja a seção Human Request no detalhe.">
-            ⚑ decisão humana
+          <Chip className="text-warning" title={t('O agente precisa de uma decisão sua — veja a seção Human Request no detalhe.')}>
+            {t('⚑ decisão humana')}
           </Chip>
         )}
         <div className="flex-1" />
         {isFuture(task.scheduled_at) && (
-          <Chip className="text-info" title={`Agendada para ${new Date(task.scheduled_at).toLocaleString('pt-BR')}`}>
+          <Chip className="text-info" title={t('Agendada para {when}', { when: new Date(task.scheduled_at).toLocaleString(locale()) })}>
             ⏱ {fmtWhen(task.scheduled_at)}
           </Chip>
         )}
         {waiting.length > 0 && !running && (
           <Chip className="text-warning"
-            title={`Só sai da fila quando concluir: ${waiting.map(d => `${d.id} — ${d.title}`).join(', ')}`}>
-            ⛓ aguardando {waiting.length} dependência{waiting.length > 1 ? 's' : ''}
+            title={t('Só sai da fila quando concluir: {list}', { list: waiting.map(d => `${d.id} — ${d.title}`).join(', ') })}>
+            {waiting.length > 1 ? t('⛓ aguardando {n} dependências', { n: waiting.length }) : t('⛓ aguardando 1 dependência')}
           </Chip>
         )}
-        {queued && <Chip className="text-info">na fila</Chip>}
-        {task.decompose === true && <Chip title="Ao executar, esta task será quebrada em subtasks">✂ quebrar</Chip>}
+        {queued && <Chip className="text-info">{t('na fila')}</Chip>}
+        {task.decompose === true && <Chip title={t('Ao executar, esta task será quebrada em subtasks')}>{t('✂ quebrar')}</Chip>}
         {task.model && task.model !== defaultModel && (
-          <Chip className="font-mono" title={`${modelLabel(task.model)} — difere do default do projeto`}>{task.model}</Chip>
+          <Chip className="font-mono" title={t('{model} — difere do default do projeto', { model: modelLabel(task.model) })}>{task.model}</Chip>
         )}
       </div>
 
@@ -1097,7 +1143,7 @@ function RunStrip({ task, running, openPending, onRun }) {
       <button onPointerDown={e => e.stopPropagation()}
         onClick={e => { e.stopPropagation(); onRun() }}
         className="mt-3 w-full rounded-[6px] bg-subtle px-2.5 py-1.5 text-left text-meta text-ink-2 hover:bg-hover">
-        ▶ Executar
+        {t('▶ Executar')}
       </button>
     )
   }
@@ -1106,7 +1152,7 @@ function RunStrip({ task, running, openPending, onRun }) {
     <div className="mt-3 rounded-[6px] bg-subtle px-2.5 py-2 text-meta">
       {openPending > 0 && (
         <div className="mb-1.5 border-b border-warning/60 pb-1.5 text-warning">
-          {openPending} ação manual pendente{openPending > 1 ? 's' : ''}
+          {openPending > 1 ? t('{n} ações manuais pendentes', { n: openPending }) : t('1 ação manual pendente')}
         </div>
       )}
       {running ? (
@@ -1114,14 +1160,14 @@ function RunStrip({ task, running, openPending, onRun }) {
           <span className="flex gap-0.5">
             {[0, 1, 2].map(i => <Dot key={i} className="ck-dot size-1.5 bg-st-doing" />)}
           </span>
-          <span>rodando</span>
+          <span>{t('rodando')}</span>
           <LiveTimer since={run.started_at} />
           {run.cost_usd != null && <span className="font-mono">· {fmtCost(run.cost_usd)}</span>}
         </div>
       ) : (
         <div className="flex flex-wrap items-center gap-x-1.5 text-ink-2">
           <Dot className={`size-1.5 ${failed ? 'bg-danger' : 'bg-success'}`} />
-          <span>{failed ? `exit ${run.exit_code}` : 'concluído'}</span>
+          <span>{failed ? `exit ${run.exit_code}` : t('concluído')}</span>
           {run.completed_at && <span className="text-muted">· {ago(run.completed_at)}</span>}
           {run.cost_usd != null && <span className="font-mono text-muted">· {fmtCost(run.cost_usd)}</span>}
           {run.duration_ms != null && <span className="text-muted">· {fmtDur(run.duration_ms)}</span>}
@@ -1136,7 +1182,7 @@ function RunStrip({ task, running, openPending, onRun }) {
         <a href={run.pr.url} target="_blank" rel="noreferrer"
           onPointerDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}
           className="mt-1.5 inline-block text-meta text-accent hover:underline">
-          Ver PR{run.pr.number ? ` #${run.pr.number}` : ''} ↗
+          {t('Ver PR')}{run.pr.number ? ` #${run.pr.number}` : ''} ↗
         </a>
       )}
     </div>
@@ -1196,17 +1242,17 @@ function HumanResponseForm({ onSubmit, disabled, hasSession }) {
     <div className="mt-2.5 space-y-2">
       <textarea value={text} onChange={e => setText(e.target.value)} disabled={disabled || sending}
         onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send() }}
-        placeholder="Sua resposta ao agente…"
+        placeholder={t('Sua resposta ao agente…')}
         className="h-24 w-full resize-none rounded-[6px] bg-subtle p-2 text-body outline-none disabled:opacity-40" />
       {error && <div className="text-meta text-danger">{error}</div>}
       <div className="flex items-center gap-2">
         <Btn variant="primary" disabled={disabled || sending || !text.trim()} onClick={send}>
-          {sending ? 'Enviando…' : 'Responder e executar'}
+          {sending ? t('Enviando…') : t('Responder e executar')}
         </Btn>
         <span className="text-meta text-muted">
-          {disabled ? 'A task já está na fila ou rodando.'
-            : hasSession ? 'Continua a sessão anterior (--resume), sem perder o contexto.'
-            : 'Sem sessão anterior: roda do zero, com a resposta no prompt.'}
+          {disabled ? t('A task já está na fila ou rodando.')
+            : hasSession ? t('Continua a sessão anterior (--resume), sem perder o contexto.')
+            : t('Sem sessão anterior: roda do zero, com a resposta no prompt.')}
         </span>
       </div>
     </div>
@@ -1239,17 +1285,17 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
         <Menu items={[
           // Na fila (ainda não começou): a ação disponível é cancelar, não matar.
           queued
-            ? { label: 'Cancelar (tirar da fila)', onClick: onDequeue, danger: true }
-            : { label: running ? 'Matar sessão' : 'Executar agora', onClick: running ? onKill : onRun },
-          { label: enriching ? '✦ Enriquecendo…' : '✦ Enriquecer descrição (Claude)', onClick: onEnrich, disabled: running || queued || enriching },
-          { label: 'Quebrar em subtasks agora', onClick: onDecompose, disabled: running || queued },
-          { label: 'Ver log', onClick: onLog },
-          { label: 'Ver diff', onClick: onDiff, disabled: !run.has_diff },
-          { label: 'Ver PR', onClick: () => window.open(run.pr.url, '_blank', 'noreferrer'), disabled: !run.pr?.url },
-          { label: 'Arquivar', onClick: onArchive, danger: true, disabled: task.status === 'archived' },
-          { label: 'Excluir definitivamente', onClick: () => setConfirmDelete(true), danger: true, disabled: running || queued },
+            ? { label: t('Cancelar (tirar da fila)'), onClick: onDequeue, danger: true }
+            : { label: running ? t('Matar sessão') : t('Executar agora'), onClick: running ? onKill : onRun },
+          { label: enriching ? t('✦ Enriquecendo…') : t('✦ Enriquecer descrição (Claude)'), onClick: onEnrich, disabled: running || queued || enriching },
+          { label: t('Quebrar em subtasks agora'), onClick: onDecompose, disabled: running || queued },
+          { label: t('Ver log'), onClick: onLog },
+          { label: t('Ver diff'), onClick: onDiff, disabled: !run.has_diff },
+          { label: t('Ver PR'), onClick: () => window.open(run.pr.url, '_blank', 'noreferrer'), disabled: !run.pr?.url },
+          { label: t('Arquivar'), onClick: onArchive, danger: true, disabled: task.status === 'archived' },
+          { label: t('Excluir definitivamente'), onClick: () => setConfirmDelete(true), danger: true, disabled: running || queued },
         ]} />
-        <button onClick={onClose} title="Fechar (esc)" className="rounded-[6px] px-2 py-1 text-muted hover:bg-hover hover:text-ink">✕</button>
+        <button onClick={onClose} title={t('Fechar (esc)')} className="rounded-[6px] px-2 py-1 text-muted hover:bg-hover hover:text-ink">✕</button>
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -1263,31 +1309,31 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
         </select>
         <select value={task.model || ''} disabled={running || queued}
           onChange={e => onPatch({ model: e.target.value || null })}
-          title="Modelo desta task (vazio: default do projeto)"
+          title={t('Modelo desta task (vazio: default do projeto)')}
           className="rounded-[6px] bg-chip px-2 py-1 font-mono text-meta text-chip-ink outline-none disabled:opacity-40">
-          <option value="">{project.defaultModel ? `↳ ${project.defaultModel}` : '↳ auto'}</option>
+          <option value="">{project.defaultModel ? `↳ ${project.defaultModel}` : t('↳ auto')}</option>
           {MODELS.map(m => <option key={m.id} value={m.id}>{m.id} ({m.label})</option>)}
         </select>
         <select value={task.decompose === true ? 'on' : task.decompose === false ? 'off' : ''}
           disabled={running || queued}
           onChange={e => onPatch({ decompose: e.target.value === 'on' ? true : e.target.value === 'off' ? false : null })}
-          title="Ao executar: quebrar esta task em subtasks menores em vez de rodá-la"
+          title={t('Ao executar: quebrar esta task em subtasks menores em vez de rodá-la')}
           className="rounded-[6px] bg-chip px-2 py-1 text-meta text-chip-ink outline-none disabled:opacity-40">
-          <option value="">quebrar: {project.autoDecompose ? '↳ auto' : '↳ não'}</option>
-          <option value="on">quebrar: sim</option>
-          <option value="off">quebrar: não</option>
+          <option value="">{t('quebrar')}: {project.autoDecompose ? t('↳ auto') : t('↳ não')}</option>
+          <option value="on">{t('quebrar: sim')}</option>
+          <option value="off">{t('quebrar: não')}</option>
         </select>
         <select value={task.enrich === true ? 'on' : task.enrich === false ? 'off' : ''}
           disabled={running || queued}
           onChange={e => onPatch({ enrich: e.target.value === 'on' ? true : e.target.value === 'off' ? false : null })}
-          title="Enriquecer a descrição na hora do run (vazio: herda a configuração do projeto)"
+          title={t('Enriquecer a descrição na hora do run (vazio: herda a configuração do projeto)')}
           className="rounded-[6px] bg-chip px-2 py-1 text-meta text-chip-ink outline-none disabled:opacity-40">
           <option value="">✦ ↳ {ENRICH_LABEL[project.enrichMode || 'off']}</option>
-          <option value="on">✦ enriquecer</option>
-          <option value="off">✦ não enriquecer</option>
+          <option value="on">{t('✦ enriquecer')}</option>
+          <option value="off">{t('✦ não enriquecer')}</option>
         </select>
         {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG).map(t => <TagChip key={t} tag={t} />)}
-        {(task.tags || []).includes(HUMAN_REQUEST_TAG) && <Chip className="text-warning">aguardando decisão humana</Chip>}
+        {(task.tags || []).includes(HUMAN_REQUEST_TAG) && <Chip className="text-warning">{t('aguardando decisão humana')}</Chip>}
       </div>
 
       {editing ? (
@@ -1297,34 +1343,34 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
           <textarea value={body} onChange={e => setBody(e.target.value)} spellCheck={false}
             className="h-64 w-full resize-none rounded-[6px] bg-subtle p-3 font-mono text-body outline-none" />
           <div className="flex justify-end gap-2">
-            <Btn variant="quiet" onClick={() => { setTitle(task.title); setBody(task.body ?? ''); setEditing(false) }}>Cancelar</Btn>
+            <Btn variant="quiet" onClick={() => { setTitle(task.title); setBody(task.body ?? ''); setEditing(false) }}>{t('Cancelar')}</Btn>
             <Btn variant="primary" disabled={!title.trim()}
-              onClick={() => { onPatch({ title: title.trim(), body }); setEditing(false) }}>Salvar</Btn>
+              onClick={() => { onPatch({ title: title.trim(), body }); setEditing(false) }}>{t('Salvar')}</Btn>
           </div>
         </div>
       ) : (
         <>
           <h2 className="mt-3 text-[17px] font-semibold leading-snug">{task.title}</h2>
-          <div className="mt-1.5 whitespace-pre-wrap text-body text-ink-2">{desc || <Empty>Sem descrição.</Empty>}</div>
-          <button onClick={() => setEditing(true)} className="mt-2 self-start text-meta text-accent hover:underline">Editar</button>
+          <div className="mt-1.5 whitespace-pre-wrap text-body text-ink-2">{desc || <Empty>{t('Sem descrição.')}</Empty>}</div>
+          <button onClick={() => setEditing(true)} className="mt-2 self-start text-meta text-accent hover:underline">{t('Editar')}</button>
         </>
       )}
 
       {confirmDelete && (
         <div className="mt-3 space-y-2 rounded-[8px] border border-danger p-3">
           <div className="text-body text-danger">
-            Excluir esta task apaga o arquivo .md, o diff e o log de vez — sem como desfazer. Confirma?
+            {t('Excluir esta task apaga o arquivo .md, o diff e o log de vez — sem como desfazer. Confirma?')}
           </div>
           <div className="flex gap-2">
-            <Btn variant="danger" onClick={onDelete}>Excluir de vez</Btn>
-            <Btn variant="quiet" onClick={() => setConfirmDelete(false)}>Cancelar</Btn>
+            <Btn variant="danger" onClick={onDelete}>{t('Excluir de vez')}</Btn>
+            <Btn variant="quiet" onClick={() => setConfirmDelete(false)}>{t('Cancelar')}</Btn>
           </div>
         </div>
       )}
 
       {humanRequest && (
         <div className="mt-3 rounded-[8px] border border-warning p-3">
-          <div className="text-meta font-semibold uppercase tracking-wide text-warning">Decisão humana necessária</div>
+          <div className="text-meta font-semibold uppercase tracking-wide text-warning">{t('Decisão humana necessária')}</div>
           <div className="mt-1.5 whitespace-pre-wrap text-body text-ink-2">{humanRequest}</div>
           <HumanResponseForm
             disabled={running || queued}
@@ -1333,61 +1379,61 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
         </div>
       )}
 
-      <Section title="Dependências">
-        {deps.length === 0 ? <Empty>Esta task não depende de nenhuma outra.</Empty> : (
+      <Section title={t('Dependências')}>
+        {deps.length === 0 ? <Empty>{t('Esta task não depende de nenhuma outra.')}</Empty> : (
           <div className="space-y-1.5">
             {deps.map(d => (
               <div key={d.id} className="flex items-center gap-2 rounded-[6px] border border-line p-2 text-body">
                 <Dot className={d.done ? 'bg-success' : 'bg-warning'} />
                 <span className="font-mono text-meta text-muted">{d.id}</span>
                 <span className="min-w-0 flex-1 truncate text-ink-2">{d.title}</span>
-                <span className="text-meta text-muted">{d.done ? 'cumprida' : d.status}</span>
-                <button title="Remover dependência"
+                <span className="text-meta text-muted">{d.done ? t('cumprida') : d.status}</span>
+                <button title={t('Remover dependência')}
                   onClick={() => onPatch({ depends_on: deps.filter(x => x.id !== d.id).map(x => x.id) })}
                   className="text-meta text-danger hover:underline">×</button>
               </div>
             ))}
             <div className="text-meta text-muted">
-              A task fica na fila até todas concluírem — só então entra em execução.
+              {t('A task fica na fila até todas concluírem — só então entra em execução.')}
             </div>
           </div>
         )}
       </Section>
 
-      <Section title="Agendamento">
+      <Section title={t('Agendamento')}>
         <SchedulePicker
           value={task.scheduled_at}
           disabled={running || queued || !['backlog', 'todo'].includes(task.status)}
           onChange={iso => onPatch({ scheduled_at: iso })} />
       </Section>
 
-      <Section title="Execuções"
+      <Section title={t('Execuções')}
         action={running
-          ? <button onClick={onKill} className="text-meta text-danger hover:underline">Matar sessão</button>
+          ? <button onClick={onKill} className="text-meta text-danger hover:underline">{t('Matar sessão')}</button>
           : queued
-            ? <button onClick={onDequeue} className="text-meta text-danger hover:underline">Cancelar (tirar da fila)</button>
+            ? <button onClick={onDequeue} className="text-meta text-danger hover:underline">{t('Cancelar (tirar da fila)')}</button>
             : (run.has_diff || run.pr?.url) ? (
               <span className="flex items-center gap-2">
                 {run.pr?.url && (
                   <a href={run.pr.url} target="_blank" rel="noreferrer" className="text-meta text-accent hover:underline">
-                    Ver PR{run.pr.number ? ` #${run.pr.number}` : ''} ↗
+                    {t('Ver PR')}{run.pr.number ? ` #${run.pr.number}` : ''} ↗
                   </a>
                 )}
-                {run.has_diff && <button onClick={onDiff} className="text-meta text-accent hover:underline">Ver diff</button>}
+                {run.has_diff && <button onClick={onDiff} className="text-meta text-accent hover:underline">{t('Ver diff')}</button>}
               </span>
             ) : null}>
         {!run.started_at && !running ? (
-          <Empty>Nenhuma execução ainda.</Empty>
+          <Empty>{t('Nenhuma execução ainda.')}</Empty>
         ) : (
           <div className="rounded-[6px] border border-line p-2.5 text-meta">
             <div className="flex items-center gap-2">
               <Dot className={running ? 'animate-pulse bg-success' : run.exit_code ? 'bg-danger' : 'bg-muted'} />
               <span className="text-ink-2">
-                {running ? 'Ativa' : run.exit_code ? `Falhou (exit ${run.exit_code})` : 'Concluída'}
+                {running ? t('Ativa') : run.exit_code ? t('Falhou (exit {code})', { code: run.exit_code }) : t('Concluída')}
               </span>
               <div className="flex-1" />
               <button onClick={onLog} className="text-accent hover:underline">
-                {running ? 'Ver log ao vivo' : 'Ver log'}
+                {running ? t('Ver log ao vivo') : t('Ver log')}
               </button>
             </div>
             <div className="mt-1.5 flex flex-wrap gap-x-2 text-muted">
@@ -1402,14 +1448,14 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
         )}
       </Section>
 
-      <Section title="Ações manuais" badge={openPending.length || null}>
-        {openPending.length === 0 ? <Empty>Nenhuma ação pendente.</Empty> : (
+      <Section title={t('Ações manuais')} badge={openPending.length || null}>
+        {openPending.length === 0 ? <Empty>{t('Nenhuma ação pendente.')}</Empty> : (
           <div className="space-y-2">
             {openPending.map(a => (
               <div key={a.id} className="rounded-[6px] border border-line p-2.5">
                 <div className="flex items-start gap-2">
                   <span className="flex-1 text-body text-ink-2">{a.label}</span>
-                  <button onClick={() => onResolve(a.id)} className="text-meta text-accent hover:underline">Resolvido</button>
+                  <button onClick={() => onResolve(a.id)} className="text-meta text-accent hover:underline">{t('Resolvido')}</button>
                 </div>
                 {a.command && (
                   <code className="mt-1.5 block overflow-x-auto rounded-[4px] bg-subtle p-2 font-mono text-[11px] text-ink-2">{a.command}</code>
@@ -1421,10 +1467,10 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
         )}
       </Section>
 
-      <Section title="Resultado">
+      <Section title={t('Resultado')}>
         {result
           ? <div className="whitespace-pre-wrap text-body text-ink-2">{result}</div>
-          : <Empty>O Claude preenche esta seção ao concluir a task.</Empty>}
+          : <Empty>{t('O Claude preenche esta seção ao concluir a task.')}</Empty>}
       </Section>
     </aside>
   )
@@ -1435,22 +1481,22 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
 function SchedulePicker({ value, disabled, onChange }) {
   const scheduled = isFuture(value)
   const presets = [
-    { label: 'em 1h', at: () => inHours(1) },
-    { label: 'em 4h', at: () => inHours(4) },
-    { label: 'hoje 22h', at: () => nextAt(22) },
-    { label: 'amanhã 9h', at: () => nextAt(9) },
+    { label: t('em 1h'), at: () => inHours(1) },
+    { label: t('em 4h'), at: () => inHours(4) },
+    { label: t('hoje 22h'), at: () => nextAt(22) },
+    { label: t('amanhã 9h'), at: () => nextAt(9) },
   ]
   return (
     <div className="space-y-2">
       {scheduled ? (
         <div className="flex items-center gap-2 rounded-[6px] border border-line p-2.5 text-meta">
           <Dot className="bg-info" />
-          <span className="text-ink-2">Entra na fila {fmtWhen(value)}</span>
+          <span className="text-ink-2">{t('Entra na fila')} {fmtWhen(value)}</span>
           <div className="flex-1" />
-          <button onClick={() => onChange(null)} className="text-meta text-danger hover:underline">Cancelar</button>
+          <button onClick={() => onChange(null)} className="text-meta text-danger hover:underline">{t('Cancelar')}</button>
         </div>
       ) : (
-        <Empty>Sem agendamento — roda quando for enfileirada.</Empty>
+        <Empty>{t('Sem agendamento — roda quando for enfileirada.')}</Empty>
       )}
       <div className="flex flex-wrap items-center gap-1.5">
         <input type="datetime-local" disabled={disabled}
@@ -1462,7 +1508,7 @@ function SchedulePicker({ value, disabled, onChange }) {
             className={disabled ? 'opacity-40' : ''}>{p.label}</Chip>
         ))}
       </div>
-      {disabled && <div className="text-meta text-muted">Task já em execução ou fora de Backlog/To Do.</div>}
+      {disabled && <div className="text-meta text-muted">{t('Task já em execução ou fora de Backlog/To Do.')}</div>}
     </div>
   )
 }
@@ -1490,19 +1536,19 @@ function QueuePauseButton({ project, onChanged }) {
   const resume = () => api.resumeQueue(project.id).then(onChanged).catch(e => alert(e.message))
 
   const presets = [
-    { label: 'Adiar 1 hora', at: () => inHours(1) },
-    { label: 'Adiar 4 horas', at: () => inHours(4) },
-    { label: 'Retomar às 22h', at: () => nextAt(22) },
-    { label: 'Retomar amanhã às 9h', at: () => nextAt(9) },
+    { label: t('Adiar 1 hora'), at: () => inHours(1) },
+    { label: t('Adiar 4 horas'), at: () => inHours(4) },
+    { label: t('Retomar às 22h'), at: () => nextAt(22) },
+    { label: t('Retomar amanhã às 9h'), at: () => nextAt(9) },
   ]
 
   if (paused) {
     return (
       <div className="flex items-center overflow-hidden rounded-[6px] border border-warning">
-        <span className="px-3 py-1.5 text-body text-warning" title={new Date(project.queuePausedUntil).toLocaleString('pt-BR')}>
-          ⏸ Fila adiada até {fmtWhen(project.queuePausedUntil)}
+        <span className="px-3 py-1.5 text-body text-warning" title={new Date(project.queuePausedUntil).toLocaleString(locale())}>
+          ⏸ {t('Fila adiada até')} {fmtWhen(project.queuePausedUntil)}
         </span>
-        <button onClick={resume} title="Retomar a fila agora"
+        <button onClick={resume} title={t('Retomar a fila agora')}
           className="border-l border-warning px-2 py-1.5 text-body text-warning hover:bg-hover">✕</button>
       </div>
     )
@@ -1511,9 +1557,9 @@ function QueuePauseButton({ project, onChanged }) {
   return (
     <div className="relative" ref={ref}>
       <button onClick={() => setOpen(v => !v)}
-        title="Adia a fila deste projeto: nada sai dela até o horário escolhido."
+        title={t('Adia a fila deste projeto: nada sai dela até o horário escolhido.')}
         className="rounded-[6px] border border-line px-3 py-1.5 text-body text-ink-2 hover:bg-hover">
-        ⏱ Adiar fila
+        {t('⏱ Adiar fila')}
       </button>
       {open && (
         <div className="absolute right-0 z-30 mt-1 w-64 rounded-[8px] border border-line bg-bg py-1">
@@ -1560,50 +1606,50 @@ function TaskModal({ projectId, onClose, onSave }) {
   }
 
   return (
-    <Modal onClose={onClose} title="Nova task">
+    <Modal onClose={onClose} title={t('Nova task')}>
       <div className="space-y-3">
         {templates.length > 0 && (
           <select value={template} onChange={e => pickTemplate(e.target.value)}
-            title="Template: pré-preenche corpo, tags e prioridade"
+            title={t('Template: pré-preenche corpo, tags e prioridade')}
             className="w-full rounded-[6px] border border-line px-2 py-2 text-body outline-none focus:border-accent">
-            <option value="">Sem template (descrição livre)</option>
+            <option value="">{t('Sem template (descrição livre)')}</option>
             {templates.map(t => (
               <option key={t.id} value={t.id}>{t.title}{t.description ? ` — ${t.description}` : ''}</option>
             ))}
           </select>
         )}
-        <input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="Título"
+        <input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder={t('Título')}
           className="w-full rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
         <div className="flex gap-2">
           <select value={priority} onChange={e => setPriority(e.target.value)}
             className="rounded-[6px] border border-line px-2 py-2 text-body outline-none">
             {Object.entries(PRIORITY).map(([k, p]) => <option key={k} value={k}>{p.label}</option>)}
           </select>
-          <select value={model} onChange={e => setModel(e.target.value)} title="Modelo (vazio: default do projeto)"
+          <select value={model} onChange={e => setModel(e.target.value)} title={t('Modelo (vazio: default do projeto)')}
             className="rounded-[6px] border border-line px-2 py-2 text-body outline-none">
-            <option value="">modelo: default</option>
+            <option value="">{t('modelo: default')}</option>
             {MODELS.map(m => <option key={m.id} value={m.id}>{m.id} ({m.label})</option>)}
           </select>
-          <input value={tags} onChange={e => setTags(e.target.value)} placeholder="tags, separadas, por vírgula"
+          <input value={tags} onChange={e => setTags(e.target.value)} placeholder={t('tags, separadas, por vírgula')}
             className="flex-1 rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
           <input type="datetime-local" value={when} onChange={e => setWhen(e.target.value)}
-            title="Agendar: a task entra na fila sozinha neste horário"
+            title={t('Agendar: a task entra na fila sozinha neste horário')}
             className="rounded-[6px] border border-line px-2 py-2 text-body text-ink-2 outline-none focus:border-accent" />
         </div>
         <textarea value={description} onChange={e => setDescription(e.target.value)}
-          placeholder="Descrição (markdown)" spellCheck={false}
+          placeholder={t('Descrição (markdown)')} spellCheck={false}
           className="h-56 w-full resize-none rounded-[6px] bg-subtle p-3 font-mono text-body outline-none placeholder:text-muted" />
         <label className="flex items-center gap-2 text-body text-ink-2">
           <input type="checkbox" checked={decompose} onChange={e => setDecompose(e.target.checked)}
             className="accent-[var(--color-accent)]" />
-          Quebrar em subtasks menores ao executar (em vez de rodar a task inteira)
+          {t('Quebrar em subtasks menores ao executar (em vez de rodar a task inteira)')}
         </label>
         <div className="flex justify-end gap-2">
-          <Btn variant="quiet" onClick={onClose}>Cancelar</Btn>
+          <Btn variant="quiet" onClick={onClose}>{t('Cancelar')}</Btn>
           <Btn variant="primary" disabled={!title.trim()}
             onClick={() => onSave({ title, priority, tags: splitTags(tags), model: model || null, decompose: decompose || null, description, scheduled_at: fromLocalInput(when), template: template || null })}>
 
-            Criar task
+            {t('Criar task')}
           </Btn>
         </div>
       </div>
@@ -1617,24 +1663,24 @@ function AddProjectModal({ onClose, onAdd }) {
   const [path, setPath] = useState('')
   const [description, setDescription] = useState('')
   return (
-    <Modal onClose={onClose} title="Cadastrar projeto">
+    <Modal onClose={onClose} title={t('Cadastrar projeto')}>
       <form className="space-y-3"
         onSubmit={e => { e.preventDefault(); if (name && path) onAdd(name, path, description) }}>
-        <input autoFocus value={name} onChange={e => setName(e.target.value)} placeholder="Nome do projeto"
+        <input autoFocus value={name} onChange={e => setName(e.target.value)} placeholder={t('Nome do projeto')}
           className="w-full rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
-        <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="Descrição (opcional)"
+        <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder={t('Descrição (opcional)')}
           rows={2}
           className="w-full resize-none rounded-[6px] border border-line px-3 py-2 text-body outline-none placeholder:text-muted focus:border-accent" />
         <div className="flex gap-2">
-          <input value={path} onChange={e => setPath(e.target.value)} placeholder="/caminho/do/projeto"
+          <input value={path} onChange={e => setPath(e.target.value)} placeholder={t('/caminho/do/projeto')}
             className="flex-1 rounded-[6px] border border-line px-3 py-2 font-mono text-body outline-none placeholder:text-muted focus:border-accent" />
           <Btn type="button" onClick={() => api.pickFolder().then(d => { if (d.path) setPath(d.path) }).catch(e => alert(e.message))}>
-            Buscar pasta
+            {t('Buscar pasta')}
           </Btn>
         </div>
         <div className="flex justify-end gap-2">
-          <Btn variant="quiet" type="button" onClick={onClose}>Cancelar</Btn>
-          <Btn variant="primary" type="submit" disabled={!name || !path}>Cadastrar</Btn>
+          <Btn variant="quiet" type="button" onClick={onClose}>{t('Cancelar')}</Btn>
+          <Btn variant="primary" type="submit" disabled={!name || !path}>{t('Cadastrar')}</Btn>
         </div>
       </form>
     </Modal>
@@ -1644,9 +1690,9 @@ function AddProjectModal({ onClose, onAdd }) {
 /* -------------------------------------------------------------------- custos */
 
 const PERIODS = [
-  { key: '7', label: '7 dias' },
-  { key: '30', label: '30 dias' },
-  { key: '0', label: 'Tudo' },
+  { key: '7', label: t('7 dias') },
+  { key: '30', label: t('30 dias') },
+  { key: '0', label: t('Tudo') },
 ]
 
 // Custos de sessão são centavos: 2 casas escondem a maior parte deles.
@@ -1670,7 +1716,7 @@ function CostsView({ project, tasks, onOpen }) {
   }, [project.id, days, tasks])
 
   if (error) return <div className="flex-1 p-6 text-body text-danger">{error}</div>
-  if (!stats) return <div className="flex-1 p-6 text-body text-muted">Carregando…</div>
+  if (!stats) return <div className="flex-1 p-6 text-body text-muted">{t('Carregando…')}</div>
 
   const { totals, byDay, byModel, top } = stats
   const maxDay = Math.max(...byDay.map(d => d.costUsd), 0)
@@ -1680,25 +1726,25 @@ function CostsView({ project, tasks, onOpen }) {
       <div className="mb-4 flex items-center gap-2">
         <Segmented value={days} onChange={setDays} options={PERIODS} />
         <span className="text-meta text-muted">
-          {totals.runs} de {totals.tasks} task(s) já executaram
+          {t('{runs} de {tasks} task(s) já executaram', { runs: totals.runs, tasks: totals.tasks })}
         </span>
       </div>
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Stat label="Custo total" value={fmtUsd(totals.costUsd)} />
-        <Stat label="Custo médio por task" value={fmtUsd(totals.avgCostUsd)} />
-        <Stat label="Taxa de sucesso" value={fmtPct(totals.successRate)}
-          hint={`${totals.successes} exit 0 / ${totals.attempts} tentativa(s)`} />
-        <Stat label="Tempo total" value={fmtDur(totals.durationMs) || '—'}
-          hint={`${totals.numTurns} turno(s)`} />
+        <Stat label={t('Custo total')} value={fmtUsd(totals.costUsd)} />
+        <Stat label={t('Custo médio por task')} value={fmtUsd(totals.avgCostUsd)} />
+        <Stat label={t('Taxa de sucesso')} value={fmtPct(totals.successRate)}
+          hint={t('{n} exit 0 / {a} tentativa(s)', { n: totals.successes, a: totals.attempts })} />
+        <Stat label={t('Tempo total')} value={fmtDur(totals.durationMs) || '—'}
+          hint={t('{n} turno(s)', { n: totals.numTurns })} />
       </div>
 
-      <Panel title="Custo por dia">
+      <Panel title={t('Custo por dia')}>
         {byDay.length === 0 ? <Nothing /> : (
           <div className="flex h-40 items-end gap-1.5">
             {byDay.map(d => (
               <div key={d.date} className="flex min-w-0 flex-1 flex-col items-center gap-1"
-                title={`${d.date} — ${fmtUsd(d.costUsd)} em ${d.runs} run(s)`}>
+                title={t('{date} — {cost} em {n} run(s)', { date: d.date, cost: fmtUsd(d.costUsd), n: d.runs })}>
                 <div className="w-full rounded-t-[3px] bg-accent"
                   style={{ height: `${maxDay ? Math.max(2, (d.costUsd / maxDay) * 120) : 2}px` }} />
                 <span className="truncate text-meta text-muted">{fmtDay(d.date)}</span>
@@ -1708,14 +1754,14 @@ function CostsView({ project, tasks, onOpen }) {
         )}
       </Panel>
 
-      <Panel title="Custo por modelo">
+      <Panel title={t('Custo por modelo')}>
         {byModel.length === 0 ? <Nothing /> : (
           <table className="w-full text-body">
             <tbody>
               {byModel.map(m => (
                 <tr key={m.model} className="border-b border-line last:border-0">
                   <td className="py-1.5 font-mono text-meta">{m.model}</td>
-                  <td className="py-1.5 text-right text-meta text-muted">{m.runs} run(s)</td>
+                  <td className="py-1.5 text-right text-meta text-muted">{t('{n} run(s)', { n: m.runs })}</td>
                   <td className="py-1.5 text-right tabular-nums">{fmtUsd(m.costUsd)}</td>
                 </tr>
               ))}
@@ -1724,7 +1770,7 @@ function CostsView({ project, tasks, onOpen }) {
         )}
       </Panel>
 
-      <Panel title="Top 5 mais caras">
+      <Panel title={t('Top 5 mais caras')}>
         {top.length === 0 ? <Nothing /> : (
           <table className="w-full text-body">
             <tbody>
@@ -1762,13 +1808,13 @@ const Panel = ({ title, children }) => (
   </section>
 )
 
-const Nothing = () => <div className="py-3 text-center text-meta text-muted">Nenhuma execução no período.</div>
+const Nothing = () => <div className="py-3 text-center text-meta text-muted">{t('Nenhuma execução no período.')}</div>
 
 function EmptyProjects({ onAdd }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3">
-      <div className="text-body text-muted">Nenhum projeto cadastrado ainda.</div>
-      <Btn variant="primary" onClick={onAdd}>Cadastrar projeto +</Btn>
+      <div className="text-body text-muted">{t('Nenhum projeto cadastrado ainda.')}</div>
+      <Btn variant="primary" onClick={onAdd}>{t('Cadastrar projeto +')}</Btn>
     </div>
   )
 }
@@ -1822,17 +1868,16 @@ function SuggestModal({ project, onClose, onCreated }) {
   const selectedCount = suggestions.filter((_, i) => selected[i]).length
 
   return (
-    <Modal onClose={phase === 'loading' ? () => {} : onClose} title={`Sugerir tasks — ${project.name}`}>
+    <Modal onClose={phase === 'loading' ? () => {} : onClose} title={t('Sugerir tasks — {project}', { project: project.name })}>
       {error && <div className="mb-3 rounded-[6px] border border-line px-3 py-2 text-body text-danger">{error}</div>}
 
       {phase === 'pick' && (
         <div className="space-y-3">
           <div className="text-body text-ink-2">
-            O Claude vai ler o projeto (somente leitura) e sugerir tasks dos tipos selecionados.
-            As criadas entram no Backlog com as tags <Chip>{SUGGEST_TAG}</Chip> + tipo.
+            {t('O Claude vai ler o projeto (somente leitura) e sugerir tasks dos tipos selecionados. As criadas entram no Backlog com as tags')} <Chip>{SUGGEST_TAG}</Chip> {t('+ tipo.')}
           </div>
           {types === null ? (
-            <div className="text-body text-muted">carregando…</div>
+            <div className="text-body text-muted">{t('carregando…')}</div>
           ) : (
             <div className="grid grid-cols-2 gap-2">
               {Object.entries(types).map(([key, label]) => (
@@ -1848,8 +1893,8 @@ function SuggestModal({ project, onClose, onCreated }) {
             </div>
           )}
           <div className="flex justify-end gap-2">
-            <Btn variant="quiet" onClick={onClose}>Cancelar</Btn>
-            <Btn variant="primary" onClick={analyze} disabled={!pickedKeys.length}>Analisar projeto</Btn>
+            <Btn variant="quiet" onClick={onClose}>{t('Cancelar')}</Btn>
+            <Btn variant="primary" onClick={analyze} disabled={!pickedKeys.length}>{t('Analisar projeto')}</Btn>
           </div>
         </div>
       )}
@@ -1857,22 +1902,22 @@ function SuggestModal({ project, onClose, onCreated }) {
       {phase === 'loading' && (
         <div className="flex flex-col items-center gap-3 py-10 text-body text-ink-2">
           <span className="size-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-          Analisando o projeto… isso pode levar alguns minutos.
+          {t('Analisando o projeto… isso pode levar alguns minutos.')}
         </div>
       )}
 
       {(phase === 'results' || phase === 'creating') && (
         <div className="space-y-3">
           <div className="flex items-center text-body text-ink-2">
-            <span>{suggestions.length} sugestão(ões){costUsd != null ? ` · $${Number(costUsd).toFixed(3)}` : ''}</span>
+            <span>{t('{n} sugestão(ões)', { n: suggestions.length })}{costUsd != null ? ` · $${Number(costUsd).toFixed(3)}` : ''}</span>
             <div className="flex-1" />
             <button onClick={() => setSelected(Object.fromEntries(suggestions.map((_, i) => [i, selectedCount < suggestions.length])))}
               className="text-meta text-accent hover:underline">
-              {selectedCount < suggestions.length ? 'selecionar todas' : 'desmarcar todas'}
+              {selectedCount < suggestions.length ? t('selecionar todas') : t('desmarcar todas')}
             </button>
           </div>
           <div className="max-h-[55vh] space-y-2 overflow-y-auto">
-            {suggestions.length === 0 && <Empty>Nenhuma sugestão retornada.</Empty>}
+            {suggestions.length === 0 && <Empty>{t('Nenhuma sugestão retornada.')}</Empty>}
             {suggestions.map((s, i) => (
               <label key={i} className={`flex cursor-pointer items-start gap-3 rounded-[8px] border p-3 text-body ${selected[i] ? 'border-accent' : 'border-line opacity-60'}`}>
                 <input type="checkbox" checked={!!selected[i]} className="mt-1 accent-[var(--color-accent)]"
@@ -1889,9 +1934,9 @@ function SuggestModal({ project, onClose, onCreated }) {
             ))}
           </div>
           <div className="flex justify-end gap-2">
-            <Btn variant="quiet" onClick={() => setPhase('pick')} disabled={phase === 'creating'}>← Refazer</Btn>
+            <Btn variant="quiet" onClick={() => setPhase('pick')} disabled={phase === 'creating'}>{t('← Refazer')}</Btn>
             <Btn variant="primary" onClick={create} disabled={!selectedCount || phase === 'creating'}>
-              {phase === 'creating' ? 'criando…' : `Criar ${selectedCount} no Backlog`}
+              {phase === 'creating' ? t('criando…') : t('Criar {n} no Backlog', { n: selectedCount })}
             </Btn>
           </div>
         </div>
@@ -1929,19 +1974,19 @@ function ImportIssuesModal({ project, onClose, onImported }) {
   }
 
   return (
-    <Modal onClose={importing ? () => {} : onClose} title={`Importar issues do GitHub — ${project.name}`}>
+    <Modal onClose={importing ? () => {} : onClose} title={t('Importar issues do GitHub — {project}', { project: project.name })}>
       {error && <div className="mb-3 rounded-[6px] border border-line px-3 py-2 text-body text-danger">{error}</div>}
 
       {issues === null ? (
         <div className="flex flex-col items-center gap-3 py-10 text-body text-ink-2">
           <span className="size-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-          Buscando issues abertas com o <code className="font-mono">gh</code>…
+          {t('Buscando issues abertas com o')} <code className="font-mono">gh</code>…
         </div>
       ) : (
         <div className="space-y-3">
           <div className="flex items-center text-body text-ink-2">
             <span>
-              {issues.length} issue(s) aberta(s) — as importadas entram no Backlog com as tags{' '}
+              {t('{n} issue(s) aberta(s) — as importadas entram no Backlog com as tags', { n: issues.length })}{' '}
               <Chip>{ISSUE_TAG}</Chip> + <Chip>gh:&lt;n&gt;</Chip>
             </span>
             <div className="flex-1" />
@@ -1949,12 +1994,12 @@ function ImportIssuesModal({ project, onClose, onImported }) {
               <button onClick={() => setSelected(
                 Object.fromEntries(importable.map(i => [i.number, selectedNumbers.length < importable.length])))}
                 className="text-meta text-accent hover:underline">
-                {selectedNumbers.length < importable.length ? 'selecionar todas' : 'desmarcar todas'}
+                {selectedNumbers.length < importable.length ? t('selecionar todas') : t('desmarcar todas')}
               </button>
             )}
           </div>
           <div className="max-h-[55vh] space-y-2 overflow-y-auto">
-            {issues.length === 0 && !error && <Empty>Nenhuma issue aberta neste repositório.</Empty>}
+            {issues.length === 0 && !error && <Empty>{t('Nenhuma issue aberta neste repositório.')}</Empty>}
             {issues.map(i => (
               <label key={i.number}
                 className={`flex items-start gap-3 rounded-[8px] border p-3 text-body ${i.imported ? 'cursor-default border-line opacity-50' : `cursor-pointer ${selected[i.number] ? 'border-accent' : 'border-line opacity-60'}`}`}>
@@ -1965,7 +2010,7 @@ function ImportIssuesModal({ project, onClose, onImported }) {
                   <span className="flex flex-wrap items-center gap-2">
                     <span className="font-mono text-meta text-muted">#{i.number}</span>
                     <span className="font-medium">{i.title}</span>
-                    {i.imported && <Chip>já importada</Chip>}
+                    {i.imported && <Chip>{t('já importada')}</Chip>}
                     {i.labels.map(l => <Chip key={l}>{l}</Chip>)}
                   </span>
                   {i.body && <span className="mt-1 block line-clamp-3 whitespace-pre-wrap text-meta text-muted">{i.body}</span>}
@@ -1974,9 +2019,9 @@ function ImportIssuesModal({ project, onClose, onImported }) {
             ))}
           </div>
           <div className="flex justify-end gap-2">
-            <Btn variant="quiet" onClick={onClose} disabled={importing}>Cancelar</Btn>
+            <Btn variant="quiet" onClick={onClose} disabled={importing}>{t('Cancelar')}</Btn>
             <Btn variant="primary" onClick={doImport} disabled={!selectedNumbers.length || importing}>
-              {importing ? 'importando…' : `Importar ${selectedNumbers.length} no Backlog`}
+              {importing ? t('importando…') : t('Importar {n} no Backlog', { n: selectedNumbers.length })}
             </Btn>
           </div>
         </div>
@@ -2015,18 +2060,18 @@ function LogDrawer({ projectId, taskId, events, onClose, active, onKill }) {
   return (
     <div className="fixed inset-y-0 right-0 z-40 flex w-[560px] flex-col border-l border-line bg-bg">
       <div className="flex items-center gap-3 border-b border-line px-4 py-3">
-        <span className="text-body font-semibold">Log — <span className="font-mono uppercase">{taskId}</span></span>
+        <span className="text-body font-semibold">{t('Log')} — <span className="font-mono uppercase">{taskId}</span></span>
         {active && <Dot className="animate-pulse bg-success" />}
         <div className="flex-1" />
         <label className="flex items-center gap-1.5 text-meta text-muted">
-          <input type="checkbox" checked={debug} onChange={e => setDebug(e.target.checked)} className="accent-[var(--color-accent)]" /> JSON bruto
+          <input type="checkbox" checked={debug} onChange={e => setDebug(e.target.checked)} className="accent-[var(--color-accent)]" /> {t('JSON bruto')}
         </label>
-        {active && <Btn variant="danger" onClick={onKill}>Matar sessão</Btn>}
+        {active && <Btn variant="danger" onClick={onKill}>{t('Matar sessão')}</Btn>}
         <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
       </div>
       <div className="flex-1 space-y-2 overflow-y-auto p-4 font-mono text-[12px]">
-        {history === null && all.length === 0 && <Empty>Carregando log…</Empty>}
-        {history !== null && all.length === 0 && <Empty>Sem eventos ainda…</Empty>}
+        {history === null && all.length === 0 && <Empty>{t('Carregando log…')}</Empty>}
+        {history !== null && all.length === 0 && <Empty>{t('Sem eventos ainda…')}</Empty>}
         {all.map((e, i) => <LogEvent key={i} event={e} debug={debug} />)}
         <div ref={endRef} />
       </div>
@@ -2057,19 +2102,19 @@ function LogEvent({ event, debug }) {
   if (event.type === 'result') {
     return (
       <div className="rounded-[6px] bg-subtle p-2 text-success">
-        ✓ fim — ${event.total_cost_usd?.toFixed?.(3)} · {(event.duration_ms / 1000).toFixed(0)}s · {event.num_turns} turnos
+        ✓ {t('fim')} — ${event.total_cost_usd?.toFixed?.(3)} · {(event.duration_ms / 1000).toFixed(0)}s · {event.num_turns} {t('turnos')}
       </div>
     )
   }
   if (event.type === 'verify') {
     return (
       <div className={`rounded-[6px] p-2 ${event.ok ? 'bg-subtle text-success' : 'border-l-2 border-danger bg-subtle pl-2 text-danger'}`}>
-        <div>{event.ok ? '✓' : '✕'} verificação — <span className="font-mono">{event.command}</span> (exit {event.exitCode})</div>
+        <div>{event.ok ? '✓' : '✕'} {t('verificação')} — <span className="font-mono">{event.command}</span> (exit {event.exitCode})</div>
         {!event.ok && <pre className="mt-1 whitespace-pre-wrap break-all text-ink-2">{event.text}</pre>}
       </div>
     )
   }
-  if (event.type === 'system') return <div className="text-muted">[{event.subtype}] sessão {event.session_id?.slice(0, 8)}</div>
+  if (event.type === 'system') return <div className="text-muted">[{event.subtype}] {t('sessão')} {event.session_id?.slice(0, 8)}</div>
   return <div className={deny ? 'border-l-2 border-danger pl-2 text-danger' : 'text-muted'}>{JSON.stringify(event).slice(0, 200)}</div>
 }
 const summarize = input => {
@@ -2078,28 +2123,59 @@ const summarize = input => {
   return String(s).slice(0, 80)
 }
 
-function PendingPanel({ actions, onClose, onResolve }) {
+function PendingPanel({ actions, onClose, onResolve, onRun }) {
   const pend = actions.filter(a => a.status === 'pending')
   const done = actions.filter(a => a.status !== 'pending')
   return (
-    <Modal onClose={onClose} title="Ações manuais pendentes">
+    <Modal onClose={onClose} title={t('Ações manuais pendentes')}>
       <div className="max-h-[60vh] space-y-3 overflow-y-auto">
-        {pend.length === 0 && <Empty>Nenhuma ação pendente.</Empty>}
-        {pend.map(a => (
-          <div key={a.id} className="rounded-[8px] border border-line p-3 text-body">
-            <div className="flex items-center justify-between gap-3">
-              <span className="flex items-center gap-2 font-medium">
-                <Dot className="bg-warning" />{a.label}
-              </span>
-              <Btn onClick={() => onResolve(a.id)}>Marcar como resolvido</Btn>
-            </div>
-            {a.command && <code className="mt-2 block overflow-x-auto rounded-[4px] bg-subtle p-2 font-mono text-[11px] text-ink-2">{a.command}</code>}
-            <div className="mt-1.5 font-mono text-[11px] text-muted">{a.timestamp}{a.taskId ? ` · task ${a.taskId}` : ''} · {a.id}</div>
-          </div>
-        ))}
-        {done.length > 0 && <div className="pt-2 text-meta text-muted">{done.length} resolvida(s)</div>}
+        {pend.length === 0 && <Empty>{t('Nenhuma ação pendente.')}</Empty>}
+        {pend.map(a => <PendingItem key={a.id} action={a} onResolve={onResolve} onRun={onRun} />)}
+        {done.length > 0 && <div className="pt-2 text-meta text-muted">{t('{n} resolvida(s)', { n: done.length })}</div>}
       </div>
     </Modal>
+  )
+}
+
+// O comando foi bloqueado para o Claude pelos guardrails; rodar daqui é uma
+// decisao explicita do humano, entao o resultado fica visivel no proprio item.
+function PendingItem({ action: a, onResolve, onRun }) {
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState(null)
+  const run = () => {
+    setRunning(true); setResult(null)
+    onRun(a.id)
+      .then(r => setResult(r))
+      .catch(e => setResult({ exitCode: null, error: e.message, output: '' }))
+      .finally(() => setRunning(false))
+  }
+  const failed = result && (result.exitCode !== 0 || result.error)
+  return (
+    <div className="rounded-[8px] border border-line p-3 text-body">
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-2 font-medium">
+          <Dot className="bg-warning" />{a.label}
+        </span>
+        <span className="flex shrink-0 gap-2">
+          {a.command && (
+            <Btn onClick={run} disabled={running}>{running ? t('Executando…') : t('Executar comando')}</Btn>
+          )}
+          <Btn onClick={() => onResolve(a.id)}>{t('Marcar como resolvido')}</Btn>
+        </span>
+      </div>
+      {a.command && <code className="mt-2 block overflow-x-auto rounded-[4px] bg-subtle p-2 font-mono text-[11px] text-ink-2">{a.command}</code>}
+      {result && (
+        <div className="mt-2">
+          <div className={`text-meta ${failed ? 'text-danger' : 'text-success'}`}>
+            {result.error ? t('erro: {err}', { err: result.error }) : `exit ${result.exitCode}`}
+          </div>
+          <pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap break-all rounded-[4px] bg-subtle p-2 font-mono text-[11px] text-ink-2">
+            {result.output || t('(sem saída)')}
+          </pre>
+        </div>
+      )}
+      <div className="mt-1.5 font-mono text-[11px] text-muted">{a.timestamp}{a.taskId ? ` · task ${a.taskId}` : ''} · {a.id}</div>
+    </div>
   )
 }
 
@@ -2196,18 +2272,18 @@ function DevServerSettings({ project, onPatch }) {
     <div className="space-y-3 rounded-[8px] border border-line p-3">
       <div className="text-meta font-semibold uppercase tracking-wide text-muted">Dev server</div>
       <label className="block">
-        <span className="text-ink">Comando</span>
+        <span className="text-ink">{t('Comando')}</span>
         <input value={command} onChange={e => setCommand(e.target.value)} onBlur={save}
           placeholder="npm run dev"
           className="mt-1 w-full rounded-[6px] bg-subtle px-2 py-1.5 font-mono text-body outline-none placeholder:text-muted" />
-        <span className="mt-1 block text-meta text-muted">roda no diretório do projeto ({project.path})</span>
+        <span className="mt-1 block text-meta text-muted">{t('roda no diretório do projeto')} ({project.path})</span>
       </label>
       <label className="block">
         <span className="text-ink">URL</span>
         <input value={url} onChange={e => setUrl(e.target.value)} onBlur={save}
           placeholder="http://localhost:3000"
           className="mt-1 w-full rounded-[6px] bg-subtle px-2 py-1.5 font-mono text-body outline-none placeholder:text-muted" />
-        <span className="mt-1 block text-meta text-muted">aberta no Chrome ~2,5s após iniciar o comando</span>
+        <span className="mt-1 block text-meta text-muted">{t('aberta no Chrome ~2,5s após iniciar o comando')}</span>
       </label>
     </div>
   )
@@ -2221,7 +2297,7 @@ const CONFIG_GROUPS = [
   { key: 'agents', label: 'Agents' },
   { key: 'commands', label: 'Commands' },
   { key: 'plugins', label: 'Plugins' },
-  { key: 'outros', label: 'Outros' },
+  { key: 'outros', label: t('Outros') },
 ]
 
 function ClaudeConfigModal({ project, onClose }) {
@@ -2239,7 +2315,7 @@ function ClaudeConfigModal({ project, onClose }) {
   useEffect(() => { loadList() }, [project.id])
 
   const open = rel => {
-    if (dirty && !confirm('Descartar alterações não salvas neste arquivo?')) return
+    if (dirty && !confirm(t('Descartar alterações não salvas neste arquivo?'))) return
     setSelected(rel); setLoading(true); setError(null)
     api.claudeConfigFile(project.id, rel)
       .then(d => { setContent(d.content); setOriginal(d.content) })
@@ -2264,15 +2340,15 @@ function ClaudeConfigModal({ project, onClose }) {
       <div className="fixed inset-0 z-40 bg-scrim" onMouseDown={onClose} />
       <div className="fixed inset-y-0 right-0 z-40 flex w-[900px] max-w-full flex-col border-l border-line bg-bg">
         <div className="flex items-center gap-3 border-b border-line px-5 py-3">
-          <h2 className="font-semibold">Config do Claude — {project.name}</h2>
+          <h2 className="font-semibold">{t('Config do Claude')} — {project.name}</h2>
           <span className="text-meta text-muted">settings · mcp · hooks · skills · agents · commands</span>
           <div className="flex-1" />
           <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
         </div>
         <div className="flex min-h-0 flex-1">
           <div className="w-72 shrink-0 overflow-y-auto border-r border-line py-2">
-            {files === null && <div className="px-4 py-2 text-meta text-muted">carregando…</div>}
-            {files?.length === 0 && <div className="px-4 py-2 text-meta text-muted">Nenhum arquivo de config encontrado. Rode o bootstrap para criar .claude/settings.json.</div>}
+            {files === null && <div className="px-4 py-2 text-meta text-muted">{t('carregando…')}</div>}
+            {files?.length === 0 && <div className="px-4 py-2 text-meta text-muted">{t('Nenhum arquivo de config encontrado. Rode o bootstrap para criar .claude/settings.json.')}</div>}
             {grouped.map(g => (
               <div key={g.key} className="mb-1">
                 <div className="px-4 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted">{g.label}</div>
@@ -2289,18 +2365,18 @@ function ClaudeConfigModal({ project, onClose }) {
           </div>
           <div className="flex min-w-0 flex-1 flex-col">
             {!selected ? (
-              <div className="flex flex-1 items-center justify-center text-body text-muted">Selecione um arquivo para ver/editar.</div>
+              <div className="flex flex-1 items-center justify-center text-body text-muted">{t('Selecione um arquivo para ver/editar.')}</div>
             ) : (
               <>
                 <div className="flex items-center gap-3 border-b border-line px-4 py-2">
                   <span className="truncate font-mono text-meta text-ink-2">{selected}</span>
                   <div className="flex-1" />
-                  {savedAt > 0 && !dirty && <span className="text-meta text-success">salvo ✓</span>}
-                  <Btn variant="primary" onClick={save} disabled={!dirty || saving}>{saving ? 'salvando…' : 'Salvar'}</Btn>
+                  {savedAt > 0 && !dirty && <span className="text-meta text-success">{t('salvo ✓')}</span>}
+                  <Btn variant="primary" onClick={save} disabled={!dirty || saving}>{saving ? t('salvando…') : t('Salvar')}</Btn>
                 </div>
                 {error && <div className="border-b border-line px-4 py-2 text-meta text-danger">{error}</div>}
                 {loading ? (
-                  <div className="flex flex-1 items-center justify-center text-body text-muted">carregando…</div>
+                  <div className="flex flex-1 items-center justify-center text-body text-muted">{t('carregando…')}</div>
                 ) : (
                   <textarea value={content} onChange={e => setContent(e.target.value)} spellCheck={false}
                     className="flex-1 resize-none bg-subtle p-4 font-mono text-meta leading-relaxed text-ink outline-none" />
@@ -2314,7 +2390,7 @@ function ClaudeConfigModal({ project, onClose }) {
   )
 }
 
-function SettingsModal({ project, onClose, onPatch, onRemove }) {
+export function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const [confirmRemove, setConfirmRemove] = useState(0)
   const [name, setName] = useState(project.name)
   const [description, setDescription] = useState(project.description || '')
@@ -2326,6 +2402,8 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
   const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
   const [verifyCommand, setVerifyCommand] = useState(project.verifyCommand || '')
+  const [webhookUrl, setWebhookUrl] = useState(project.webhookUrl || '')
+  const whStatuses = project.webhookStatuses || []
   const retry = project.retry || DEFAULT_RETRY
   const [maxAttempts, setMaxAttempts] = useState(String(retry.maxAttempts))
   const [backoffMin, setBackoffMin] = useState(String(retry.backoffMinutes))
@@ -2370,73 +2448,71 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
       <div className="fixed inset-0 z-40 bg-scrim" onMouseDown={onClose} />
       <div className="fixed inset-y-0 right-0 z-40 flex w-[560px] max-w-full flex-col border-l border-line bg-bg">
         <div className="flex items-center gap-3 border-b border-line px-5 py-3">
-          <h2 className="font-semibold">Configurações — {project.name}</h2>
+          <h2 className="font-semibold">{t('Configurações')} — {project.name}</h2>
           <div className="flex-1" />
           <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
         </div>
         <div className="flex-1 space-y-4 overflow-y-auto p-5 text-body">
         <label className="flex items-center gap-3">
-          <span>Nome</span>
+          <span>{t('Nome')}</span>
           <input value={name} onChange={e => setName(e.target.value)}
             onBlur={() => { const v = name.trim(); if (!v) return setName(project.name); if (v !== project.name) onPatch({ name: v }) }}
             onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
             className="flex-1 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
         </label>
         <label className="flex items-start gap-3">
-          <span className="mt-1">Descrição</span>
+          <span className="mt-1">{t('Descrição')}</span>
           <textarea value={description} rows={2} onChange={e => setDescription(e.target.value)}
             onBlur={() => { if (description.trim() !== (project.description || '')) onPatch({ description: description.trim() }) }}
-            placeholder="Descrição do projeto (opcional)"
+            placeholder={t('Descrição do projeto (opcional)')}
             className="flex-1 resize-none rounded-[6px] border border-line px-2 py-1 text-body outline-none placeholder:text-muted focus:border-accent" />
         </label>
         <label className="flex items-center gap-3">
-          <span>Pasta raiz</span>
+          <span>{t('Pasta raiz')}</span>
           <input value={projPath} onChange={e => setProjPath(e.target.value)}
             onBlur={() => { const v = projPath.trim(); if (!v) return setProjPath(project.path); if (v !== project.path) onPatch({ path: v }) }}
             onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
             className="flex-1 rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
           <Btn type="button" onClick={() => api.pickFolder().then(d => { if (d.path && d.path !== project.path) { setProjPath(d.path); onPatch({ path: d.path }) } }).catch(e => alert(e.message))}>
-            Buscar pasta
+            {t('Buscar pasta')}
           </Btn>
         </label>
 
         <label className="flex items-center gap-3">
-          <span>Modelo default</span>
+          <span>{t('Modelo default')}</span>
           <select value={project.defaultModel || ''} onChange={e => onPatch({ defaultModel: e.target.value || null })}
             className="rounded-[6px] border border-line px-2 py-1 text-body outline-none">
-            <option value="">default do claude-code</option>
+            <option value="">{t('default do claude-code')}</option>
             {MODELS.map(m => <option key={m.id} value={m.id}>{m.id} ({m.label})</option>)}
           </select>
-          <span className="text-meta text-muted">tasks sem modelo próprio usam este</span>
+          <span className="text-meta text-muted">{t('tasks sem modelo próprio usam este')}</span>
         </label>
 
         <label className="flex items-start gap-3">
-          <span className="mt-1">Enriquecer descrição ao executar</span>
+          <span className="mt-1">{t('Enriquecer descrição ao executar')}</span>
           <span className="flex-1">
             <select value={project.enrichMode || 'off'} onChange={e => onPatch({ enrichMode: e.target.value })}
               className="rounded-[6px] border border-line px-2 py-1 text-body outline-none">
               {Object.entries(ENRICH_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
             </select>
             <span className="mt-1 block text-meta text-muted">
-              Antes de implementar, o agente reescreve a "## Descrição" para ficar mais clara e com contexto
-              do código. "Claude decide": só reescreve se julgar a descrição vaga. Cada task pode sobrescrever
-              isso no detalhe (seletor ✦).
+              {t('Antes de implementar, o agente reescreve a "## Descrição" para ficar mais clara e com contexto do código. "Claude decide": só reescreve se julgar a descrição vaga. Cada task pode sobrescrever isso no detalhe (seletor ✦).')}
             </span>
           </span>
         </label>
 
         <label className="flex items-center gap-3">
-          <span>Timeout da execução (minutos)</span>
+          <span>{t('Timeout da execução (minutos)')}</span>
           <input type="number" min={1} max={240} value={timeoutMin}
             onChange={e => setTimeoutMin(e.target.value)}
             onBlur={commitTimeout}
             onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
             className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
-          <span className="text-meta text-muted">entre 1 e 240 min. Vale a partir do próximo run.</span>
+          <span className="text-meta text-muted">{t('entre 1 e 240 min. Vale a partir do próximo run.')}</span>
         </label>
 
         <label className="flex items-start gap-3">
-          <span className="mt-1">Teto de turnos</span>
+          <span className="mt-1">{t('Teto de turnos')}</span>
           <span className="flex-1">
             <input type="number" min={0} max={500} value={maxTurns}
               onChange={e => setMaxTurns(e.target.value)}
@@ -2444,15 +2520,13 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
               onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
               className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
             <span className="mt-1 block text-meta text-muted">
-              Cada turno da sessão reenvia todo o histórico, então uma task que se perde custa muito mais que
-              uma task longa e objetiva. Ao estourar o teto a task volta para "A fazer" com <code>blocked</code>,
-              sem nova tentativa automática. 0 = sem limite (só o timeout).
+              {t('Cada turno da sessão reenvia todo o histórico, então uma task que se perde custa muito mais que uma task longa e objetiva. Ao estourar o teto a task volta para "A fazer" com')} <code>blocked</code>{t(', sem nova tentativa automática. 0 = sem limite (só o timeout).')}
             </span>
           </span>
         </label>
 
         <label className="flex items-start gap-3">
-          <span className="mt-1">Comando de verificação</span>
+          <span className="mt-1">{t('Comando de verificação')}</span>
           <span className="flex-1">
             <input value={verifyCommand} onChange={e => setVerifyCommand(e.target.value)}
               onBlur={() => onPatch({ verifyCommand })}
@@ -2460,13 +2534,12 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
               placeholder="npm test"
               className="w-full rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
             <span className="mt-1 block text-meta text-muted">
-              Rodado no worktree da task depois do run. Se falhar, a task volta para "A fazer" com a saída
-              no log de erros em vez de ir para "Concluído". Vazio: sem verificação.
+              {t('Rodado no worktree da task depois do run. Se falhar, a task volta para "A fazer" com a saída no log de erros em vez de ir para "Concluído". Vazio: sem verificação.')}
             </span>
           </span>
         </label>
         <div className="flex items-start gap-3">
-          <span className="mt-1">Retentativas</span>
+          <span className="mt-1">{t('Retentativas')}</span>
           <span className="flex-1">
             <span className="flex items-center gap-2">
               <input type="number" min={1} max={10} value={maxAttempts}
@@ -2474,70 +2547,106 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
                 onBlur={commitRetry}
                 onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
                 className="w-16 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
-              <span className="text-meta text-muted">tentativas antes de marcar <code>blocked</code></span>
+              <span className="text-meta text-muted">{t('tentativas antes de marcar')} <code>blocked</code></span>
               <input type="number" min={0} max={1440} value={backoffMin}
                 onChange={e => setBackoffMin(e.target.value)}
                 onBlur={commitRetry}
                 onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
                 className="w-16 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
-              <span className="text-meta text-muted">min de espera entre elas</span>
+              <span className="text-meta text-muted">{t('min de espera entre elas')}</span>
             </span>
             <span className="mt-1 block text-meta text-muted">
-              Com backoff maior que zero e auto-pilot ligado, uma task que falha é reagendada para daqui a
-              N minutos em vez de voltar imediatamente para a fila. 0 = volta no próximo tick, o que na prática
-              paga duas sessões inteiras pela mesma falha determinística.
+              {t('Com backoff maior que zero e auto-pilot ligado, uma task que falha é reagendada para daqui a N minutos em vez de voltar imediatamente para a fila. 0 = volta no próximo tick, o que na prática paga duas sessões inteiras pela mesma falha determinística.')}
             </span>
           </span>
         </div>
         <div className="rounded-[8px] border border-line p-3">
-          <GitCheck label="Desmembrar tasks automaticamente"
-            desc="Antes de executar, o Claude avalia cada task sem opção própria de quebra: se ela for grande demais, é desmembrada em subtasks menores em vez de rodar inteira."
+          <GitCheck label={t('Desmembrar tasks automaticamente')}
+            desc={t('Antes de executar, o Claude avalia cada task sem opção própria de quebra: se ela for grande demais, é desmembrada em subtasks menores em vez de rodar inteira.')}
             checked={!!project.autoDecompose}
             onChange={v => onPatch({ autoDecompose: v })} />
         </div>
 
         <PluginSettings project={project} />
 
+        <label className="flex items-start gap-3">
+          <span className="mt-1">Webhook</span>
+          <span className="flex-1">
+            <input value={webhookUrl} onChange={e => setWebhookUrl(e.target.value)}
+              onBlur={() => { const v = webhookUrl.trim(); if (v && !/^https?:\/\//i.test(v)) return setWebhookUrl(project.webhookUrl || ''); if (v !== (project.webhookUrl || '')) onPatch({ webhookUrl: v }) }}
+              onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+              placeholder="https://hooks.slack.com/..."
+              className="w-full rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
+            <span className="mt-1 block text-meta text-muted">
+              POST com JSON quando uma task <strong>muda de status</strong> (<code>task_status_changed</code>), quando um run
+              <strong> falha</strong> (<code>run_failed</code>) ou quando <strong>precisa de humano</strong>
+              (<code>human_request</code> e <code>pending_action</code>) — para saber sem o board aberto. Vazio: desligado.
+            </span>
+          </span>
+        </label>
+
+        <div className="flex items-start gap-3">
+          <span className="mt-1">Status avisados</span>
+          <span className="flex-1">
+            <span className="flex flex-wrap gap-x-4 gap-y-1">
+              {COLUMNS.map(c => {
+                const on = whStatuses.includes(c.key)
+                return (
+                  <label key={c.key} className="flex items-center gap-1.5">
+                    <input type="checkbox" checked={on} className="accent-[var(--color-accent)]"
+                      onChange={() => onPatch({ webhookStatuses: on ? whStatuses.filter(s => s !== c.key) : [...whStatuses, c.key] })} />
+                    <span className={on ? 'text-ink' : 'text-muted'}>{c.label}</span>
+                  </label>
+                )
+              })}
+            </span>
+            <span className="mt-1 block text-meta text-muted">
+              Restringe o <code>task_status_changed</code> aos status marcados — ex.: só <strong>Done</strong> avisa
+              quando a task conclui. Nenhum marcado = <strong>todos</strong>. Os outros eventos passam sempre.
+            </span>
+          </span>
+        </div>
+
         <DevServerSettings project={project} onPatch={onPatch} />
 
         <div className="space-y-3 rounded-[8px] border border-line p-3">
           <div className="text-meta font-semibold uppercase tracking-wide text-muted">Git</div>
           <label className={`flex items-center gap-3 ${g.useCurrentBranch ? 'opacity-40' : ''}`}>
-            <span>Branch principal</span>
+            <span>{t('Branch principal')}</span>
             <input value={baseBranch} disabled={!!g.useCurrentBranch}
               onChange={e => setBaseBranch(e.target.value)}
               onBlur={() => patchGit({ baseBranch: baseBranch.trim() || 'main' })}
               placeholder="main"
               className="w-40 rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
-            <span className="text-meta text-muted">o desenvolvimento parte dela</span>
+            <span className="text-meta text-muted">{t('o desenvolvimento parte dela')}</span>
           </label>
-          <GitCheck label="Dar pull na branch principal antes de iniciar cada task"
+          <GitCheck label={t('Dar pull na branch principal antes de iniciar cada task')}
             checked={!!g.pullBeforeStart} disabled={!!g.useCurrentBranch}
             onChange={v => patchGit({ pullBeforeStart: v })} />
-          <GitCheck label="Usar a branch atual (não trocar para a principal)"
-            desc="Ignora a branch principal e o pull: a task parte do estado atual do repositório."
+          <GitCheck label={t('Usar a branch atual (não trocar para a principal)')}
+            desc={t('Ignora a branch principal e o pull: a task parte do estado atual do repositório.')}
             checked={!!g.useCurrentBranch}
             onChange={v => patchGit({ useCurrentBranch: v })} />
-          <GitCheck label="Commitar/push em branch nova (kanban/<task-id>)"
+          <GitCheck label={t('Commitar/push em branch nova (kanban/<task-id>)')}
             desc={g.useWorktree
-              ? 'Com worktree ativo a branch nova é obrigatória (exigência do git).'
-              : 'Desmarcado: commita na branch de partida. Atenção: os guardrails bloqueiam commit em main/master.'}
+              ? t('Com worktree ativo a branch nova é obrigatória (exigência do git).')
+              : t('Desmarcado: commita na branch de partida. Atenção: os guardrails bloqueiam commit em main/master.')}
             checked={!!g.useWorktree || !!g.commitToNewBranch} disabled={!!g.useWorktree}
             onChange={v => patchGit({ commitToNewBranch: v })} />
-          <GitCheck label="Usar worktree isolado por task"
-            desc="Cada task roda em um worktree próprio (~/.claude-kanban/worktrees), sem mexer no seu checkout."
+          <GitCheck label={t('Usar worktree isolado por task')}
+            desc={t('Cada task roda em um worktree próprio (~/.claude-kanban/worktrees), sem mexer no seu checkout.')}
             checked={!!g.useWorktree}
             onChange={v => patchGit({ useWorktree: v })} />
-          <GitCheck label="Push automático ao concluir"
-            desc="Desmarcado: a task só commita local; você faz o push manualmente."
+          <GitCheck label={t('Push automático ao concluir')}
+            desc={t('Desmarcado: a task só commita local; você faz o push manualmente.')}
             checked={!!g.autoPush}
             onChange={v => patchGit({ autoPush: v })} />
-          <GitCheck label="Abrir PR automaticamente (gh pr create)"
-            desc={g.autoPush ? 'Requer o GitHub CLI (gh) autenticado no repositório.' : 'Requer push automático ativo.'}
+          <GitCheck label={t('Abrir PR automaticamente (gh pr create)')}
+            desc={g.autoPush ? t('Requer o GitHub CLI (gh) autenticado no repositório.') : t('Requer push automático ativo.')}
             checked={!!g.autoPush && !!g.autoPR} disabled={!g.autoPush}
             onChange={v => patchGit({ autoPR: v })} />
-          <GitCheck label="Gerar descrição da PR automaticamente"
-            desc="Desmarcado: a PR sai com descrição mínima, para você escrever depois."
+          <GitCheck label={t('Gerar descrição da PR automaticamente')}
+            desc={t('Desmarcado: a PR sai com descrição mínima, para você escrever depois.')}
             checked={!!g.autoPRDescription} disabled={!g.autoPush || !g.autoPR}
             onChange={v => patchGit({ autoPRDescription: v })} />
         </div>
@@ -2547,36 +2656,34 @@ function SettingsModal({ project, onClose, onPatch, onRemove }) {
           <span>
             <span className="font-medium text-danger">Skip permissions (--dangerously-skip-permissions)</span>
             <span className="mt-1 block text-meta text-muted">
-              Suprime os prompts de permissão nas próximas sessões deste projeto. Os guardrails determinísticos
-              (não ler .env, não commitar em main, não deletar branches/arquivos externos) continuam ativos.
-              Sessões já em execução não são afetadas.
+              {t('Suprime os prompts de permissão nas próximas sessões deste projeto. Os guardrails determinísticos (não ler .env, não commitar em main, não deletar branches/arquivos externos) continuam ativos. Sessões já em execução não são afetadas.')}
             </span>
           </span>
         </label>
-        <Btn onClick={() => api.rebootstrap(project.id).then(() => onPatch({}))}>Re-rodar bootstrap (atualizar guardrails/skill)</Btn>
+        <Btn onClick={() => api.rebootstrap(project.id).then(() => onPatch({}))}>{t('Re-rodar bootstrap (atualizar guardrails/skill)')}</Btn>
         <div className="border-t border-line pt-4">
           {confirmRemove === 0 && (
             <div className="flex gap-3">
-              <Btn onClick={() => onRemove(false)}>Remover projeto do app</Btn>
-              <Btn variant="danger" onClick={() => setConfirmRemove(1)}>Remover + desinstalar guardrails</Btn>
+              <Btn onClick={() => onRemove(false)}>{t('Remover projeto do app')}</Btn>
+              <Btn variant="danger" onClick={() => setConfirmRemove(1)}>{t('Remover + desinstalar guardrails')}</Btn>
             </div>
           )}
           {confirmRemove === 1 && (
             <div className="space-y-2 rounded-[8px] border border-danger p-3">
-              <div className="text-danger">Isso reverte o merge no settings.json e apaga .claude/claude-kanban/ (incluindo as tasks). Confirma?</div>
+              <div className="text-danger">{t('Isso reverte o merge no settings.json e apaga .claude/claude-kanban/ (incluindo as tasks). Confirma?')}</div>
               <div className="flex gap-2">
-                <Btn variant="danger" onClick={() => setConfirmRemove(2)}>Sim, continuar</Btn>
-                <Btn variant="quiet" onClick={() => setConfirmRemove(0)}>Cancelar</Btn>
+                <Btn variant="danger" onClick={() => setConfirmRemove(2)}>{t('Sim, continuar')}</Btn>
+                <Btn variant="quiet" onClick={() => setConfirmRemove(0)}>{t('Cancelar')}</Btn>
               </div>
             </div>
           )}
           {confirmRemove === 2 && (
             <div className="space-y-2 rounded-[8px] border border-danger p-3">
-              <div className="font-medium text-danger">Última confirmação: desinstalar guardrails e remover o projeto?</div>
+              <div className="font-medium text-danger">{t('Última confirmação: desinstalar guardrails e remover o projeto?')}</div>
               <div className="flex gap-2">
                 <button onClick={() => onRemove(true)}
-                  className="rounded-[6px] bg-danger px-3 py-1.5 text-meta font-semibold text-on-accent">DESINSTALAR</button>
-                <Btn variant="quiet" onClick={() => setConfirmRemove(0)}>Cancelar</Btn>
+                  className="rounded-[6px] bg-danger px-3 py-1.5 text-meta font-semibold text-on-accent">{t('DESINSTALAR')}</button>
+                <Btn variant="quiet" onClick={() => setConfirmRemove(0)}>{t('Cancelar')}</Btn>
               </div>
             </div>
           )}
@@ -2609,32 +2716,32 @@ function GlobalPauseButton({ queue, usage, onPause, onResume }) {
     return (
       <div className="flex shrink-0 items-center overflow-hidden rounded-[6px] border border-warning">
         <span className="px-2.5 py-1 text-meta text-warning"
-          title="Nada sai da fila; as sessões que já estavam rodando terminam normalmente.">
-          ⏸ Fila global pausada{queue.pausedUntil ? ` até ${fmtWhen(queue.pausedUntil)}` : ''}
+          title={t('Nada sai da fila; as sessões que já estavam rodando terminam normalmente.')}>
+          ⏸ {t('Fila global pausada')}{queue.pausedUntil ? ` ${t('até')} ${fmtWhen(queue.pausedUntil)}` : ''}
         </span>
-        <button onClick={onResume} title="Retomar a fila global agora"
-          className="border-l border-warning px-2 py-1 text-meta text-warning hover:bg-hover">Retomar</button>
+        <button onClick={onResume} title={t('Retomar a fila global agora')}
+          className="border-l border-warning px-2 py-1 text-meta text-warning hover:bg-hover">{t('Retomar')}</button>
       </div>
     )
   }
 
   const presets = [
-    { label: 'Pausar até eu retomar', at: () => null },
-    { label: 'Pausar por 1 hora', at: () => inHours(1) },
-    { label: 'Pausar por 4 horas', at: () => inHours(4) },
-    { label: 'Retomar amanhã às 9h', at: () => nextAt(9) },
+    { label: t('Pausar até eu retomar'), at: () => null },
+    { label: t('Pausar por 1 hora'), at: () => inHours(1) },
+    { label: t('Pausar por 4 horas'), at: () => inHours(4) },
+    { label: t('Retomar amanhã às 9h'), at: () => nextAt(9) },
   ]
 
   return (
     <div className="relative shrink-0" ref={ref}>
       <button onClick={() => setOpen(v => !v)}
         title={critical
-          ? `${usageName(critical)} em ${usagePct(critical)}% — considere pausar a fila global.`
-          : 'Pausa global: nenhuma task de nenhum projeto sai da fila; as ativas terminam.'}
+          ? t('{name} em {pct}% — considere pausar a fila global.', { name: usageName(critical), pct: usagePct(critical) })
+          : t('Pausa global: nenhuma task de nenhum projeto sai da fila; as ativas terminam.')}
         className={`rounded-[6px] border px-2.5 py-1 text-meta ${critical
           ? 'border-danger text-danger hover:bg-hover'
           : 'border-line text-ink-2 hover:bg-hover'}`}>
-        ⏸ {critical ? `Pausar tudo — uso em ${usagePct(critical)}%` : 'Pausar tudo'}
+        ⏸ {critical ? t('Pausar tudo — uso em {pct}%', { pct: usagePct(critical) }) : t('Pausar tudo')}
       </button>
       {open && (
         <div className="absolute bottom-full left-0 z-30 mb-1 w-64 rounded-[8px] border border-line bg-bg py-1">
@@ -2643,7 +2750,7 @@ function GlobalPauseButton({ queue, usage, onPause, onResume }) {
               className="block w-full px-3 py-1.5 text-left text-body text-ink-2 hover:bg-hover">{p.label}</button>
           ))}
           <p className="border-t border-line px-3 py-2 text-[10px] text-muted">
-            Modo drenar: as sessões em execução terminam, nada novo começa.
+            {t('Modo drenar: as sessões em execução terminam, nada novo começa.')}
           </p>
         </div>
       )}
@@ -2651,46 +2758,154 @@ function GlobalPauseButton({ queue, usage, onPause, onResume }) {
   )
 }
 
-function GlobalSettingsModal({ onClose, queue, onConcurrency, notifyOn, onNotify, soundOn, onSound, soundMap, onSoundFor }) {
+const SETTINGS_TABS = [
+  { key: 'execucao', label: t('Execução') },
+  { key: 'aparencia', label: t('Aparência') },
+  { key: 'alertas', label: t('Alertas') },
+  { key: 'extensoes', label: t('Extensões') },
+]
+
+function GlobalSettingsModal({ onClose, queue, onConcurrency, notifyOn, onNotify, soundOn, onSound, soundMap, onSoundFor, modelsInfo, onRefreshModels, onExtensions }) {
+  const [tab, setTab] = useState('execucao')
   const maxConc = queue?.maxConcurrency || 1
   return (
-    <Modal onClose={onClose} title="Configurações globais">
+    <Modal onClose={onClose} title={t('Configurações globais')}>
+      <div className="-mt-1 mb-4 flex gap-4 border-b border-line">
+        {SETTINGS_TABS.map(t => (
+          <button key={t.key} onClick={() => setTab(t.key)}
+            className={`-mb-px border-b-2 px-0.5 pb-1.5 text-body ${tab === t.key
+              ? 'border-accent text-ink'
+              : 'border-transparent text-muted hover:text-ink-2'}`}>{t.label}</button>
+        ))}
+      </div>
       <div className="space-y-4 text-body">
-        <div className="flex items-center gap-3">
-          <span>Tasks simultâneas</span>
-          <div className="flex items-center gap-1 rounded-[6px] border border-line px-1.5 py-0.5 text-meta">
-            <button onClick={() => onConcurrency(maxConc - 1)} disabled={maxConc <= 1}
-              className="px-1 text-muted hover:text-ink disabled:opacity-30">−</button>
-            <span className="font-mono text-ink">{maxConc}×</span>
-            <button onClick={() => onConcurrency(maxConc + 1)} disabled={maxConc >= 8}
-              className="px-1 text-muted hover:text-ink disabled:opacity-30">+</button>
+        {tab === 'execucao' && (
+          <>
+            <div className="flex items-center gap-3">
+              <span>{t('Tasks simultâneas')}</span>
+              <div className="flex items-center gap-1 rounded-[6px] border border-line px-1.5 py-0.5 text-meta">
+                <button onClick={() => onConcurrency(maxConc - 1)} disabled={maxConc <= 1}
+                  className="px-1 text-muted hover:text-ink disabled:opacity-30">−</button>
+                <span className="font-mono text-ink">{maxConc}×</span>
+                <button onClick={() => onConcurrency(maxConc + 1)} disabled={maxConc >= 8}
+                  className="px-1 text-muted hover:text-ink disabled:opacity-30">+</button>
+              </div>
+              <span className="text-meta text-muted">{t('execuções em paralelo entre todos os projetos. Projetos sem worktree isolado ficam limitados a 1 por vez.')}</span>
+            </div>
+            <ModelsSetting info={modelsInfo} onRefresh={onRefreshModels} />
+          </>
+        )}
+        {tab === 'aparencia' && (
+          <>
+            <LanguageSetting />
+            <ThemeSetting />
+          </>
+        )}
+        {tab === 'alertas' && (
+          <>
+            <NotificationsSetting notifyOn={notifyOn} onNotify={onNotify} />
+            <SoundSetting soundOn={soundOn} onSound={onSound} soundMap={soundMap} onSoundFor={onSoundFor} />
+          </>
+        )}
+        {tab === 'extensoes' && (
+          <div className="flex items-start gap-3 rounded-[8px] border border-line p-3">
+            <span className="flex-1">
+              <span className="font-medium">{t('Extensões')}</span>
+              <span className="mt-1 block text-meta text-muted">
+                {t('Skills, agents, commands, hooks e plugins instalados em ~/.claude (valem para todos os projetos). Dentro de cada projeto dá para instalar/ativar só para ele.')}
+              </span>
+            </span>
+            <button onClick={onExtensions}
+              className="shrink-0 rounded-[6px] border border-line px-2 py-1 text-meta text-ink-2 hover:text-ink">
+              {t('gerenciar')}
+            </button>
           </div>
-          <span className="text-meta text-muted">execuções em paralelo entre todos os projetos. Projetos sem worktree isolado ficam limitados a 1 por vez.</span>
-        </div>
-        <ThemeSetting />
-        <NotificationsSetting notifyOn={notifyOn} onNotify={onNotify} />
-        <SoundSetting soundOn={soundOn} onSound={onSound} soundMap={soundMap} onSoundFor={onSoundFor} />
+        )}
       </div>
     </Modal>
   )
 }
 
-function ThemeSetting() {
-  const [mode, setMode] = useState(theme.loadTheme)
-  const pick = m => { setMode(m); theme.saveTheme(m); theme.applyTheme(m) }
+// Idioma da UI: mesma política do tema (localStorage, vale para todos os projetos).
+// Trocar recarrega a página — ver i18n.js.
+function LanguageSetting() {
+  const [lang, setLangState] = useState(getLang)
   return (
-    <div className="flex items-start gap-3 rounded-[8px] border border-line p-3">
-      <div className="flex-1">
-        <span className="font-medium">Tema</span>
-        <span className="mt-1 block text-meta text-muted">
-          Claro, escuro ou seguindo o sistema. Vale para todos os projetos.
-        </span>
+    <div className="rounded-[8px] border border-line p-3">
+      <span className="font-medium">{t('Idioma')}</span>
+      <span className="mt-1 block text-meta text-muted">
+        {t('Vale para todos os projetos, neste navegador. Ao trocar, a página recarrega.')}
+      </span>
+      <div className="mt-3 flex gap-2">
+        {LANGUAGES.map(l => (
+          <button key={l.key} onClick={() => { setLangState(l.key); setLang(l.key) }}
+            className={`rounded-[6px] border px-2.5 py-1 text-meta ${lang === l.key
+              ? 'border-accent text-accent'
+              : 'border-line text-ink-2 hover:text-ink'}`}>{l.label}</button>
+        ))}
       </div>
-      <Segmented value={mode} onChange={pick} options={[
-        { key: 'light', label: 'Claro' },
-        { key: 'dark', label: 'Escuro' },
-        { key: 'system', label: 'Sistema' },
-      ]} />
+    </div>
+  )
+}
+
+// Preferência de tema: mora no localStorage e só mexe no <html>, então o estado
+// não precisa subir para o App. Os rótulos ficam aqui, e não em theme.js, porque
+// passam por t() — theme.js roda antes do render, no boot.
+function ThemeSetting() {
+  const [pref, setPref] = useState(theme.loadTheme)
+  const pick = v => { theme.saveTheme(v); theme.applyTheme(v); setPref(v) }
+  const labels = { light: t('Claro'), dark: t('Escuro'), system: t('Sistema') }
+  return (
+    <div className="rounded-[8px] border border-line p-3">
+      <span className="font-medium">{t('Tema')}</span>
+      <span className="mt-1 block text-meta text-muted">
+        {t('Vale para todos os projetos, neste navegador. “Sistema” acompanha o modo claro/escuro do SO em tempo real.')}
+      </span>
+      <div className="mt-3 flex gap-2">
+        {theme.MODES.map(m => (
+          <button key={m} onClick={() => pick(m)}
+            className={`rounded-[6px] border px-2.5 py-1 text-meta ${pref === m
+              ? 'border-accent text-accent'
+              : 'border-line text-ink-2 hover:text-ink'}`}>{labels[m]}</button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// Busca a lista oficial na Models API da Anthropic (usa o login do Claude Code).
+// Sem refresh nunca feito, a UI roda com o catálogo embutido no código.
+function ModelsSetting({ info, onRefresh }) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState(null)
+  const models = info?.models || MODELS
+  const run = async () => {
+    setBusy(true); setErr(null)
+    try { await onRefresh() } catch (e) { setErr(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <div className="rounded-[8px] border border-line p-3">
+      <div className="flex items-start gap-3">
+        <span className="flex-1">
+          <span className="font-medium">{t('Modelos')}</span>
+          <span className="mt-1 block text-meta text-muted">
+            {t('{n} modelo(s) disponíveis para tasks e para o default de cada projeto.', { n: models.length })}{' '}
+            {info?.fetchedAt
+              ? t('Atualizado da Anthropic em {date}.', { date: new Date(info.fetchedAt).toLocaleString(locale()) })
+              : t('Usando a lista embutida no app — atualize para buscar os modelos atuais da Anthropic.')}
+          </span>
+          {err && <span className="mt-1 block text-meta text-danger">{err}</span>}
+        </span>
+        <button onClick={run} disabled={busy}
+          className="shrink-0 rounded-[6px] border border-line px-2 py-1 text-meta text-ink-2 hover:text-ink disabled:opacity-40">
+          {busy ? t('buscando…') : t('atualizar modelos')}
+        </button>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1">
+        {models.map(m => (
+          <span key={m.id} className="rounded-[4px] bg-subtle px-1.5 py-0.5 font-mono text-[10px] text-muted" title={m.label}>{m.id}</span>
+        ))}
+      </div>
     </div>
   )
 }
@@ -2704,13 +2919,13 @@ function NotificationsSetting({ notifyOn, onNotify }) {
       <input type="checkbox" checked={!!notifyOn} disabled={!supported || perm === 'denied'}
         onChange={e => toggle(e.target.checked)} className="mt-0.5 accent-[var(--color-accent)]" />
       <span>
-        <span className="font-medium">Notificações</span>
+        <span className="font-medium">{t('Notificações')}</span>
         <span className="mt-1 block text-meta text-muted">
           {!supported
-            ? 'Este navegador não suporta notificações do sistema.'
+            ? t('Este navegador não suporta notificações do sistema.')
             : perm === 'denied'
-              ? 'O navegador bloqueou as notificações deste site — libere nas permissões do site para ativar.'
-              : 'Avisa quando um run termina (sucesso, falha ou pedido de decisão humana) e quando uma ação é bloqueada pelos guardrails. Clicar na notificação abre a task. Vale para todos os projetos.'}
+              ? t('O navegador bloqueou as notificações deste site — libere nas permissões do site para ativar.')
+              : t('Avisa quando um run termina (sucesso, falha ou pedido de decisão humana) e quando uma ação é bloqueada pelos guardrails. Clicar na notificação abre a task. Vale para todos os projetos.')}
         </span>
       </span>
     </label>
@@ -2725,11 +2940,11 @@ function SoundSetting({ soundOn, onSound, soundMap, onSoundFor }) {
         <input type="checkbox" checked={!!soundOn} disabled={!supported}
           onChange={e => onSound(e.target.checked)} className="mt-0.5 accent-[var(--color-accent)]" />
         <span>
-          <span className="font-medium">Sons</span>
+          <span className="font-medium">{t('Sons')}</span>
           <span className="mt-1 block text-meta text-muted">
             {!supported
-              ? 'Este navegador não suporta Web Audio.'
-              : 'Alertas sonoros por categoria de evento. Independente das notificações do sistema. Trocar um som já toca o preview.'}
+              ? t('Este navegador não suporta Web Audio.')
+              : t('Alertas sonoros por categoria de evento. Independente das notificações do sistema. Trocar um som já toca o preview.')}
           </span>
         </span>
       </label>
@@ -2743,7 +2958,7 @@ function SoundSetting({ soundOn, onSound, soundMap, onSoundFor }) {
                 {sounds.VARIANTS.map(v => <option key={v.key} value={v.key}>{v.label}</option>)}
               </select>
               <button onClick={() => sounds.playVariant(soundMap[cat.key])}
-                className="px-1 text-muted hover:text-ink" title="Ouvir">▶</button>
+                className="px-1 text-muted hover:text-ink" title={t('Ouvir')}>▶</button>
               <span className="text-meta text-muted">{cat.hint}</span>
             </div>
           ))}
@@ -2775,17 +2990,17 @@ function QueueBar({ queue, tasks, projects, usage, onOpen, onKill, onReorder, on
       {(queue.actives || []).map(a => (
         <div key={a.taskId} className="flex shrink-0 items-center gap-2 rounded-[6px] bg-subtle px-3 py-1.5">
           <Dot className="animate-pulse bg-st-doing" />
-          <button onClick={() => onOpen(a, true)} title="Ver log ao vivo" className="text-ink-2 hover:text-ink hover:underline">{label(a)}</button>
-          <button onClick={() => onKill(a.taskId)} className="text-danger hover:underline">matar</button>
+          <button onClick={() => onOpen(a, true)} title={t('Ver log ao vivo')} className="text-ink-2 hover:text-ink hover:underline">{label(a)}</button>
+          <button onClick={() => onKill(a.taskId)} className="text-danger hover:underline">{t('matar')}</button>
         </div>
       ))}
       {items.map((q, i) => (
         <div key={q.taskId} className="flex shrink-0 items-center gap-1.5 rounded-[6px] bg-subtle px-3 py-1.5 text-ink-2">
           <span className="font-mono text-muted">#{i + 1}</span>
-          <button onClick={() => onOpen(q, false)} title="Ver detalhes" className="hover:text-ink hover:underline">{label(q)}</button>
+          <button onClick={() => onOpen(q, false)} title={t('Ver detalhes')} className="hover:text-ink hover:underline">{label(q)}</button>
           <button onClick={() => move(i, -1)} className="px-0.5 text-muted hover:text-ink">◂</button>
           <button onClick={() => move(i, 1)} className="px-0.5 text-muted hover:text-ink">▸</button>
-          <button onClick={() => onDequeue(q.taskId)} title="Cancelar (tirar da fila)"
+          <button onClick={() => onDequeue(q.taskId)} title={t('Cancelar (tirar da fila)')}
             className="px-0.5 text-muted hover:text-danger">✕</button>
         </div>
       ))}

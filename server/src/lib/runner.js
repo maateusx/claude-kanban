@@ -680,7 +680,6 @@ export class Runner {
       this.start(a.projectId, a.taskId, { noResume: true, human: a.answer })
       return
     }
-
     if (a.killed && !a.timedOut) {
       updateTask(project.path, a.taskId, { status: 'todo', run: runMeta })
       appendToSection(project.path, a.taskId, 'Log de erros',

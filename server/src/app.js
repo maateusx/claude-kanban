@@ -10,11 +10,15 @@ import { retrySettings, turnLimit } from './lib/runner.js'
 import { auxModel } from './lib/models.js'
 import { normalizeKeys } from './lib/plugins.js'
 import { getUsage } from './lib/usage.js'
+import { modelsCatalog, refreshModels } from './lib/models.js'
+import { listSearchSources } from './lib/searchSources.js'
 import projectRoutes from './routes/projects.js'
 import taskRoutes from './routes/tasks.js'
 import gitRoutes from './routes/git.js'
 import runRoutes from './routes/run.js'
 import configRoutes from './routes/config.js'
+import extensionRoutes from './routes/extensions.js'
+import searchSourceRoutes from './routes/search-sources.js'
 
 // Monta o app Fastify sem side effects (nada de lockfile, watcher ou listen) —
 // é isso que permite testar as rotas com app.inject().
@@ -41,6 +45,7 @@ export async function buildApp(deps) {
       maxTurns: turnLimit(p) ?? 0,
       auxModel: auxModel(p),
       plugins: normalizeKeys(p.plugins),
+      searchSources: listSearchSources(p),
       available,
       bootstrap: bootstrapErrors.has(p.id) ? 'failed' : (available ? bootstrapStatus(p.path) : 'unknown'),
       bootstrapError: bootstrapErrors.get(p.id) || null,
@@ -79,6 +84,15 @@ export async function buildApp(deps) {
   await app.register(cors, { origin: (origin, cb) => cb(null, !origin || allowedOrigins.has(origin)) })
   await app.register(websocket)
 
+  // Uma página em https (ex.: o Launchpad) alcançando 127.0.0.1 é Private Network
+  // Access: o Chrome só aceita se o preflight responder com este header.
+  app.addHook('onSend', (req, reply, payload, done) => {
+    if (req.headers.origin && allowedOrigins.has(req.headers.origin)) {
+      reply.header('Access-Control-Allow-Private-Network', 'true')
+    }
+    done(null, payload)
+  })
+
   app.addHook('onRequest', (req, reply, done) => {
     if (req.headers.origin && !allowedOrigins.has(req.headers.origin)) {
       return reply.code(403).send({ error: 'origin não permitido' })
@@ -98,6 +112,15 @@ export async function buildApp(deps) {
 
   // ---- usage/limites do plano Claude (sessão 5h + semanais) ----
   app.get('/api/usage', () => getUsage())
+
+  // ---- catálogo de modelos ----
+  app.get('/api/models', () => modelsCatalog())
+
+  // Busca a lista oficial na Models API da Anthropic (botão "atualizar modelos").
+  app.post('/api/models/refresh', async (req, reply) => {
+    try { return await refreshModels() }
+    catch (e) { return reply.code(502).send({ error: e.message }) }
+  })
 
   // ---- folder picker (nativo) ----
   app.post('/api/pick-folder', (req, reply) => {
@@ -119,6 +142,8 @@ export async function buildApp(deps) {
   gitRoutes(app, ctx)
   taskRoutes(app, ctx)
   configRoutes(app, ctx)
+  extensionRoutes(app, ctx)
+  searchSourceRoutes(app, ctx)
   runRoutes(app, ctx)
 
   app.decorate('ctx', ctx)
