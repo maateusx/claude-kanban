@@ -9,7 +9,8 @@ import userEvent from '@testing-library/user-event'
 // botões "soltar em <coluna>" — o que testamos aqui é o handler do App
 // (update otimista + rollback), não a biblioteca de drag.
 vi.mock('@dnd-kit/core', () => ({
-  DndContext: ({ children, onDragEnd }) => (
+  // O rail tem seu próprio DndContext (id="rail"); os botões são só do board.
+  DndContext: ({ children, onDragEnd, id }) => id ? children : (
     <div>
       {['todo', 'doing', 'done'].map(col => (
         <button key={col} onClick={() => onDragEnd({ active: { id: 'task-1' }, over: { id: col } })}>
@@ -21,6 +22,7 @@ vi.mock('@dnd-kit/core', () => ({
   ),
   DragOverlay: () => null,
   PointerSensor: class {},
+  KeyboardSensor: class {},
   useSensor: () => ({}),
   useSensors: () => [],
   useDroppable: () => ({ setNodeRef: () => {}, isOver: false }),

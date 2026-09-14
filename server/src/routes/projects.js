@@ -19,6 +19,19 @@ export default function projectRoutes(app, ctx) {
 
   app.get('/api/projects', () => ({ projects: db.projects.map(projectView) }))
 
+  // Ordem do rail. Mesma semântica de runner.reorder: ids recebidos primeiro,
+  // na ordem dada; o que não veio (ou id desconhecido) mantém a posição relativa no fim.
+  app.post('/api/projects/reorder', (req, reply) => {
+    const ids = req.body?.projectIds
+    if (!Array.isArray(ids)) return reply.code(400).send({ error: 'projectIds deve ser um array' })
+    const byId = new Map(db.projects.map(p => [p.id, p]))
+    const next = [...new Set(ids)].map(id => byId.get(id)).filter(Boolean)
+    for (const p of db.projects) if (!next.includes(p)) next.push(p)
+    db.projects.splice(0, db.projects.length, ...next)
+    saveProjects(db)
+    return { projects: db.projects.map(projectView) }
+  })
+
   app.post('/api/projects', (req, reply) => {
     const { name, path: projectPath, description } = req.body || {}
     if (!name || !projectPath) return reply.code(400).send({ error: 'name e path são obrigatórios' })

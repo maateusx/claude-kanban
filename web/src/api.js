@@ -15,6 +15,7 @@ export const api = {
   refreshModels: () => fetch('/api/models/refresh', opts({})).then(j),
   projects: () => fetch('/api/projects').then(j),
   addProject: (name, path, description) => fetch('/api/projects', opts({ name, path, description })).then(j),
+  reorderProjects: projectIds => fetch('/api/projects/reorder', opts({ projectIds })).then(j),
   pickFolder: () => fetch('/api/pick-folder', opts({})).then(j),
   patchProject: (id, patch) => fetch(`/api/projects/${id}`, { ...opts(patch), method: 'PATCH' }).then(j),
   rebootstrap: id => fetch(`/api/projects/${id}/bootstrap`, opts({})).then(j),

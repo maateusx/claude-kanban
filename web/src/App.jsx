@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback, useReducer } from 'react'
-import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors, useDroppable, useDraggable, closestCorners } from '@dnd-kit/core'
+import { DndContext, DragOverlay, PointerSensor, KeyboardSensor, useSensor, useSensors, useDroppable, useDraggable, closestCorners } from '@dnd-kit/core'
+import { SortableContext, useSortable, arrayMove, verticalListSortingStrategy, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { api, connectWS } from './api.js'
 import { reducer, effectsFor, initialState, notificationsFor, pendingIds } from './events.js'
 import * as notifications from './notify.js'
@@ -343,6 +344,10 @@ export default function App() {
       <Rail
         projects={projects} selectedId={selectedId} onSelect={setSelectedId} queue={queue} usage={usage}
         onAdd={() => setShowAddProject(true)}
+        onReorder={next => {
+          setProjects(next) // otimista; o refresh confirma (ou desfaz) com o que o servidor gravou
+          api.reorderProjects(next.map(p => p.id)).then(refreshProjects).catch(e => { alert(e.message); refreshProjects() })
+        }}
         onRemove={p => {
           if (!confirm(t('Remover "{name}" do quadro? As tasks e o código continuam no disco.', { name: p.name }))) return
           api.removeProject(p.id, false)
@@ -614,8 +619,20 @@ function HoverTip({ label, disabled, children, className }) {
   )
 }
 
-function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onSettings, queue, usage }) {
+function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onReorder, onSettings, queue, usage }) {
   const [expanded, toggle] = useRailExpanded()
+  // distance: 5 mantém o clique simples selecionando o projeto; só vira drag depois de mover.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
+  const onDragEnd = ({ active, over }) => {
+    if (!over || active.id === over.id) return
+    const from = projects.findIndex(p => p.id === active.id)
+    const to = projects.findIndex(p => p.id === over.id)
+    if (from === -1 || to === -1) return
+    onReorder(arrayMove(projects, from, to))
+  }
   return (
     <aside style={{ width: expanded ? 'var(--rail-w-open)' : 'var(--rail-w)' }}
       className={`flex shrink-0 flex-col gap-2 border-r border-line py-3 ${expanded ? 'items-stretch px-2' : 'items-center'}`}>
@@ -627,11 +644,14 @@ function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onSettings, que
           className="rounded-[6px] p-1.5 text-muted hover:bg-hover hover:text-ink-2">{expanded ? '«' : '»'}</button>
       </div>
       <div className={`mt-2 flex flex-1 flex-col gap-2 overflow-y-auto ${expanded ? '' : 'items-center'}`}>
+        <DndContext id="rail" sensors={sensors} onDragEnd={onDragEnd}>
+        <SortableContext items={projects.map(p => p.id)} strategy={verticalListSortingStrategy}>
         {projects.map(p => {
           const running = queue.actives?.some(a => a.projectId === p.id)
           return (
-            <HoverTip key={p.id} label={p.name} disabled={expanded} className="group">
-              <button onClick={() => onSelect(p.id)}
+            <SortableItem key={p.id} id={p.id}>{({ handleRef, handleProps }) => (
+            <HoverTip label={p.name} disabled={expanded} className="group">
+              <button ref={handleRef} {...handleProps} onClick={() => onSelect(p.id)}
                 className={`flex w-full items-center gap-2 rounded-[8px] ${expanded ? 'px-1.5 py-1 hover:bg-hover' : 'justify-center'} ${p.id === selectedId ? (expanded ? 'bg-hover' : '') : ''}`}>
                 <span
                   className={`ck-avatar relative flex size-9 shrink-0 items-center justify-center rounded-[8px] text-meta font-semibold ${p.id === selectedId ? 'ring-2 ring-accent' : ''}`}
@@ -653,8 +673,11 @@ function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onSettings, que
                   className="absolute right-1 top-1/2 hidden -translate-y-1/2 rounded-[6px] px-1.5 py-0.5 text-muted hover:bg-hover hover:text-danger group-hover:block">×</button>
               )}
             </HoverTip>
+            )}</SortableItem>
           )
         })}
+        </SortableContext>
+        </DndContext>
         <HoverTip label={t('Cadastrar projeto')} disabled={expanded}>
           <button onClick={onAdd}
             className={`flex items-center gap-2 rounded-[8px] text-muted hover:bg-hover hover:text-ink-2 ${expanded ? 'w-full px-1.5 py-1' : 'size-9 justify-center border border-dashed border-line-strong'}`}>
@@ -671,6 +694,18 @@ function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onSettings, que
       </button>
       <UsageRail usage={usage} />
     </aside>
+  )
+}
+
+// Wrapper sortable genérico: o nó que se move é o wrapper, o ativador (quem
+// recebe listeners/aria) é o botão do projeto — assim o "×" de remover não vira alça.
+function SortableItem({ id, children }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id })
+  return (
+    <div ref={setNodeRef} style={{ transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined, transition }}
+      className={isDragging ? 'z-10 opacity-60' : ''}>
+      {children({ handleRef: setActivatorNodeRef, handleProps: { ...attributes, ...listeners } })}
+    </div>
   )
 }
 
