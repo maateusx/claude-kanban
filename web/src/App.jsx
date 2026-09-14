@@ -6,6 +6,7 @@ import * as notifications from './notify.js'
 import * as sounds from './sounds.js'
 import * as theme from './theme.js'
 import { DiffDrawer } from './Diff.jsx'
+import Markdown from './Markdown.jsx'
 import { ExtensionsDrawer } from './Extensions.jsx'
 import { SearchSourcesModal, SearchTasksModal } from './SearchSources.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
@@ -1371,7 +1372,7 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
       {humanRequest && (
         <div className="mt-3 rounded-[8px] border border-warning p-3">
           <div className="text-meta font-semibold uppercase tracking-wide text-warning">{t('Decisão humana necessária')}</div>
-          <div className="mt-1.5 whitespace-pre-wrap text-body text-ink-2">{humanRequest}</div>
+          <Markdown text={humanRequest} className="mt-1.5" />
           <HumanResponseForm
             disabled={running || queued}
             hasSession={!!run.session_id}
