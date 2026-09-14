@@ -539,6 +539,11 @@ const Chip = ({ children, className = '', ...props }) => {
 }
 
 const Dot = ({ className = '', style }) => <span style={style} className={`size-2 shrink-0 rounded-full ${className}`} />
+// Anel girando = "em execução" — mais legível que um ponto piscando.
+const Spinner = ({ className = '', title }) => (
+  <span role="img" aria-label={title} title={title}
+    className={`inline-block shrink-0 animate-spin rounded-full border-2 border-st-doing border-t-transparent ${className}`} />
+)
 
 const TagChip = ({ tag }) => (
   <Chip><Dot style={{ background: `hsl(${tagHue(tag)} 65% 55%)` }} />{tag}</Chip>
@@ -661,7 +666,7 @@ function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onReorder, onSe
                   {p.pendingCount > 0 && (
                     <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-warning px-1 text-[10px] font-semibold leading-4 text-on-accent">{p.pendingCount}</span>
                   )}
-                  {running && <Dot className="absolute -bottom-0.5 -right-0.5 animate-pulse bg-st-doing" />}
+                  {running && <Spinner title={t('Rodando')} className="absolute -bottom-1 -right-1 size-3.5 bg-bg" />}
                 </span>
                 {expanded && (
                   <span className={`truncate text-body ${p.id === selectedId ? 'font-semibold text-ink' : 'text-ink-2'}`}>{p.name}</span>
@@ -716,7 +721,7 @@ function QueueIndicator({ queue }) {
   return (
     <div title={t('{a} ativa(s) · {q} na fila', { a: actives, q: waiting })}
       className="flex flex-col items-center gap-0.5 text-[10px] text-muted">
-      <Dot className="animate-pulse bg-st-doing" />
+      <Spinner title={t('Rodando')} className="size-3" />
       <span className="font-mono">{actives}/{actives + waiting}</span>
     </div>
   )

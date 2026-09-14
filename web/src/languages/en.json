@@ -417,5 +417,6 @@
   "🔒 Ação bloqueada pelos guardrails: {label}": "🔒 Action blocked by the guardrails: {label}",
   "Com backoff maior que zero e auto-pilot ligado, uma task que falha é reagendada para daqui a N minutos em vez de voltar imediatamente para a fila. 0 = volta no próximo tick, o que na prática paga duas sessões inteiras pela mesma falha determinística.": "With a backoff above zero and auto-pilot on, a failed task is rescheduled N minutes out instead of going straight back to the queue. 0 = back on the next tick, which in practice pays for two full sessions on the same deterministic failure.",
   "Remover projeto do quadro": "Remove project from the board",
-  "Remover \"{name}\" do quadro? As tasks e o código continuam no disco.": "Remove \"{name}\" from the board? Tasks and code stay on disk."
+  "Remover \"{name}\" do quadro? As tasks e o código continuam no disco.": "Remove \"{name}\" from the board? Tasks and code stay on disk.",
+  "Rodando": "Running"
 }
