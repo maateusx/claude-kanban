@@ -1216,6 +1216,15 @@ function CardBody({ task, queue, onRun, onOpen, selected, defaultModel, pending 
 
 // Motivo do fim do run (run.exit_reason, gravado pelo runner). Runs antigos só
 // têm exit_code — cai no "exit N" de sempre.
+const DIAGNOSIS_CAUSES = {
+  ambiente: 'Ambiente',
+  flaky: 'Teste instável',
+  spec_ambigua: 'Spec ambígua',
+  grande_demais: 'Grande demais',
+  falta_dependencia: 'Falta dependência',
+  externo: 'Externa (precisa de humano)',
+}
+
 const EXIT_REASONS = {
   timeout: 'Tempo esgotado',
   killed: 'Cancelada pelo usuário',
@@ -1928,6 +1937,20 @@ function AutonomyStats({ a }) {
           </table>
         </Panel>
       )}
+      {a.byDiagnosis?.length > 0 && (
+        <Panel title={t('Causas diagnosticadas')}>
+          <table className="w-full text-body">
+            <tbody>
+              {a.byDiagnosis.map(r => (
+                <tr key={r.cause} className="border-b border-line last:border-0">
+                  <td className="py-1.5">{DIAGNOSIS_CAUSES[r.cause] ? t(DIAGNOSIS_CAUSES[r.cause]) : r.cause}</td>
+                  <td className="py-1.5 text-right tabular-nums">{r.n}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      )}
     </>
   )
 }
@@ -2585,6 +2608,12 @@ function AutonomySettings({ project, onPatch }) {
             aria-label={t('Máximo de rodadas de lacunas')} onCommit={maxRounds => patchAp({ gapLoop: { maxRounds } })} />
           <span className="text-meta text-muted">{t('rodadas por objetivo')}</span>
         </div>
+      </div>
+
+      <div className="border-t border-line pt-3">
+        <GitCheck label={t('Diagnosticar falhas em vez de bloquear')}
+          desc={t('Quando uma task esgota as tentativas, uma sessão somente leitura classifica a causa (ambiente, flaky, spec ambígua, grande demais, falta de dependência ou externa) e age: cria pré-requisito, repete o verify, decide pela spec, desmembra ou encadeia a dependência. Só causa externa fica blocked e avisa por webhook (task_needs_human). No máximo 2 diagnósticos por task.')}
+          checked={!!ap.diagnose?.enabled} onChange={v => patchAp({ diagnose: { enabled: v } })} />
       </div>
 
       <div className={`border-t border-line pt-3 ${row}`}>

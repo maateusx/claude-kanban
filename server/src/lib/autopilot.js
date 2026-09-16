@@ -45,12 +45,15 @@ export const DEFAULT_AUTOPILOT = {
   cleanup: { enabled: false, mode: 'confirm', remote: false },
   // objetivo integrado → auditoria da spec → lacunas viram tasks, até maxRounds
   gapLoop: { enabled: false, maxRounds: 3 },
+  // esgotou as tentativas → diagnóstico no auxModel em vez de blocked (runner.diagnose)
+  diagnose: { enabled: false },
 }
 
 export const autopilotSettings = p => ({
   ...DEFAULT_AUTOPILOT, ...(p?.autopilot || {}), autoMerge: autoMergeSettings(p),
   cleanup: { ...DEFAULT_AUTOPILOT.cleanup, ...(p?.autopilot?.cleanup || {}) },
   gapLoop: { ...DEFAULT_AUTOPILOT.gapLoop, ...(p?.autopilot?.gapLoop || {}) },
+  diagnose: { ...DEFAULT_AUTOPILOT.diagnose, ...(p?.autopilot?.diagnose || {}) },
 })
 
 const due = (at, everyMs, now) => !at || now - Date.parse(at) >= everyMs

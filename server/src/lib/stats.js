@@ -90,6 +90,13 @@ export function computeStats(tasks, { days = 30, defaultModel = null, now = Date
     const k = t.run.exit_reason
     if (k) byExitReason.set(k, (byExitReason.get(k) || 0) + 1)
   }
+  // Causas apontadas pelo diagnóstico automático (tags diagnosticada:<causa>).
+  const byDiagnosis = new Map()
+  for (const t of runs) {
+    for (const tag of t.tags || []) {
+      if (tag.startsWith('diagnosticada:')) byDiagnosis.set(tag.slice(14), (byDiagnosis.get(tag.slice(14)) || 0) + 1)
+    }
+  }
   const autonomy = {
     done: done.length,
     firstPassRate: done.length ? done.filter(t => num(t.run.attempts) <= 1).length / done.length : null,
@@ -97,6 +104,7 @@ export function computeStats(tasks, { days = 30, defaultModel = null, now = Date
     costPerDone: done.length ? done.reduce((sum, t) => sum + num(t.run.total_cost_usd ?? t.run.cost_usd), 0) / done.length : null,
     autoMerged: done.filter(t => (t.tags || []).includes('merged')).length,
     byExitReason: [...byExitReason.entries()].map(([reason, n]) => ({ reason, n })).sort((a, b) => b.n - a.n),
+    byDiagnosis: [...byDiagnosis.entries()].map(([cause, n]) => ({ cause, n })).sort((a, b) => b.n - a.n),
   }
 
   const top = runs

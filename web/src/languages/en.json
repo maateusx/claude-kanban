@@ -520,5 +520,14 @@
   "Máximo de rodadas de lacunas": "Maximum gap rounds",
   "rodadas por objetivo": "rounds per goal",
   "Comando de aceite": "Acceptance command",
-  "Testes de aceite do objetivo: rodados na integração de uma task desmembrada, que só conclui se passarem. A subtask de desenho pode registrar um comando próprio do objetivo. Vazio: só o do objetivo, se houver.": "Goal acceptance tests: run on the integration of a decomposed task, which only completes if they pass. The design subtask may register a goal-specific command. Empty: only the goal's own, if any."
+  "Testes de aceite do objetivo: rodados na integração de uma task desmembrada, que só conclui se passarem. A subtask de desenho pode registrar um comando próprio do objetivo. Vazio: só o do objetivo, se houver.": "Goal acceptance tests: run on the integration of a decomposed task, which only completes if they pass. The design subtask may register a goal-specific command. Empty: only the goal's own, if any.",
+  "Diagnosticar falhas em vez de bloquear": "Diagnose failures instead of blocking",
+  "Quando uma task esgota as tentativas, uma sessão somente leitura classifica a causa (ambiente, flaky, spec ambígua, grande demais, falta de dependência ou externa) e age: cria pré-requisito, repete o verify, decide pela spec, desmembra ou encadeia a dependência. Só causa externa fica blocked e avisa por webhook (task_needs_human). No máximo 2 diagnósticos por task.": "When a task runs out of attempts, a read-only session classifies the cause (environment, flaky, ambiguous spec, too big, missing dependency or external) and acts: creates a prerequisite, reruns verify, decides from the spec, decomposes or chains the dependency. Only external causes stay blocked and notify via webhook (task_needs_human). At most 2 diagnoses per task.",
+  "Causas diagnosticadas": "Diagnosed causes",
+  "Ambiente": "Environment",
+  "Teste instável": "Flaky test",
+  "Spec ambígua": "Ambiguous spec",
+  "Grande demais": "Too big",
+  "Falta dependência": "Missing dependency",
+  "Externa (precisa de humano)": "External (needs a human)"
 }

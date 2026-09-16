@@ -520,5 +520,14 @@
   "Máximo de rodadas de lacunas": "Máximo de rodadas de lacunas",
   "rodadas por objetivo": "rodadas por objetivo",
   "Comando de aceite": "Comando de aceite",
-  "Testes de aceite do objetivo: rodados na integração de uma task desmembrada, que só conclui se passarem. A subtask de desenho pode registrar um comando próprio do objetivo. Vazio: só o do objetivo, se houver.": "Testes de aceite do objetivo: rodados na integração de uma task desmembrada, que só conclui se passarem. A subtask de desenho pode registrar um comando próprio do objetivo. Vazio: só o do objetivo, se houver."
+  "Testes de aceite do objetivo: rodados na integração de uma task desmembrada, que só conclui se passarem. A subtask de desenho pode registrar um comando próprio do objetivo. Vazio: só o do objetivo, se houver.": "Testes de aceite do objetivo: rodados na integração de uma task desmembrada, que só conclui se passarem. A subtask de desenho pode registrar um comando próprio do objetivo. Vazio: só o do objetivo, se houver.",
+  "Diagnosticar falhas em vez de bloquear": "Diagnosticar falhas em vez de bloquear",
+  "Quando uma task esgota as tentativas, uma sessão somente leitura classifica a causa (ambiente, flaky, spec ambígua, grande demais, falta de dependência ou externa) e age: cria pré-requisito, repete o verify, decide pela spec, desmembra ou encadeia a dependência. Só causa externa fica blocked e avisa por webhook (task_needs_human). No máximo 2 diagnósticos por task.": "Quando uma task esgota as tentativas, uma sessão somente leitura classifica a causa (ambiente, flaky, spec ambígua, grande demais, falta de dependência ou externa) e age: cria pré-requisito, repete o verify, decide pela spec, desmembra ou encadeia a dependência. Só causa externa fica blocked e avisa por webhook (task_needs_human). No máximo 2 diagnósticos por task.",
+  "Causas diagnosticadas": "Causas diagnosticadas",
+  "Ambiente": "Ambiente",
+  "Teste instável": "Teste instável",
+  "Spec ambígua": "Spec ambígua",
+  "Grande demais": "Grande demais",
+  "Falta dependência": "Falta dependência",
+  "Externa (precisa de humano)": "Externa (precisa de humano)"
 }

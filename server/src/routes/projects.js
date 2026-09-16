@@ -79,6 +79,9 @@ export function applyAutopilot(p, input) {
     }
     next.gapLoop = gl
   }
+  if (input.diagnose !== undefined) {
+    next.diagnose = { ...(next.diagnose || {}), enabled: !!input.diagnose?.enabled }
+  }
   p.autopilot = next
   return null
 }

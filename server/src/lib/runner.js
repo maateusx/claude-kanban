@@ -5,6 +5,7 @@ import { loadState, saveState, diffFile, logFile, kanbanDir } from './paths.js'
 import { findTask, updateTask, appendToSection, listTasks, createTask, getSection, removeSection, replaceSection } from './tasks.js'
 import { decomposeTask, subtaskLevel, designSubtask, MAX_DECOMPOSE_LEVEL } from './decomposer.js'
 import { specBlock, needsDesign, SPEC_REL, DESIGN_TAG } from './spec.js'
+import { diagnoseTask, DIAGNOSED_PREFIX } from './diagnoser.js'
 import {
   prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, taskBranch,
   mergeTaskBranch, withDetachedWorktree, diffStats, diffBase,
@@ -189,6 +190,8 @@ export function consumeHumanAnswer(projectPath, taskId) {
   return { request, response }
 }
 const MAX_CONCURRENCY = 8
+// Diagnósticos automáticos por task (autopilot.diagnose); passou disso, fica blocked.
+export const MAX_DIAGNOSES = 2
 
 // Árvore de tasks: a decomposição marca as filhas com `pai:<id>` e o pai com
 // `decomposta`. O pai fica em todo dependendo de todas as filhas (o gate de
@@ -374,6 +377,7 @@ export class Runner {
     this.pausedUntil = state.pausedUntil || null
     this.actives = new Map()        // taskId -> { projectId, taskId, child, timer, ... }
     this.baselines = new Map()      // `${projectId}:${sha}:${cmd}` -> resultado do verify na base
+    this.diagnosing = new Map()     // taskId -> promise do diagnóstico em andamento
   }
 
   persist() {
@@ -1082,7 +1086,119 @@ export class Runner {
       return true
     }
     patch.tags = withTag(patch.tags || task.tags, 'blocked')
+    // Com autopilot.diagnose, o blocked é provisório: o diagnóstico roda logo
+    // depois do updateTask do chamador e decide o que fazer com a task.
+    if (project.autopilot?.diagnose?.enabled && (task.run?.diagnoses || 0) < MAX_DIAGNOSES
+      && !this.diagnosing.has(task.id)) {
+      this.diagnosing.set(task.id, new Promise(r => setImmediate(r))
+        .then(() => this.diagnose(project, task.id))
+        .catch(() => {})
+        .finally(() => this.diagnosing.delete(task.id)))
+    }
     return false
+  }
+
+  // Diagnóstico da falha (lib/diagnoser.js) e a ação para cada causa. Falhar
+  // aqui deixa a task como estava: blocked.
+  async diagnose(project, taskId) {
+    const task = findTask(project.path, taskId)
+    if (!task?.tags?.includes('blocked')) return
+    let diff = ''
+    try { diff = fs.readFileSync(diffFile(project.path, taskId), 'utf8') } catch {}
+    const open = listTasks(project.path).filter(t => t.id !== taskId && !['done', 'archived'].includes(t.status))
+    const n = (task.run?.diagnoses || 0) + 1
+    const now = () => new Date().toISOString()
+    let dx
+    try {
+      dx = await diagnoseTask(project, task, diff, open)
+    } catch (e) {
+      updateTask(project.path, taskId, { run: { diagnoses: n } })
+      appendToSection(project.path, taskId, 'Log de erros', `[${now()}] Diagnóstico automático falhou: ${e.message}`)
+      return
+    }
+    const cur = findTask(project.path, taskId)
+    const tags = withTag(cur.tags, DIAGNOSED_PREFIX + dx.cause)
+    const run = { diagnoses: n, total_cost_usd: taskCost(cur) + (dx.costUsd || 0) }
+    // Volta para a fila do zero (as tentativas que levaram ao diagnóstico não contam).
+    const unblock = { tags: tags.filter(t => t !== 'blocked'), run: { ...run, attempts: 0 }, scheduled_at: null }
+    const spawnTask = (fallbackTitle, extraTags) => {
+      const t = createTask(project.path, {
+        title: dx.task?.title || fallbackTitle,
+        description: `${dx.task?.description || dx.summary}\n\n_Criada pelo diagnóstico da task "${cur.title}" (${taskId})._`,
+        priority: 'urgent', status: 'todo', tags: ['diagnostico', ...extraTags],
+      })
+      this.emit('task.upserted', { projectId: project.id, task: t })
+      return t
+    }
+    const dependOn = id => ({ ...unblock, depends_on: [...new Set([...(cur.depends_on || []), id])] })
+
+    let patch
+    let action
+    switch (dx.cause) {
+      case 'ambiente': {
+        const t = spawnTask(`Preparar ambiente para "${cur.title}"`, [])
+        patch = dependOn(t.id)
+        action = `criada a task pré-requisito ${t.id} (urgent); esta espera por ela.`
+        break
+      }
+      case 'flaky': {
+        const v = this.rerunVerify(project, cur)
+        if (v?.ok) {
+          patch = unblock
+          action = `o verify (\`${v.command}\`) passou ao rodar de novo na branch; nova tentativa.`
+        } else if (v) {
+          const t = spawnTask(`Corrigir ou pôr em quarentena teste instável (${cur.title})`, ['flaky'])
+          patch = dependOn(t.id)
+          action = `o verify falhou de novo; criada a task ${t.id} para corrigir/quarentenar o teste.`
+        } else {
+          patch = unblock
+          action = 'sem verify para repetir; nova tentativa.'
+        }
+        break
+      }
+      case 'spec_ambigua':
+        patch = {
+          ...unblock, tags: withTag(unblock.tags, AUTO_DECIDED_TAG),
+          body: replaceSection(cur.body, 'Human Response', `${AUTO_DECIDE_RESPONSE}\n\nDiagnóstico: ${dx.summary}`),
+        }
+        action = 'a sessão seguinte decide pela spec/ADRs e registra um ADR.'
+        break
+      case 'grande_demais':
+        // decompose: true força o desmembramento mesmo acima de MAX_DECOMPOSE_LEVEL.
+        patch = { ...unblock, decompose: true }
+        action = 'a task será desmembrada de novo.'
+        break
+      case 'falta_dependencia': {
+        const dep = dx.dependsOn && open.find(t => t.id === dx.dependsOn)
+        if (dep) {
+          patch = dependOn(dep.id)
+          action = `esta task passa a depender de ${dep.id} (${dep.title}).`
+        } else if (dx.task) {
+          const t = spawnTask(dx.task.title, [])
+          patch = dependOn(t.id)
+          action = `criada a task ${t.id} com o que falta; esta espera por ela.`
+        }
+        break
+      }
+    }
+    if (!patch) {
+      // externo (ou dependência sem task identificável): precisa de gente.
+      patch = { tags, run }
+      action = 'precisa de um humano — continua blocked.'
+      this.emit('task.attention', { projectId: project.id, taskId, reason: `${dx.cause}: ${dx.summary}` })
+    }
+    const updated = updateTask(project.path, taskId, patch)
+    appendToSection(project.path, taskId, 'Log de erros',
+      `[${now()}] Diagnóstico automático (${n}/${MAX_DIAGNOSES}): **${dx.cause}** — ${dx.summary}\nAção: ${action}`)
+    this.emit('task.upserted', { projectId: project.id, task: updated })
+  }
+
+  // Repete o verifyCommand na branch da task (o worktree dela já foi removido).
+  rerunVerify(project, task) {
+    const cmd = String(project.verifyCommand || '').trim()
+    const branch = task.run?.branch
+    if (!cmd || !branch || !isGitRepo(project.path)) return null
+    try { return withDetachedWorktree(project.path, branch, dir => runVerify(cmd, dir), '_flaky') } catch { return null }
   }
 
   finish(a, exitCode) {
