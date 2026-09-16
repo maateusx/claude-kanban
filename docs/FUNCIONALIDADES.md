@@ -31,13 +31,15 @@ Pelo menu do projeto: **Fontes de busca** abre o CRUD (criar, editar, ativar/des
 O dedupe é por tag `search:<sourceId>:<hash(title+url)>` (mesmo contrato do `gh:<n>` do GitHub): item já importado volta com `already_imported` e aparece desabilitado na lista; o servidor recalcula a tag no import e ignora o que já virou task. As fontes ficam em `projects.json` (`project.searchSources`). (`server/src/lib/searchSources.js`, `server/src/lib/searchFetch.js`, `server/src/routes/search-sources.js`, `web/src/SearchSources.jsx`)
 
 ### 7. Sugestão de tasks por análise (✨ Suggest)
-Uma sessão headless somente-leitura analisa o projeto e sugere até 12 tasks acionáveis (melhoria, correção, feature, refatoração, teste, documentação); o humano escolhe quais viram cards no backlog. (`server/src/lib/analyzer.js`)
+Uma sessão headless somente-leitura analisa o projeto e sugere até 12 tasks acionáveis (melhoria, correção, feature, refatoração, teste, documentação) — ou deixa o Claude escolher o foco, opcionalmente guiado por uma pergunta livre. Pode também devolver um parecer do projeto (pontos fortes, o que refaria, próximos passos, ideias de produto); o humano escolhe quais viram cards no backlog. (`server/src/lib/analyzer.js`)
 
 ### 8. Enriquecimento de descrição (enrichMode)
 Reescreve a descrição da task para deixá-la clara e acionável — sob demanda pela UI ou automaticamente na hora do run, conforme `enrichMode` do projeto (`off`/`auto`/`always`) ou override por task. (`server/src/lib/enricher.js`)
 
 ### 9. Decomposição de tasks
 Quebra uma task grande em 2–8 subtasks encadeadas por `depends_on` (tags `subtask`/`pai:<id>`) — sob demanda ou automaticamente (`autoDecompose`). (`server/src/lib/decomposer.js`)
+
+A task desmembrada vira um **objetivo**: volta para `todo` com a tag `decomposta`, dependendo de todas as filhas, e roda por último como **integração** — confere o conjunto contra a descrição original, roda build/testes, corrige as costuras e faz o push/PR. As filhas partem da branch `kanban/<pai>` e, ao concluir, o servidor as mergeia nela (tag `integrada`), então a 2ª subtask já enxerga o código da 1ª. O card do objetivo mostra o progresso (`✂ 3/5 subtasks`) e o custo somado da árvore.
 
 ## Execução
 
@@ -66,6 +68,17 @@ Pausa toda a plataforma sem matar sessões ativas: nada novo sai da fila, runs e
 
 ### 17. Retentativas com backoff
 `retry.maxAttempts` (default 3) e `retry.backoffMinutes` por projeto; esgotadas as tentativas, a task ganha a tag `blocked`. (`runner.js`)
+
+Com `autoDecompose` ligado, em vez de `blocked` a task é **replanejada** uma vez: desmembrada levando o log de erros como contexto (tag `replanejada`). Na segunda vez, `blocked`.
+
+### 17b. Revisão automática (`reviewGate`)
+Depois do gate de verificação, uma sessão somente leitura no modelo auxiliar lê a task, o `## Resultado` e o diff e responde se o trabalho entrega o que foi pedido. Reprovou: a task volta para `todo` com o feedback no log de erros, contando tentativa. Revisor fora do ar não reprova. (`server/src/lib/reviewer.js`)
+
+### 17c. Teto de custo por objetivo (`goalBudgetUsd`)
+O custo de cada task acumula em `run.total_cost_usd` (todas as tentativas, decomposição e revisão). Com o teto ligado, a árvore que o ultrapassa para: a próxima task ganha `blocked` e o webhook avisa (`run_failed`).
+
+### 17d. Aprendizados entre tasks
+A sessão registra o que descobriu de não óbvio numa seção `## Aprendizados`; o orquestrador junta tudo em `.claude/claude-kanban/notes.md` e injeta nos prompts seguintes — a subtask 4 não repete o erro da 2.
 
 ### 18. Ledger de idempotência
 Só sucessos entram no `ledger.json`; caminhos automáticos nunca re-executam uma task já registrada (evita loops quando o status na pasta se perde). Um run pedido explicitamente por humano limpa o registro. (`server/src/lib/ledger.js`)
@@ -161,4 +174,4 @@ Um **catálogo embutido** (`server/src/lib/catalog.js`) oferece skills, agents e
 - **Isolamento por worktree** com auto-commit de segurança → concorrência real e descarte sem risco.
 - **Ledger de idempotência** contra loops de re-execução.
 - **Human-in-the-loop de verdade**: Human Request/Response com retomada de sessão, revisão por diff antes do merge.
-- **Auto-pilot completo**: auto-run, auto-decompose, enrich, retry com backoff, agendamento e gate de verificação.
+- **Auto-pilot completo**: auto-run, auto-decompose com branch de integração, replanejamento, revisão automática, teto de custo por objetivo, enrich, retry com backoff, agendamento e gate de verificação.

@@ -24,6 +24,9 @@ const COLUMNS = [
 const HUMAN_REQUEST_TAG = 'human-request'
 // Card decidido pelo próprio Claude (projeto com auto-decisão): rastro, não estado.
 const AUTO_DECIDED_TAG = 'auto-decided'
+// Task desmembrada: depends_on são as filhas e ela roda como integração no fim.
+const DECOMPOSED_TAG = 'decomposta'
+const parentOf = task => (task.tags || []).find(x => x.startsWith('pai:'))?.slice(4)
 const AUTO_DECIDED_TITLE = t('O Claude decidiu no lugar do humano (auto-decisão ligada no projeto) — a pergunta e a decisão estão no "Histórico de Human Requests" no detalhe.')
 const ENRICH_LABEL = { off: t('não enriquecer'), auto: t('Claude decide'), always: t('sempre enriquecer') }
 const RAW_LABEL = { off: t('prompt do kanban'), 'plan-execute': t('cru: planejar + executar'), plan: t('cru: só planejar'), execute: t('cru: só executar') }
@@ -309,6 +312,22 @@ export default function App() {
     return map
   }, [tasks])
 
+  // Custo acumulado de cada objetivo desmembrado: ele mais todos os descendentes.
+  const treeCostBy = useMemo(() => {
+    const byId = new Map(tasks.map(t => [t.id, t]))
+    const map = new Map()
+    for (const t of tasks) {
+      const cost = t.run?.total_cost_usd ?? t.run?.cost_usd ?? 0
+      if (!cost) continue
+      const seen = new Set()
+      for (let cur = t; cur && !seen.has(cur.id); cur = byId.get(parentOf(cur))) {
+        seen.add(cur.id)
+        if ((cur.tags || []).includes(DECOMPOSED_TAG)) map.set(cur.id, (map.get(cur.id) || 0) + cost)
+      }
+    }
+    return map
+  }, [tasks])
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return tasks
@@ -395,7 +414,7 @@ export default function App() {
                 <div className="flex min-w-0 flex-1 overflow-x-auto">
                   {COLUMNS.filter(c => columns.includes(c.key)).map(col => (
                     <Column key={col.key} col={col} tasks={visible.filter(t => t.status === col.key)}
-                      queue={queue} onRun={runTask} onOpen={setDetailId} selectedId={detailId} depsBy={depsBy}
+                      queue={queue} onRun={runTask} onOpen={setDetailId} selectedId={detailId} depsBy={depsBy} treeCostBy={treeCostBy}
                       defaultModel={project.defaultModel} pending={pending}
                       sort={sorts[col.key] || DEFAULT_SORT} onSort={s => setSort(col.key, s)}
                       onAddTask={col.key !== 'archived' ? () => setNewTask({ status: col.key }) : null}
@@ -1059,7 +1078,7 @@ function SortMenu({ value, onChange }) {
   )
 }
 
-function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pending, defaultModel, sort, onSort, onArchiveAll, depsBy }) {
+function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pending, defaultModel, sort, onSort, onArchiveAll, depsBy, treeCostBy }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key })
   const ordered = useMemo(() => sortTasks(tasks, sort), [tasks, sort])
   const [archiving, setArchiving] = useState(false)
@@ -1092,7 +1111,7 @@ function Column({ col, tasks, queue, onRun, onOpen, onAddTask, selectedId, pendi
       <div className="flex-1 space-y-3 overflow-y-auto px-3 pb-4">
         {ordered.map(t => (
           <Card key={t.id} task={t} queue={queue} onRun={onRun} onOpen={onOpen}
-            selected={t.id === selectedId} defaultModel={defaultModel} pending={pending} deps={depsBy?.get(t.id)} />
+            selected={t.id === selectedId} defaultModel={defaultModel} pending={pending} deps={depsBy?.get(t.id)} treeCost={treeCostBy?.get(t.id)} />
         ))}
         {tasks.length === 0 && (
           onAddTask ? (
@@ -1120,8 +1139,9 @@ function Card(props) {
   )
 }
 
-function CardBody({ task, queue, onRun, onOpen, selected, defaultModel, pending = [], deps = [], innerRef, handleProps, hidden, dragging }) {
+function CardBody({ task, queue, onRun, onOpen, selected, defaultModel, pending = [], deps = [], treeCost, innerRef, handleProps, hidden, dragging }) {
   const waiting = deps.filter(d => !d.done)
+  const decomposed = (task.tags || []).includes(DECOMPOSED_TAG)
   const running = queue.actives?.some(a => a.taskId === task.id)
   const queued = queue.queue?.some(q => q.taskId === task.id)
   const desc = section(task.body, 'Descrição')
@@ -1162,7 +1182,16 @@ function CardBody({ task, queue, onRun, onOpen, selected, defaultModel, pending 
             ⏱ {fmtWhen(task.scheduled_at)}
           </Chip>
         )}
-        {waiting.length > 0 && !running && (
+        {decomposed && deps.length > 0 && (
+          <Chip className={waiting.length ? 'text-warning' : 'text-success'}
+            title={t('Roda como integração quando todas as subtasks concluírem')}>
+            {t('✂ {done}/{total} subtasks', { done: deps.length - waiting.length, total: deps.length })}
+          </Chip>
+        )}
+        {decomposed && treeCost > 0 && (
+          <Chip className="font-mono" title={t('Custo acumulado do objetivo (esta task e todas as subtasks)')}>Σ {fmtCost(treeCost)}</Chip>
+        )}
+        {!decomposed && waiting.length > 0 && !running && (
           <Chip className="text-warning"
             title={t('Só sai da fila quando concluir: {list}', { list: waiting.map(d => `${d.id} — ${d.title}`).join(', ') })}>
             {waiting.length > 1 ? t('⛓ aguardando {n} dependências', { n: waiting.length }) : t('⛓ aguardando 1 dependência')}
@@ -1192,6 +1221,9 @@ const EXIT_REASONS = {
   api_error: 'Erro da API do Claude',
   signal: 'Processo encerrado por sinal',
   verify_failed: 'Verificação falhou',
+  review_rejected: 'Revisão reprovou',
+  goal_budget: 'Teto de custo do objetivo',
+  integration_conflict: 'Conflito ao integrar na task pai',
 }
 const runFailed = run => !!run.exit_reason || (run.exit_code != null && run.exit_code !== 0)
 const exitLabel = run => {
@@ -1447,7 +1479,7 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
         </div>
       )}
 
-      <Section title={t('Dependências')}>
+      <Section title={(task.tags || []).includes(DECOMPOSED_TAG) ? t('Subtasks') : t('Dependências')}>
         {deps.length === 0 ? <Empty>{t('Esta task não depende de nenhuma outra.')}</Empty> : (
           <div className="space-y-1.5">
             {deps.map(d => (
@@ -1897,6 +1929,9 @@ function SuggestModal({ project, onClose, onCreated }) {
   const [selected, setSelected] = useState({})      // index -> bool
   const [costUsd, setCostUsd] = useState(null)
   const [error, setError] = useState(null)
+  const [question, setQuestion] = useState('')
+  const [wantReport, setWantReport] = useState(true)
+  const [report, setReport] = useState('')
 
   useEffect(() => {
     api.suggestionTypes().then(d => {
@@ -1907,10 +1942,12 @@ function SuggestModal({ project, onClose, onCreated }) {
 
   const pickedKeys = Object.keys(picked).filter(k => picked[k])
 
-  const analyze = () => {
+  // keys vazio = o Claude escolhe o foco sozinho
+  const analyze = (keys) => {
     setPhase('loading'); setError(null)
-    api.analyze(project.id, pickedKeys)
+    api.analyze(project.id, keys, question, wantReport)
       .then(d => {
+        setReport(d.report || '')
         setSuggestions(d.suggestions)
         setSelected(Object.fromEntries(d.suggestions.map((_, i) => [i, true])))
         setCostUsd(d.costUsd)
@@ -1960,9 +1997,17 @@ function SuggestModal({ project, onClose, onCreated }) {
               ))}
             </div>
           )}
+          <textarea value={question} onChange={e => setQuestion(e.target.value)} rows={3} maxLength={2000}
+            placeholder={t('Pergunte algo ao Claude (opcional) — ex.: "o que falta para lançar o login social?"')}
+            className="w-full rounded-[8px] border border-line bg-transparent p-2.5 text-body outline-none focus:border-accent" />
+          <label className="flex cursor-pointer items-center gap-2 text-body">
+            <input type="checkbox" checked={wantReport} onChange={e => setWantReport(e.target.checked)} className="accent-[var(--color-accent)]" />
+            {t('Incluir análise do projeto (feedback, o que refaria, próximos passos, ideias de produto)')}
+          </label>
           <div className="flex justify-end gap-2">
             <Btn variant="quiet" onClick={onClose}>{t('Cancelar')}</Btn>
-            <Btn variant="primary" onClick={analyze} disabled={!pickedKeys.length}>{t('Analisar projeto')}</Btn>
+            <Btn onClick={() => analyze([])}>{t('✦ Deixar o Claude escolher')}</Btn>
+            <Btn variant="primary" onClick={() => analyze(pickedKeys)} disabled={!pickedKeys.length}>{t('Analisar projeto')}</Btn>
           </div>
         </div>
       )}
@@ -1985,6 +2030,16 @@ function SuggestModal({ project, onClose, onCreated }) {
             </button>
           </div>
           <div className="max-h-[55vh] space-y-2 overflow-y-auto">
+            {report && (
+              <div className="rounded-[8px] border border-line p-3">
+                <div className="mb-1 flex items-center">
+                  <span className="font-medium">{t('Análise do projeto')}</span>
+                  <div className="flex-1" />
+                  <button onClick={() => navigator.clipboard?.writeText(report)} className="text-meta text-accent hover:underline">{t('copiar')}</button>
+                </div>
+                <Markdown text={report} />
+              </div>
+            )}
             {suggestions.length === 0 && <Empty>{t('Nenhuma sugestão retornada.')}</Empty>}
             {suggestions.map((s, i) => (
               <label key={i} className={`flex cursor-pointer items-start gap-3 rounded-[8px] border p-3 text-body ${selected[i] ? 'border-accent' : 'border-line opacity-60'}`}>
@@ -2179,6 +2234,14 @@ function LogEvent({ event, debug }) {
       <div className={`rounded-[6px] p-2 ${event.ok ? 'bg-subtle text-success' : 'border-l-2 border-danger bg-subtle pl-2 text-danger'}`}>
         <div>{event.ok ? '✓' : '✕'} {t('verificação')} — <span className="font-mono">{event.command}</span> (exit {event.exitCode})</div>
         {!event.ok && <pre className="mt-1 whitespace-pre-wrap break-all text-ink-2">{event.text}</pre>}
+      </div>
+    )
+  }
+  if (event.type === 'review') {
+    return (
+      <div className={`rounded-[6px] p-2 ${event.approved ? 'bg-subtle text-success' : 'border-l-2 border-danger bg-subtle pl-2 text-danger'}`}>
+        <div>{event.approved ? '✓' : '✕'} {t('revisão automática')}</div>
+        {event.text && <pre className="mt-1 whitespace-pre-wrap break-all text-ink-2">{event.text}</pre>}
       </div>
     )
   }
@@ -2470,6 +2533,7 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
   const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
   const [verifyCommand, setVerifyCommand] = useState(project.verifyCommand || '')
+  const [goalBudget, setGoalBudget] = useState(project.goalBudgetUsd != null ? String(project.goalBudgetUsd) : '')
   const [webhookUrl, setWebhookUrl] = useState(project.webhookUrl || '')
   const whStatuses = project.webhookStatuses || []
   const retry = project.retry || DEFAULT_RETRY
@@ -2646,6 +2710,29 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
             desc={t('Antes de executar, o Claude avalia cada task sem opção própria de quebra: se ela for grande demais, é desmembrada em subtasks menores em vez de rodar inteira.')}
             checked={!!project.autoDecompose}
             onChange={v => onPatch({ autoDecompose: v })} />
+          <div className="mt-1 text-meta text-muted">
+            {t('As subtasks partem da branch da task pai e são mergeadas nela ao concluir; a task pai roda por último, como integração, e é ela que faz o push/PR. Com isso ligado, uma task que esgota as tentativas é desmembrada uma vez em vez de ficar blocked.')}
+          </div>
+          <div className="mt-3 border-t border-line pt-3">
+            <GitCheck label={t('Revisão automática antes de concluir')}
+              desc={t('Depois do comando de verificação, uma sessão barata (modelo auxiliar, só leitura) confere se o diff entrega o que a task pede. Se reprovar, a task volta para "A fazer" com o feedback no log de erros e conta como tentativa.')}
+              checked={!!project.reviewGate}
+              onChange={v => onPatch({ reviewGate: v })} />
+          </div>
+          <label className="mt-3 flex items-start gap-3 border-t border-line pt-3">
+            <span className="mt-1">{t('Teto por objetivo (US$)')}</span>
+            <span className="flex-1">
+              <input type="number" min={0} step="0.5" value={goalBudget}
+                onChange={e => setGoalBudget(e.target.value)}
+                onBlur={() => onPatch({ goalBudgetUsd: goalBudget.trim() === '' ? null : Number(goalBudget) })}
+                onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+                placeholder="—"
+                className="w-24 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
+              <span className="mt-1 block text-meta text-muted">
+                {t('Soma de todas as execuções de uma task e das subtasks dela. Estourou: nada mais da árvore roda e a task ganha blocked (com aviso por webhook). Vazio: sem teto.')}
+              </span>
+            </span>
+          </label>
           <div className="mt-3 border-t border-line pt-3">
             <GitCheck label={t('Claude decide os pedidos de decisão humana')}
               desc={t('Quando o agente abre um "## Human Request", em vez de o card parar com a tag human-request, o próprio Claude assume a opção que recomendou e continua na execução seguinte (a decisão fica registrada no histórico da task). Depois de 3 decisões automáticas na mesma task, o card volta a esperar por um humano.')}

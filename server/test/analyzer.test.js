@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseSuggestions, buildPrompt, SUGGESTION_TYPES } from '../src/lib/analyzer.js'
+import { parseSuggestions, parseAnalysis, buildPrompt, SUGGESTION_TYPES } from '../src/lib/analyzer.js'
 
 const WANTED = ['melhoria', 'teste']
 
@@ -97,4 +97,21 @@ test('buildPrompt: lista só os tipos pedidos, com suas descrições', () => {
   assert.match(prompt, new RegExp(`- "correcao": ${SUGGESTION_TYPES.correcao}`))
   assert.ok(!prompt.includes('- "feature"'))
   assert.match(prompt, /Responda SOMENTE com um JSON válido/)
+})
+
+test('buildPrompt: modo livre deixa o Claude decidir e inclui a pergunta', () => {
+  const prompt = buildPrompt(Object.keys(SUGGESTION_TYPES), { free: true, question: 'o que falta pro onboarding?' })
+  assert.match(prompt, /decida você/)
+  assert.ok(!prompt.includes('APENAS dos tipos'))
+  assert.match(prompt, /o que falta pro onboarding\?/)
+  assert.ok(!buildPrompt(['teste']).includes('O usuário pediu'))
+})
+
+test('buildPrompt/parseAnalysis: parecer do projeto', () => {
+  assert.match(buildPrompt(['teste'], { report: true }), /O que eu refaria/)
+  assert.ok(!buildPrompt(['teste']).includes('"report"'))
+  const out = parseAnalysis(JSON.stringify({ report: '  ## Visão geral\nok ', suggestions: [{ title: 'A', type: 'teste' }] }), WANTED)
+  assert.equal(out.report, '## Visão geral\nok')
+  assert.equal(out.suggestions.length, 1)
+  assert.equal(parseAnalysis(wrap([]), WANTED).report, '')
 })

@@ -40,6 +40,7 @@ const KANBAN_EXCLUDES = [
   '.claude/claude-kanban/logs/',
   '.claude/claude-kanban/pending-actions.md',
   '.claude/claude-kanban/meta.json',
+  '.claude/claude-kanban/notes.md',
 ]
 export function excludeKanbanFromCommits(cwd) {
   try {
@@ -178,36 +179,59 @@ export function copyClaudeDir(root, dest) {
   })
 }
 
+// Branch de integração de uma task desmembrada: as subtasks partem dela e voltam
+// para ela (mergeIntoBranch), então a 2ª subtask enxerga o código da 1ª. Criada
+// da base na primeira vez que alguma filha precisa dela.
+function ensureParentBranch(root, g, parentId) {
+  const branch = taskBranch(parentId)
+  if (!branchExists(root, branch)) {
+    if (g.pullBeforeStart) updateBase(root, g.baseBranch)
+    git(root, 'branch', branch, resolveStartPoint(root, g.baseBranch))
+  }
+  return branch
+}
+
 // Prepara o workspace da task conforme as configurações de git do projeto.
+// parentId: task de que esta é subtask — o ponto de partida vira a branch do pai.
 // Retorna { cwd, branch, worktreeDir, startSha } — nulos quando não se aplicam.
-export function prepareWorkspace(project, taskId) {
+// fullDiff: branch já existente (integração) — startSha vira o ponto em que ela
+// saiu do startPoint, para o diff mostrar tudo que ela acumula.
+export function prepareWorkspace(project, taskId, { parentId = null, fullDiff = false } = {}) {
   const g = gitSettings(project)
   const root = project.path
   if (!isGitRepo(root)) return { cwd: root, branch: null, worktreeDir: null, startSha: null }
 
   const newBranch = taskBranch(taskId)
+  const parentBranch = parentId ? ensureParentBranch(root, g, parentId) : null
 
   if (g.useWorktree) {
     // Worktree exige branch própria (git não permite a mesma branch em dois worktrees),
     // então aqui a task sempre roda em branch nova.
     let startPoint = 'HEAD'
-    if (!g.useCurrentBranch) {
+    if (parentBranch) startPoint = parentBranch
+    else if (!g.useCurrentBranch) {
       if (g.pullBeforeStart) updateBase(root, g.baseBranch)
       startPoint = resolveStartPoint(root, g.baseBranch)
     }
     const dir = path.join(HOME_DIR, 'worktrees', project.id, taskId)
     fs.rmSync(dir, { recursive: true, force: true })
     try { git(root, 'worktree', 'prune') } catch {}
-    if (branchExists(root, newBranch)) git(root, 'worktree', 'add', dir, newBranch)
+    const existed = branchExists(root, newBranch)
+    if (existed) git(root, 'worktree', 'add', dir, newBranch)
     else git(root, 'worktree', 'add', dir, '-b', newBranch, startPoint)
     // .claude/ pode não estar commitado (hooks, settings, tasks) — copia do projeto
     if (fs.existsSync(path.join(root, '.claude'))) copyClaudeDir(root, path.join(dir, '.claude'))
     excludeKanbanFromCommits(dir)
-    return { cwd: dir, branch: newBranch, worktreeDir: dir, startSha: headSha(dir) }
+    let startSha = headSha(dir)
+    if (existed && fullDiff) { try { startSha = git(root, 'merge-base', startPoint, newBranch) } catch {} }
+    return { cwd: dir, branch: newBranch, worktreeDir: dir, startSha }
   }
 
   let branch = currentBranch(root)
-  if (!g.useCurrentBranch) {
+  if (parentBranch) {
+    if (branch !== parentBranch) git(root, 'checkout', parentBranch)
+    branch = parentBranch
+  } else if (!g.useCurrentBranch) {
     if (g.pullBeforeStart) updateBase(root, g.baseBranch)
     if (branch !== g.baseBranch) {
       resolveStartPoint(root, g.baseBranch) === g.baseBranch
@@ -303,6 +327,34 @@ export function mergeTaskBranch(project, branch, { noFF = true } = {}) {
     // Devolve o checkout para onde o humano estava — o merge não deve sequestrar a branch atual.
     if (original !== base && branchExists(root, original)) { try { git(root, 'checkout', original) } catch {} }
   }
+}
+
+// Merge de `branch` em `into` sem checkout nenhum (merge-tree + commit-tree):
+// a branch de integração de uma task desmembrada não está checada em lugar
+// algum enquanto as filhas rodam. Fast-forward quando dá; conflito sobe
+// MergeConflictError e nada é escrito. Exige git >= 2.38.
+export function mergeIntoBranch(root, branch, into) {
+  const head = git(root, 'rev-parse', into)
+  const tip = git(root, 'rev-parse', branch)
+  if (head === tip) return { sha: head, merged: false }
+  const isAncestor = (a, b) => {
+    try { git(root, 'merge-base', '--is-ancestor', a, b); return true } catch { return false }
+  }
+  if (isAncestor(tip, head)) return { sha: head, merged: false }
+  let sha = tip
+  if (!isAncestor(head, tip)) {
+    let tree
+    try {
+      tree = execFileSync('git', ['merge-tree', '--write-tree', head, tip],
+        { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n')[0].trim()
+    } catch (e) {
+      // Conflito: merge-tree sai com 1 e lista os arquivos no stdout.
+      throw new MergeConflictError((e.stdout || e.message).toString().trim())
+    }
+    sha = git(root, 'commit-tree', tree, '-p', head, '-p', tip, '-m', `Merge branch '${branch}' into ${into} (claude-kanban)`)
+  }
+  git(root, 'update-ref', `refs/heads/${into}`, sha, head)
+  return { sha, merged: true }
 }
 
 // Descarta o trabalho da task: apaga a branch local (e o worktree, se sobrou).
