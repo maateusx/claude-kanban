@@ -5,6 +5,16 @@ const TIMEOUT_MS = 5 * 60 * 1000
 const PRIORITIES = ['low', 'medium', 'high', 'urgent']
 const MAX_SUBTASKS = 8
 
+// Quantos níveis de desmembramento o autoDecompose pode encadear sozinho: a task
+// original é nível 0, as subtasks dela nível 1, e por aí vai. Sem esse teto, um
+// projeto com autoDecompose ligado quebra subtask de subtask até o modelo se
+// cansar — e cada nível é uma sessão paga. O botão "Desmembrar" ignora o teto:
+// pedido explícito do usuário sempre vale.
+export const MAX_DECOMPOSE_LEVEL = 2
+
+export const subtaskLevel = task =>
+  Number((task.tags || []).find(t => t.startsWith('nivel:'))?.slice(6)) || 0
+
 // mode 'forced': o usuário pediu para quebrar — sempre desmembra.
 // mode 'auto': o modelo decide se vale a pena; task pequena/atômica fica como está.
 export function buildPrompt(task, mode) {

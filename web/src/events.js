@@ -71,7 +71,9 @@ export function notificationsFor(evt, ctx) {
   switch (evt.type) {
     case 'run.finished': {
       const body = evt.humanRequest
-        ? t('⏸ Precisa de decisão humana: {task}', { task: taskLabel(evt.taskId) })
+        ? evt.autoDecided
+          ? t('🤖 Decidiu sozinho e continuou: {task}', { task: taskLabel(evt.taskId) })
+          : t('⏸ Precisa de decisão humana: {task}', { task: taskLabel(evt.taskId) })
         : evt.exitCode === 0
           ? t('✓ Concluída: {task}', { task: taskLabel(evt.taskId) })
           : t('✕ Falhou: {task}', { task: taskLabel(evt.taskId) })

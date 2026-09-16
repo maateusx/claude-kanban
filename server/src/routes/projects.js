@@ -4,11 +4,16 @@ import { saveProjects, STATUSES } from '../lib/paths.js'
 import { bootstrapProject, uninstallGuardrails } from '../lib/bootstrap.js'
 import { DEFAULT_GIT, gitSettings } from '../lib/git.js'
 import { normalizeModel } from '../lib/models.js'
-import { retrySettings, MAX_MAX_TURNS } from '../lib/runner.js'
+import { retrySettings, MAX_MAX_TURNS, RAW_MODES } from '../lib/runner.js'
 import { pluginsView, syncProjectPlugins, normalizeKeys, PLUGIN_KEYS } from '../lib/plugins.js'
 import { invalidModelMsg, withProject, withProjectRecord, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS } from './helpers.js'
 
-function validateProjectPath(projectPath) {
+function validateProjectPath(projectPath, create = false) {
+  // create: projeto novo (greenfield) — quem chama pela API não tem como dar mkdir.
+  if (create && !fs.existsSync(projectPath)) {
+    try { fs.mkdirSync(projectPath, { recursive: true }) }
+    catch (e) { return `não consegui criar o diretório: ${e.message}` }
+  }
   if (!fs.existsSync(projectPath) || !fs.statSync(projectPath).isDirectory()) return 'diretório não existe'
   try { fs.accessSync(projectPath, fs.constants.W_OK) } catch { return 'diretório não é gravável' }
   return null
@@ -33,9 +38,9 @@ export default function projectRoutes(app, ctx) {
   })
 
   app.post('/api/projects', (req, reply) => {
-    const { name, path: projectPath, description } = req.body || {}
+    const { name, path: projectPath, description, create } = req.body || {}
     if (!name || !projectPath) return reply.code(400).send({ error: 'name e path são obrigatórios' })
-    const pathError = validateProjectPath(projectPath)
+    const pathError = validateProjectPath(projectPath, !!create)
     if (pathError) return reply.code(400).send({ error: pathError })
     const project = {
       id: nanoid(6), name, path: projectPath,
@@ -57,7 +62,7 @@ export default function projectRoutes(app, ctx) {
   app.patch('/api/projects/:projectId', (req, reply) => {
     const p = withProjectRecord(ctx, req, reply); if (!p) return
     const { name, description, path: projectPath, skipPermissions, git, defaultModel, auxModel: auxModelIn,
-      autoRun, autoDecompose, devServer, timeoutMs, enrichMode, retry, maxTurns,
+      autoRun, autoDecompose, autoDecide, devServer, timeoutMs, enrichMode, rawMode, retry, maxTurns,
       webhookUrl, webhookStatuses } = req.body || {}
     if (name !== undefined) {
       if (!String(name).trim()) return reply.code(400).send({ error: 'name não pode ser vazio' })
@@ -169,6 +174,12 @@ export default function projectRoutes(app, ctx) {
       }
       p.enrichMode = enrichMode
     }
+    if (rawMode !== undefined) {
+      if (rawMode !== 'off' && !RAW_MODES.includes(rawMode)) {
+        return reply.code(400).send({ error: `rawMode deve ser off, ${RAW_MODES.join(', ')}` })
+      }
+      p.rawMode = rawMode
+    }
     if (webhookUrl !== undefined) {
       const u = String(webhookUrl || '').trim()
       if (u && !/^https?:\/\//i.test(u)) {
@@ -191,6 +202,7 @@ export default function projectRoutes(app, ctx) {
       p.devServer = next
     }
     if (autoDecompose !== undefined) p.autoDecompose = !!autoDecompose
+    if (autoDecide !== undefined) p.autoDecide = !!autoDecide
     if (autoRun !== undefined) {
       p.autoRun = !!autoRun
       if (p.autoRun) ctx.autoEnqueue(p)

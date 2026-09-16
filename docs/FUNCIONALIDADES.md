@@ -44,6 +44,8 @@ Quebra uma task grande em 2–8 subtasks encadeadas por `depends_on` (tags `subt
 ### 10. Fila global e runner
 Fila FIFO persistida (sobrevive a restart), com inserção por prioridade, reorder manual e kill. Cada task roda em sessão `claude -p` isolada com `--output-format stream-json`, modelo escolhido por task > projeto > default, timeout configurável (default 30 min), teto de turnos configurável (`--max-turns`, default 40, 0 desliga) e concorrência configurável (default 1, teto 8 — concorrência real exige worktree). (`server/src/lib/runner.js`)
 
+Modo cru (`rawMode` no projeto): em vez do prompt do kanban, a sessão recebe só título + descrição, como se alguém colasse a task no Claude Code do terminal. Três variantes: só executar, só planejar (plan mode; o plano vai para `## Plano`) e planejar + executar (retoma a sessão do plano para executá-lo). A resposta final vira o `## Resultado`.
+
 ### 11. Log de execução ao vivo
 Eventos da sessão são gravados em `.claude/claude-kanban/logs/<id>.jsonl` e transmitidos por WebSocket para o drawer da UI, com replay da última execução. (`runner.js`)
 
@@ -81,6 +83,8 @@ Ações bloqueadas pelos guardrails viram itens em `pending-actions.md` para um 
 
 ### 22. Human Request / Human Response
 O agente pode pausar por decisão humana escrevendo `## Human Request`; o card volta para `todo` com a tag `human-request` (fora do auto-pilot). O humano responde pela UI e a sessão retoma via `claude --resume` (com fallback de re-execução levando pergunta e resposta no prompt). (`runner.js`)
+
+Com `autoDecide` ligado no projeto, ninguém precisa responder: o prompt já manda o agente decidir sozinho, e se ele perguntar mesmo assim o orquestrador escreve a `## Human Response` ("assuma a opção que você recomendou") e devolve a task para a fila. O card decidido sozinho ganha a tag `auto-decided` (badge "🤖 decidido sozinho" no board e no detalhe) — rastro, não estado: não sai do auto-pilot. Depois de 3 decisões automáticas na mesma task o card volta a esperar um humano — perguntar e responder a si mesmo custa uma sessão por volta. (`runner.js`)
 
 ### 23. Skill claude-kanban
 `SKILL.md` instalado em cada projeto instrui a sessão: schema da task, preenchimento de `## Resultado`, criação de tasks no backlog e as políticas de guardrails. (`server/templates/SKILL.md`)

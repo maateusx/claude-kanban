@@ -22,7 +22,11 @@ const COLUMNS = [
   { key: 'archived', label: 'Archived', dot: 'bg-st-archived' },
 ]
 const HUMAN_REQUEST_TAG = 'human-request'
+// Card decidido pelo próprio Claude (projeto com auto-decisão): rastro, não estado.
+const AUTO_DECIDED_TAG = 'auto-decided'
+const AUTO_DECIDED_TITLE = t('O Claude decidiu no lugar do humano (auto-decisão ligada no projeto) — a pergunta e a decisão estão no "Histórico de Human Requests" no detalhe.')
 const ENRICH_LABEL = { off: t('não enriquecer'), auto: t('Claude decide'), always: t('sempre enriquecer') }
+const RAW_LABEL = { off: t('prompt do kanban'), 'plan-execute': t('cru: planejar + executar'), plan: t('cru: só planejar'), execute: t('cru: só executar') }
 
 // Cada view escolhe as colunas visíveis. Archived nunca aparece por padrão.
 const VIEWS = [
@@ -862,6 +866,7 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
         <BootstrapBadge project={project} onRerun={onRerun} />
         <BranchSelector project={project} onChanged={onChanged} />
         {project.skipPermissions && <Chip className="text-danger">skip-permissions</Chip>}
+        {project.rawMode && project.rawMode !== 'off' && <Chip>{RAW_LABEL[project.rawMode]}</Chip>}
         <div className="flex-1" />
         <DevServerButton project={project} onChanged={onChanged} />
         <button onClick={onSettings} title={t('Configurações do projeto')}
@@ -1142,11 +1147,14 @@ function CardBody({ task, queue, onRun, onOpen, selected, defaultModel, pending 
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
         <span title={prio.label} className={`text-body ${prio.cls}`}>{prio.arrow}</span>
-        {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG).map(tag => <TagChip key={tag} tag={tag} />)}
+        {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG && t !== AUTO_DECIDED_TAG).map(tag => <TagChip key={tag} tag={tag} />)}
         {(task.tags || []).includes(HUMAN_REQUEST_TAG) && (
           <Chip className="text-warning" title={t('O agente precisa de uma decisão sua — veja a seção Human Request no detalhe.')}>
             {t('⚑ decisão humana')}
           </Chip>
+        )}
+        {(task.tags || []).includes(AUTO_DECIDED_TAG) && (
+          <Chip className="text-info" title={AUTO_DECIDED_TITLE}>{t('🤖 decidido sozinho')}</Chip>
         )}
         <div className="flex-1" />
         {isFuture(task.scheduled_at) && (
@@ -1391,8 +1399,9 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
           <option value="on">{t('✦ enriquecer')}</option>
           <option value="off">{t('✦ não enriquecer')}</option>
         </select>
-        {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG).map(t => <TagChip key={t} tag={t} />)}
+        {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG && t !== AUTO_DECIDED_TAG).map(t => <TagChip key={t} tag={t} />)}
         {(task.tags || []).includes(HUMAN_REQUEST_TAG) && <Chip className="text-warning">{t('aguardando decisão humana')}</Chip>}
+        {(task.tags || []).includes(AUTO_DECIDED_TAG) && <Chip className="text-info" title={AUTO_DECIDED_TITLE}>{t('🤖 decidido sozinho')}</Chip>}
       </div>
 
       {editing ? (
@@ -2560,6 +2569,19 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
           </span>
         </label>
 
+        <label className="flex items-start gap-3">
+          <span className="mt-1">{t('Modo de execução')}</span>
+          <span className="flex-1">
+            <select value={project.rawMode || 'off'} onChange={e => onPatch({ rawMode: e.target.value })}
+              className="rounded-[6px] border border-line px-2 py-1 text-body outline-none">
+              {Object.entries(RAW_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+            <span className="mt-1 block text-meta text-muted">
+              {t('Cru: a task vai para o Claude Code headless só com título e descrição, sem as instruções do kanban. "Planejar" roda em plan mode e guarda o plano em "## Plano"; "planejar + executar" depois retoma a sessão e executa o plano. A resposta final vira o "## Resultado".')}
+            </span>
+          </span>
+        </label>
+
         <label className="flex items-center gap-3">
           <span>{t('Timeout da execução (minutos)')}</span>
           <input type="number" min={1} max={240} value={timeoutMin}
@@ -2624,6 +2646,12 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
             desc={t('Antes de executar, o Claude avalia cada task sem opção própria de quebra: se ela for grande demais, é desmembrada em subtasks menores em vez de rodar inteira.')}
             checked={!!project.autoDecompose}
             onChange={v => onPatch({ autoDecompose: v })} />
+          <div className="mt-3 border-t border-line pt-3">
+            <GitCheck label={t('Claude decide os pedidos de decisão humana')}
+              desc={t('Quando o agente abre um "## Human Request", em vez de o card parar com a tag human-request, o próprio Claude assume a opção que recomendou e continua na execução seguinte (a decisão fica registrada no histórico da task). Depois de 3 decisões automáticas na mesma task, o card volta a esperar por um humano.')}
+              checked={!!project.autoDecide}
+              onChange={v => onPatch({ autoDecide: v })} />
+          </div>
         </div>
 
         <PluginSettings project={project} />

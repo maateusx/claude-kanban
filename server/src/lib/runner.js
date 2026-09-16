@@ -2,8 +2,8 @@ import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadState, saveState, diffFile, logFile } from './paths.js'
-import { findTask, updateTask, appendToSection, listTasks, createTask, getSection, removeSection } from './tasks.js'
-import { decomposeTask } from './decomposer.js'
+import { findTask, updateTask, appendToSection, listTasks, createTask, getSection, removeSection, replaceSection } from './tasks.js'
+import { decomposeTask, subtaskLevel, MAX_DECOMPOSE_LEVEL } from './decomposer.js'
 import { prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo } from './git.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
 import { PRIORITY_RANK } from './sort.js'
@@ -46,6 +46,23 @@ export const HUMAN_REQUEST_TAG = 'human-request'
 
 const HISTORY_SECTION = 'Histórico de Human Requests'
 
+// Auto-decisão: com `autoDecide` ligado no projeto, um "## Human Request" não
+// para o card esperando gente — o próprio Claude responde por si, assumindo a
+// opção que ele mesmo recomendou, e a task volta para a fila. O teto existe
+// porque perguntar/responder sozinho é um loop que gasta uma sessão por volta:
+// passou disso, o card espera um humano de verdade.
+export const MAX_AUTO_DECISIONS = 3
+// Marca o card decidido sem humano — só rastro na UI, não muda o fluxo (ao
+// contrário de human-request, não tira a task do auto-pilot).
+export const AUTO_DECIDED_TAG = 'auto-decided'
+const AUTO_DECIDE_MARK = '[auto-decisão]'
+export const AUTO_DECIDE_RESPONSE = `${AUTO_DECIDE_MARK} Nenhum humano foi consultado: o projeto está com auto-decisão ligada. Assuma a opção que você mesmo recomendou (na falta de recomendação explícita, a mais simples e reversível), registre a escolha e o porquê em "## Resultado" e siga em frente.`
+
+// Quantas vezes esta task já foi decidida sozinha (o par pergunta/resposta fica
+// arquivado no histórico a cada retomada).
+export const autoDecideCount = body =>
+  (getSection(body, HISTORY_SECTION) || '').split(AUTO_DECIDE_MARK).length - 1
+
 // O agente sinaliza bloqueio por decisão humana escrevendo uma seção
 // "## Human Request" com conteúdo no arquivo da task.
 export function hasHumanRequest(body) {
@@ -75,6 +92,14 @@ export function consumeHumanAnswer(projectPath, taskId) {
   return { request, response }
 }
 const MAX_CONCURRENCY = 8
+
+// Modo "cru": a task vai para o `claude -p` só com título + descrição, sem o
+// prompt do kanban (skill, Resultado, human request, git) — como se alguém
+// abrisse o Claude Code no terminal e colasse a task. 'plan' roda em
+// --permission-mode plan e guarda o plano em "## Plano"; 'plan-execute' faz
+// isso e depois retoma a mesma sessão para executar o plano.
+export const RAW_MODES = ['execute', 'plan', 'plan-execute']
+export const rawModeOf = project => RAW_MODES.includes(project?.rawMode) ? project.rawMode : null
 
 // Gate de verificação pós-run: comando do projeto (testes/lint) executado no
 // worktree da task antes de ela poder virar `done`.
@@ -321,7 +346,8 @@ export class Runner {
   // human: par { request, response } já consumido do corpo — só vem preenchido no
   // retry sem resume (o corpo já não tem mais as seções). noResume: força o run
   // normal, com o prompt completo, mesmo havendo sessão anterior.
-  start(projectId, taskId, { skipDecompose = false, noResume = false, human = null } = {}) {
+  // rawExec: { plan, sessionId } — 2ª fase do modo cru 'plan-execute'.
+  start(projectId, taskId, { skipDecompose = false, noResume = false, human = null, rawExec = null } = {}) {
     const project = this.getProject(projectId)
     if (!project) return
     let task = findTask(project.path, taskId)
@@ -329,7 +355,7 @@ export class Runner {
 
     // Desmembrar em vez de executar: forçado pela task (decompose: true) ou,
     // com o autoDecompose do projeto ligado, o próprio modelo decide.
-    const decomposeMode = skipDecompose ? null
+    const decomposeMode = skipDecompose || rawExec ? null
       : task.decompose === true ? 'forced'
       : (task.decompose == null && project.autoDecompose) ? 'auto'
       : null
@@ -342,7 +368,11 @@ export class Runner {
     const sessionId = task.run?.session_id || null
     // Continuar a sessão anterior só faz sentido quando há resposta humana para
     // entregar: sem ela, o run é uma re-execução do zero.
-    const resumeFrom = !noResume && answer && sessionId ? sessionId : null
+    const raw = rawModeOf(project)
+    const rawPhase = !raw ? null : rawExec || raw === 'execute' ? 'execute' : 'plan'
+    const resumeFrom = rawExec
+      ? (!noResume && rawExec.plan && rawExec.sessionId) || null
+      : !noResume && answer && sessionId ? sessionId : null
 
     // O card vai para doing/ ANTES de preparar o workspace. updateTask move o
     // arquivo de pasta, e o worktree copia o .claude/ do projeto: preparando
@@ -353,7 +383,8 @@ export class Runner {
       status: 'doing',
       run: {
         started_at: new Date().toISOString(),
-        attempts: (task.run?.attempts || 0) + 1,
+        // A fase de execução do plan-execute é o mesmo run, não nova tentativa.
+        attempts: (task.run?.attempts || 0) + (rawExec ? 0 : 1),
       },
     })
 
@@ -388,9 +419,11 @@ export class Runner {
     const enrichMode = task.enrich === true ? 'always'
       : task.enrich === false ? 'off'
       : (project.enrichMode || 'off')
-    const prompt = resumeFrom
-      ? buildResumePrompt(taskRelPath, answer, workspace.branch, gitSettings(project))
-      : buildPrompt(taskRelPath, md, workspace.branch, gitSettings(project), enrichMode, answer)
+    const prompt = rawPhase
+      ? buildRawPrompt(task, rawPhase, rawExec?.plan, !!resumeFrom)
+      : resumeFrom
+      ? buildResumePrompt(taskRelPath, answer, workspace.branch, gitSettings(project), !!project.autoDecide)
+      : buildPrompt(taskRelPath, md, workspace.branch, gitSettings(project), enrichMode, answer, !!project.autoDecide)
 
     // O Claude Code não auto-aprova edits em .claude/ mesmo com acceptEdits.
     // Como as tasks vivem em .claude/claude-kanban/tasks/, liberamos Edit/Write
@@ -407,7 +440,9 @@ export class Runner {
       '--verbose',
       ...(turns ? ['--max-turns', String(turns)] : []),
       ...(model ? ['--model', model] : []),
-      ...(project.skipPermissions
+      ...(rawPhase === 'plan'
+        ? ['--permission-mode', 'plan']
+        : project.skipPermissions
         ? ['--dangerously-skip-permissions']
         : ['--permission-mode', 'acceptEdits', '--allowedTools', allowedTools]),
     ]
@@ -421,7 +456,7 @@ export class Runner {
     const timeoutMs = project.timeoutMs || DEFAULT_TIMEOUT_MS
     const a = {
       projectId, taskId, child, timer: null, result: null, stderr: '', workspace, taskRelPath, timeoutMs,
-      logStream: null, logBytes: 0, logEvents: [], resumeFrom, answer,
+      logStream: null, logBytes: 0, logEvents: [], resumeFrom, answer, rawPhase, rawExec, plan: null,
     }
 
     // Log persistido: cada run recomeça o arquivo do zero (o drawer mostra a
@@ -440,7 +475,9 @@ export class Runner {
 
     this.actives.set(taskId, a)
     if (resumeFrom) {
-      const note = { type: 'raw', text: `[resume] continuando a sessão ${resumeFrom} com a resposta humana` }
+      const note = { type: 'raw', text: rawExec
+        ? `[plan-execute] executando o plano na sessão ${resumeFrom}`
+        : `[resume] continuando a sessão ${resumeFrom} com a resposta humana` }
       this.recordLog(a, note)
       this.emit('run.log', { projectId, taskId, event: note })
     }
@@ -457,6 +494,7 @@ export class Runner {
         let event
         try { event = JSON.parse(line) } catch { event = { type: 'raw', text: line } }
         if (event.type === 'result') a.result = event
+        if (rawPhase === 'plan') a.plan = exitPlanText(event) ?? a.plan
         this.recordLog(a, event)
         this.emit('run.log', { projectId, taskId, event })
       }
@@ -532,15 +570,19 @@ export class Runner {
     }
 
     const parent = findTask(project.path, a.taskId)
+    const level = subtaskLevel(parent) + 1
     const created = []
     for (const s of res.subtasks) {
       const t = createTask(project.path, {
         title: s.title,
         description: `${s.description}\n\n_Subtask desmembrada de "${parent.title}" (${parent.id})._`,
         priority: s.priority,
-        tags: ['subtask', `pai:${parent.id}`],
+        tags: ['subtask', `pai:${parent.id}`, `nivel:${level}`],
         status: 'todo',
         model: parent.model || null,
+        // null = deixa o autoDecompose do projeto decidir se essa subtask ainda
+        // vale quebrar; no último nível fecha a porta para não descer infinito.
+        decompose: level >= MAX_DECOMPOSE_LEVEL ? false : null,
         // O modelo devolve as subtasks já ordenadas por dependência: encadeamos em
         // série para a fila respeitar essa ordem (a 3ª não roda antes da 1ª).
         depends_on: created.length ? [created[created.length - 1].id] : [],
@@ -678,7 +720,9 @@ export class Runner {
       appendToSection(project.path, a.taskId, 'Log de erros',
         `[${runMeta.completed_at}] Falha ao retomar a sessão ${a.resumeFrom} (exit code ${exitCode}). ` +
         `Re-executando do zero com o prompt completo.\n\n\`\`\`\n${(a.stderr || '').slice(-2000)}\n\`\`\``)
-      this.start(a.projectId, a.taskId, { noResume: true, human: a.answer })
+      this.start(a.projectId, a.taskId, a.rawExec
+        ? { noResume: true, rawExec: { plan: a.rawExec.plan } }
+        : { noResume: true, human: a.answer })
       return
     }
     if (a.killed && !a.timedOut) {
@@ -699,20 +743,47 @@ export class Runner {
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
       })
+    } else if (a.rawPhase === 'plan' && exitCode === 0 && !a.timedOut) {
+      // Plano pronto: vai para "## Plano". Em 'plan' a task termina aqui; em
+      // 'plan-execute' a mesma sessão é retomada para executar.
+      const plan = (a.plan || r.result || '').trim()
+      if (plan) updateTask(project.path, a.taskId, { body: replaceSection(task.body, 'Plano', plan) })
+      if (rawModeOf(project) === 'plan-execute') {
+        updateTask(project.path, a.taskId, { run: runMeta })
+        this.start(a.projectId, a.taskId, { rawExec: { plan, sessionId: runMeta.session_id } })
+        return
+      }
+      updateTask(project.path, a.taskId, { status: 'done', run: runMeta })
+      markSucceeded(a.taskId, { completedAt: runMeta.completed_at, sessionId: runMeta.session_id })
+      this.emit('run.finished', {
+        projectId: a.projectId, taskId: a.taskId, exitCode,
+        costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
+        numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
+      })
     } else if (exitCode === 0 && !a.timedOut && hasHumanRequest(task?.body)) {
       // O agente sinalizou que depende de uma decisão humana: o card volta para
       // todo com a tag human-request (fora do auto-pilot) em vez de concluir.
+      // Com autoDecide ligado (e abaixo do teto), a resposta é escrita pelo
+      // próprio orquestrador e a task volta para a fila — o run seguinte retoma
+      // a sessão com a decisão tomada, sem ninguém precisar responder.
+      const autoDecided = !!project.autoDecide && autoDecideCount(task.body) < MAX_AUTO_DECISIONS
       updateTask(project.path, a.taskId, {
         status: 'todo',
         run: runMeta,
-        ...(task.tags?.includes(HUMAN_REQUEST_TAG) ? {} : { tags: [...(task.tags || []), HUMAN_REQUEST_TAG] }),
+        ...(autoDecided
+          ? {
+            body: replaceSection(task.body, 'Human Response', AUTO_DECIDE_RESPONSE),
+            ...(task.tags?.includes(AUTO_DECIDED_TAG) ? {} : { tags: [...(task.tags || []), AUTO_DECIDED_TAG] }),
+          }
+          : (task.tags?.includes(HUMAN_REQUEST_TAG) ? {} : { tags: [...(task.tags || []), HUMAN_REQUEST_TAG] })),
       })
       this.emit('run.finished', {
-        projectId: a.projectId, taskId: a.taskId, exitCode, humanRequest: true,
+        projectId: a.projectId, taskId: a.taskId, exitCode, humanRequest: true, autoDecided,
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
         pr: runMeta.pr,
       })
+      if (autoDecided) this.enqueue(a.projectId, a.taskId)
     } else if (verify && !verify.ok && !a.timedOut) {
       // Verificação reprovou: volta para todo (conta como tentativa) e NÃO entra
       // no ledger — o card precisa ser re-executado até a build passar. Segue a
@@ -739,6 +810,11 @@ export class Runner {
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
       })
     } else if (exitCode === 0 && !a.timedOut) {
+      // No modo cru o agente não sabe do arquivo da task: a resposta final da
+      // sessão vira o "## Resultado".
+      if (a.rawPhase && r.result?.trim()) {
+        updateTask(project.path, a.taskId, { body: replaceSection(task.body, 'Resultado', r.result.trim()) })
+      }
       updateTask(project.path, a.taskId, { status: 'done', run: runMeta })
       // Registra no ledger ANTES de qualquer coisa depender do status: mesmo que
       // o done/ se perca depois, o card não roda de novo.
@@ -829,6 +905,23 @@ const EXIT_REASON_TEXT = {
   exit_code: 'Processo do Claude saiu com erro',
 }
 
+// Texto do plano no evento de stream: o input da tool ExitPlanMode. No -p ninguém
+// aprova a saída do plan mode, então é ali (e não no result) que o plano aparece
+// inteiro. Devolve undefined quando o evento não traz plano.
+export function exitPlanText(event) {
+  if (event?.type !== 'assistant') return undefined
+  const use = (event.message?.content || []).find(c => c.type === 'tool_use' && c.name === 'ExitPlanMode')
+  return typeof use?.input?.plan === 'string' ? use.input.plan : undefined
+}
+
+// Prompt do modo cru: só o que a pessoa escreveria no terminal.
+export function buildRawPrompt(task, phase, plan, resumed) {
+  if (phase === 'execute' && plan && resumed) return 'Plano aprovado. Execute-o agora, do início ao fim.'
+  const desc = getSection(task.body, 'Descrição') || ''
+  const base = desc ? `${task.title}\n\n${desc}` : task.title
+  return phase === 'execute' && plan ? `${base}\n\nExecute este plano, já aprovado:\n\n${plan}` : base
+}
+
 function gitInstructions(branch, g) {
   if (!branch) return ''
   const steps = [`
@@ -882,6 +975,19 @@ em "## Resultado" o que já foi feito, e encerre normalmente. O orquestrador dev
 o card para revisão humana.
 `
 
+// Auto-decisão ligada: ninguém vai responder, então perguntar só queima uma sessão
+// inteira para voltar ao mesmo ponto. Decida você mesmo e deixe a escolha registrada.
+const AUTO_DECIDE_INSTRUCTIONS = `
+Este projeto está com auto-decisão ligada: NÃO existe humano para responder. Se a task
+depender de uma escolha (ambiguidade de produto, trade-off técnico), decida você mesmo
+pela opção que recomendaria — a mais simples e reversível — e registre em "## Resultado"
+a decisão, as alternativas e o porquê. Só abra uma seção "## Human Request" se a task
+for de fato impossível sem um humano (credencial, acesso, aprovação externa).
+`
+
+const humanRequestInstructions = autoDecide =>
+  autoDecide ? AUTO_DECIDE_INSTRUCTIONS : HUMAN_REQUEST_INSTRUCTIONS
+
 // Bloco com o par pergunta/resposta quando o run é uma retomada sem sessão (ou um
 // fallback de resume que falhou): as seções já saíram do corpo da task, então o
 // contexto precisa vir pelo prompt.
@@ -903,7 +1009,7 @@ ${answer.response}
 
 // Prompt de um run que continua a sessão anterior (`claude --resume`): o modelo já
 // tem todo o contexto da execução que parou na pergunta — só falta a resposta.
-function buildResumePrompt(taskRelPath, answer, branch, g) {
+function buildResumePrompt(taskRelPath, answer, branch, g, autoDecide = false) {
   return `O humano respondeu à sua "## Human Request" da task ${taskRelPath}.
 
 <human-request>
@@ -918,7 +1024,7 @@ Continue a task de onde parou, com essa decisão tomada. A seção "## Human Req
 já foi removida do arquivo da task (a pergunta e a resposta ficam registradas em
 "## Histórico de Human Requests") — não a recrie, a menos que precise de uma NOVA
 decisão humana.
-${HUMAN_REQUEST_INSTRUCTIONS}
+${humanRequestInstructions(autoDecide)}
 Instruções obrigatórias ao concluir:
 1. Edite ${taskRelPath}, seção "## Resultado": resumo do que foi feito, decisões
    técnicas e porquês, arquivos criados/alterados, contexto para memória futura
@@ -930,14 +1036,14 @@ Instruções obrigatórias ao concluir:
    onde travou e o que falta.${gitInstructions(branch, g)}`
 }
 
-function buildPrompt(taskRelPath, md, branch, g, enrichMode = 'off', answer = null) {
+function buildPrompt(taskRelPath, md, branch, g, enrichMode = 'off', answer = null, autoDecide = false) {
   return `Você vai executar a task abaixo, definida no arquivo ${taskRelPath} deste projeto.
 Siga a skill "claude-kanban" deste projeto para o workflow de tasks.
 
 <task>
 ${md}
 </task>
-${humanAnswerBlock(answer)}${enrichInstructions(enrichMode)}${HUMAN_REQUEST_INSTRUCTIONS}
+${humanAnswerBlock(answer)}${enrichInstructions(enrichMode)}${humanRequestInstructions(autoDecide)}
 Instruções obrigatórias ao concluir:
 1. Edite ${taskRelPath}, seção "## Resultado": resumo do que foi feito, decisões
    técnicas e porquês, arquivos criados/alterados, contexto para memória futura
