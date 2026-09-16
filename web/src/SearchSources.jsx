@@ -14,7 +14,7 @@ const HAS_BODY = m => m !== 'GET' && m !== 'DELETE'
 const BLANK = {
   name: '', method: 'GET', url: '',
   headers: [], queryParams: [], body: '', bodyType: 'json', enabled: true,
-  resultsPath: '', titleField: '', descriptionField: '',
+  resultsPath: '', titleField: '', descriptionField: '', pollMinutes: 0,
 }
 
 const input = 'w-full rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent'
@@ -104,6 +104,14 @@ function SourceForm({ source, busy, onSave, onCancel }) {
           <input type="checkbox" checked={s.enabled} onChange={e => set({ enabled: e.target.checked })}
             className="accent-[var(--color-accent)]" />
           {t('Ativa')}
+        </label>
+        <label className="flex items-center gap-2 text-meta text-muted"
+          title={t('O autopilot busca sozinho a cada N minutos e importa o que for novo. 0 = só busca manual.')}>
+          {t('Buscar sozinho a cada')}
+          <input type="number" min={0} max={10080} value={s.pollMinutes ?? 0} aria-label={t('Intervalo de busca automática (min)')}
+            onChange={e => set({ pollMinutes: e.target.value === '' ? 0 : Number(e.target.value) })}
+            className="w-16 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
+          min
         </label>
         <div className="flex-1" />
         <button type="button" onClick={onCancel} disabled={busy}

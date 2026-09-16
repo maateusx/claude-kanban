@@ -22,7 +22,7 @@ export function normalizeSource(input = {}, base = null) {
     id: nanoid(6),
     name: '', method: 'GET', url: '',
     headers: [], queryParams: [], body: '', bodyType: 'json', enabled: true,
-    resultsPath: '', titleField: '', descriptionField: '',
+    resultsPath: '', titleField: '', descriptionField: '', pollMinutes: 0,
   }
   if (input.name !== undefined) s.name = String(input.name || '').trim()
   if (input.method !== undefined) s.method = String(input.method || '').toUpperCase()
@@ -35,6 +35,13 @@ export function normalizeSource(input = {}, base = null) {
   // Mapeamento da resposta JSON (ver searchFetch.js): caminhos com ponto, opcionais.
   for (const k of ['resultsPath', 'titleField', 'descriptionField']) {
     if (input[k] !== undefined) s[k] = String(input[k] || '').trim()
+  }
+
+  if (input.pollMinutes !== undefined) {
+    const n = input.pollMinutes === null || input.pollMinutes === '' ? 0 : Number(input.pollMinutes)
+    // Polling automático (autopilot): 0 = só busca manual.
+    if (!Number.isInteger(n) || n < 0 || n > 10080) throw new Error('pollMinutes deve ser um inteiro entre 0 e 10080')
+    s.pollMinutes = n
   }
 
   if (!s.name) throw new Error('name é obrigatório')

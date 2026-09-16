@@ -7,6 +7,7 @@ import { bootstrapStatus } from './lib/bootstrap.js'
 import { listPendingActions } from './lib/pending.js'
 import { gitSettings, projectBranch } from './lib/git.js'
 import { retrySettings, turnLimit } from './lib/runner.js'
+import { autopilotSettings } from './lib/autopilot.js'
 import { auxModel } from './lib/models.js'
 import { normalizeKeys } from './lib/plugins.js'
 import { getUsage } from './lib/usage.js'
@@ -42,6 +43,7 @@ export async function buildApp(deps) {
       ...p,
       git: gitSettings(p),
       retry: retrySettings(p),
+      autopilot: autopilotSettings(p),
       maxTurns: turnLimit(p) ?? 0,
       auxModel: auxModel(p),
       plugins: normalizeKeys(p.plugins),

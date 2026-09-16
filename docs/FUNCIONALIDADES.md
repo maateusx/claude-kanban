@@ -39,7 +39,7 @@ Reescreve a descrição da task para deixá-la clara e acionável — sob demand
 ### 9. Decomposição de tasks
 Quebra uma task grande em 2–8 subtasks encadeadas por `depends_on` (tags `subtask`/`pai:<id>`) — sob demanda ou automaticamente (`autoDecompose`). (`server/src/lib/decomposer.js`)
 
-A task desmembrada vira um **objetivo**: volta para `todo` com a tag `decomposta`, dependendo de todas as filhas, e roda por último como **integração** — confere o conjunto contra a descrição original, roda build/testes, corrige as costuras e faz o push/PR. As filhas partem da branch `kanban/<pai>` e, ao concluir, o servidor as mergeia nela (tag `integrada`), então a 2ª subtask já enxerga o código da 1ª. O card do objetivo mostra o progresso (`✂ 3/5 subtasks`) e o custo somado da árvore.
+A task desmembrada vira um **objetivo**: volta para `todo` com a tag `decomposta`, dependendo de todas as filhas, e roda por último como **integração** — confere o conjunto contra a descrição original, roda build/testes, corrige as costuras e faz o push/PR. As filhas partem da branch `kanban/<pai>` e, ao concluir, o servidor as mergeia nela (tag `integrada`), então a 2ª subtask já enxerga o código da 1ª. Conflito nessa integração vira uma sessão de resolução (17g). O card do objetivo mostra o progresso (`✂ 3/5 subtasks`) e o custo somado da árvore.
 
 ## Execução
 
@@ -78,7 +78,31 @@ Depois do gate de verificação, uma sessão somente leitura no modelo auxiliar 
 O custo de cada task acumula em `run.total_cost_usd` (todas as tentativas, decomposição e revisão). Com o teto ligado, a árvore que o ultrapassa para: a próxima task ganha `blocked` e o webhook avisa (`run_failed`).
 
 ### 17d. Aprendizados entre tasks
-A sessão registra o que descobriu de não óbvio numa seção `## Aprendizados`; o orquestrador junta tudo em `.claude/claude-kanban/notes.md` e injeta nos prompts seguintes — a subtask 4 não repete o erro da 2.
+A sessão registra o que descobriu de não óbvio numa seção `## Aprendizados`; o orquestrador junta tudo em `.claude/claude-kanban/notes.md` e injeta nos prompts seguintes — a subtask 4 não repete o erro da 2. Quando o arquivo passa de 9 KB, o autopilot o compacta com o modelo auxiliar (junta duplicatas, descarta o que foi contradito), em vez de só cortar o começo.
+
+### 17e. Verify de referência
+Quando o `verifyCommand` falha, o mesmo comando roda na base de onde a branch saiu, num worktree destacado (em cache por commit). Se a base já falhava igual, a falha não conta contra a task; se a task trouxe falhas novas, elas vão destacadas no topo do log. Um teste quebrado na `main` deixa de consumir as tentativas de todo mundo. (`runner.js`, `git.js`)
+
+### 17f. Escalação de modelo e sessão travada
+`retry.escalateModels` troca o modelo nas retentativas (a 2ª usa o primeiro da lista, a 3ª o segundo…). E a detecção de sessão travada (`stuckDetection`, ligada por padrão) observa o stream e encerra a sessão que chama a mesma tool com o mesmo input 3 vezes seguidas ou faz 40 chamadas sem editar arquivo — `exit_reason: stuck`, conta como tentativa.
+
+### 17g. Resolução de conflito
+Conflito ao integrar uma subtask na branch do pai (ou no auto-merge na base) não vira `blocked` de cara: a task volta para a fila com a tag `conflito` e `run.merge_from`, e a sessão seguinte recebe a instrução de mergear aquela branch, resolver, rodar os testes e commitar. Duas rodadas por task; depois disso, humano. Numa branch retomada (retry, feedback de PR, conflito) o diff é sempre medido desde o ponto de partida, recalculado no fim — o que veio da base num merge não conta como trabalho da task.
+
+### 17h. Auto-merge por política
+`autopilot.autoMerge` (`enabled`, `maxLines`, `protectedPaths`) deixa o trabalho entrar sem aprovação humana quando a revisão automática aprovou, o diff é pequeno e não toca caminho protegido (default `.github/**`). Sem PR, o merge local acontece ao concluir; com PR, o autopilot roda `gh pr merge` quando os checks passam. A task vai para `archived` com a tag `merged`.
+
+### 17i. Acompanhamento de PR
+Com `autopilot.prFollowUp`, o autopilot consulta as PRs abertas pelas tasks a cada 3 min: check vermelho (com a cauda do log do Actions), comentário novo (inclusive de linha; bots de fora) ou conflito com a base devolvem a task para a fila com uma seção `## Feedback da PR`. A sessão corrige e dá push na mesma branch. PR mergeada por fora arquiva a task. Depois de 3 rodadas, o webhook `pr_needs_human` chama um humano. (`server/src/lib/autopilot.js`)
+
+### 17j. Trabalho que chega sozinho
+O autopilot também puxa trabalho: issues com uma label (`issuesLabel` a cada `issuesMinutes`), fontes de busca com `pollMinutes`, run do Actions falhado na branch principal (`watchMainCI` → task `urgent`, tag `ci:<sha>`) e o ✨ Suggest agendado (`suggestHours`, com teto `suggestMax` de sugestões abertas). Tudo entra em `autopilot.importStatus` (`backlog` ou `todo`) com dedupe por tag.
+
+### 17k. Sandbox e checagem visual
+`sandbox` passa ao `claude -p` o sandbox nativo do Claude Code: Bash confinado em filesystem e rede (só GitHub e registries), sem fallback para fora do sandbox e falhando se ele não estiver disponível — a camada que os guardrails por regex não são. `visualCheck` (`command` + `url`) faz a revisão automática subir a app a partir do worktree, tirar um screenshot com o Playwright e conferir a parte visual.
+
+### 17l. Resumo diário
+Com `autopilot.digestHour` e `webhookUrl`, uma vez por dia sai o webhook `daily_digest`: o que concluiu, o que travou, o que espera decisão e o gasto das últimas 24h.
 
 ### 18. Ledger de idempotência
 Só sucessos entram no `ledger.json`; caminhos automáticos nunca re-executam uma task já registrada (evita loops quando o status na pasta se perde). Um run pedido explicitamente por humano limpa o registro. (`server/src/lib/ledger.js`)
@@ -119,7 +143,7 @@ Com `autoPush` + `autoPR`, a sessão abre a PR via `gh pr create` e a plataforma
 ## Observabilidade e conveniência
 
 ### 28. Painel de custos
-Agrega custo (USD), duração e turnos por dia/modelo/status a partir dos blocos `run` dos `.md`, em janela configurável. (`server/src/lib/stats.js`)
+Agrega custo (USD), duração e turnos por dia/modelo/status a partir dos blocos `run` dos `.md`, em janela configurável. Métricas de autonomia: taxa de tasks que passam de primeira, % que precisou de humano, custo por task concluída (somando tentativas), quantas foram mergeadas e por que os runs pararam. (`server/src/lib/stats.js`)
 
 ### 29. Widget de uso do plano Claude
 Mostra limites e uso da conta (sessão de 5h e semanais) lendo o token OAuth local. (`server/src/lib/usage.js`)
@@ -137,7 +161,7 @@ Escolha de modelo por task/projeto, com normalização de aliases legados (`opus
 Board com drag-and-drop (dnd-kit), colunas por status, filtros por tag, ordenação configurável, drawer de log, visualização de diff, notificações do sistema e sons. Os projetos do rail lateral também se arrastam (mouse ou teclado: foco + espaço + setas) para definir a ordem, persistida em `projects.json` via `POST /api/projects/reorder`. (`web/src/`)
 
 ### 34. Webhook de mudança de status, falha e ação humana
-Com `webhookUrl` configurado no projeto, o servidor faz `POST` de JSON (`{ event, projectId, project, taskId, taskTitle, at, … }`) nos casos em que ninguém pode ficar esperando o board aberto: `task_status_changed` (task mudou de status pela UI, pela API ou por move manual de arquivo — com `from` e `to`, incluindo `to: "archived"`), `run_failed` (exit code ≠ 0, timeout ou verificação reprovada), `human_request` (o agente deixou uma `## Human Request`) e `pending_action` (guardrail bloqueou um comando). O `webhookStatuses` do projeto — checkboxes "Status avisados" nas Configurações do projeto — restringe quais status disparam `task_status_changed` (nenhum marcado = todos); os outros eventos passam sempre. Fire-and-forget com timeout de 10s: endpoint fora do ar não trava nem derruba o run. (`server/src/lib/webhook.js`)
+Com `webhookUrl` configurado no projeto, o servidor faz `POST` de JSON (`{ event, projectId, project, taskId, taskTitle, at, … }`) nos casos em que ninguém pode ficar esperando o board aberto: `task_status_changed` (task mudou de status pela UI, pela API ou por move manual de arquivo — com `from` e `to`, incluindo `to: "archived"`), `run_failed` (exit code ≠ 0, timeout ou verificação reprovada), `human_request` (o agente deixou uma `## Human Request`), `pending_action` (guardrail bloqueou um comando), `pr_needs_human` (o acompanhamento de PR desistiu) e `daily_digest` (resumo diário, se ligado). O `webhookStatuses` do projeto — checkboxes "Status avisados" nas Configurações do projeto — restringe quais status disparam `task_status_changed` (nenhum marcado = todos); os outros eventos passam sempre. Fire-and-forget com timeout de 10s: endpoint fora do ar não trava nem derruba o run. (`server/src/lib/webhook.js`)
 
 ### 35. Configurações globais em abas e tema claro/escuro
 As configurações globais são separadas por tema em abas — **Execução** (concorrência, catálogo de modelos), **Aparência**, **Alertas** (notificações e sons) e **Extensões**. Em Aparência dá para escolher tema **Sistema** (default, acompanha o modo claro/escuro do SO em tempo real via `matchMedia`), **Claro** ou **Escuro**; a preferência vive no `localStorage` do navegador, como notificações e sons. O tema escuro só reatribui os design tokens em `:root[data-theme="dark"]` — nenhum componente tem variante `dark:`. (`web/src/theme.js`, `web/src/index.css`, `GlobalSettingsModal` em `web/src/App.jsx`)
@@ -174,4 +198,4 @@ Um **catálogo embutido** (`server/src/lib/catalog.js`) oferece skills, agents e
 - **Isolamento por worktree** com auto-commit de segurança → concorrência real e descarte sem risco.
 - **Ledger de idempotência** contra loops de re-execução.
 - **Human-in-the-loop de verdade**: Human Request/Response com retomada de sessão, revisão por diff antes do merge.
-- **Auto-pilot completo**: auto-run, auto-decompose com branch de integração, replanejamento, revisão automática, teto de custo por objetivo, enrich, retry com backoff, agendamento e gate de verificação.
+- **Auto-pilot completo**: auto-run, auto-decompose com branch de integração, replanejamento, revisão automática, teto de custo por objetivo, enrich, retry com backoff e escalação de modelo, agendamento, gate de verificação com referência na base, resolução de conflito, auto-merge por política, acompanhamento de PR e entrada automática de trabalho.

@@ -28,6 +28,8 @@ export function webhookEventsFor(evt, seen = new Set(), statuses = null) {
         return [{ event: 'run_failed', taskId: evt.taskId, exitCode: evt.exitCode, verifyFailed: !!evt.verifyFailed }]
       }
       return []
+    case 'pr.attention':
+      return [{ event: 'pr_needs_human', taskId: evt.taskId, url: evt.url, reason: evt.reason }]
     case 'task.moved':
       if (statuses?.length && !statuses.includes(evt.to)) return []
       return [{ event: 'task_status_changed', taskId: evt.taskId, from: evt.from, to: evt.to }]

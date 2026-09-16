@@ -19,6 +19,11 @@ export function hasRun(task) {
   return runAt(r) != null || num(r.attempts) > 0 || r.cost_usd != null
 }
 
+// O que conta como "precisou de gente": tag de bloqueio/pedido ou motivo de
+// saída que não se resolve sozinho.
+const HUMAN_TAGS = ['blocked', 'human-request']
+const HUMAN_REASONS = ['integration_conflict', 'goal_budget', 'max_turns']
+
 const dayKey = ts => new Date(ts).toISOString().slice(0, 10)
 
 // Soma um bucket (por dia/modelo/status) in-place.
@@ -76,6 +81,24 @@ export function computeStats(tasks, { days = 30, defaultModel = null, now = Date
     if (r.exit_code === 0) totals.successes += 1
   }
 
+  // Métricas de autonomia: quanto passa de primeira, quanto acaba num humano e
+  // quanto custa, com todas as tentativas, cada task que de fato concluiu.
+  const done = runs.filter(t => t.status === 'done' || t.status === 'archived')
+  const needsHuman = t => (t.tags || []).some(tag => HUMAN_TAGS.includes(tag)) || HUMAN_REASONS.includes(t.run.exit_reason)
+  const byExitReason = new Map()
+  for (const t of runs) {
+    const k = t.run.exit_reason
+    if (k) byExitReason.set(k, (byExitReason.get(k) || 0) + 1)
+  }
+  const autonomy = {
+    done: done.length,
+    firstPassRate: done.length ? done.filter(t => num(t.run.attempts) <= 1).length / done.length : null,
+    humanRate: runs.length ? runs.filter(needsHuman).length / runs.length : null,
+    costPerDone: done.length ? done.reduce((sum, t) => sum + num(t.run.total_cost_usd ?? t.run.cost_usd), 0) / done.length : null,
+    autoMerged: done.filter(t => (t.tags || []).includes('merged')).length,
+    byExitReason: [...byExitReason.entries()].map(([reason, n]) => ({ reason, n })).sort((a, b) => b.n - a.n),
+  }
+
   const top = runs
     .filter(t => num(t.run.cost_usd) > 0)
     .sort((a, b) => num(b.run.cost_usd) - num(a.run.cost_usd))
@@ -103,6 +126,7 @@ export function computeStats(tasks, { days = 30, defaultModel = null, now = Date
       // Aceite: exit 0 sobre o total de tentativas (retries contam no denominador).
       successRate: totals.attempts ? totals.successes / totals.attempts : null,
     },
+    autonomy,
     byDay: [...byDay.entries()].map(([date, v]) => ({ date, ...v })).sort((a, b) => a.date.localeCompare(b.date)),
     byModel: rows(byModel, 'model'),
     byStatus: rows(byStatus, 'status'),
