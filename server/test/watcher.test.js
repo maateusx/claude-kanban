@@ -41,7 +41,10 @@ async function start(root) {
   // dele chega — aí o stream está comprovadamente vivo. Depois zeramos os eventos.
   const sentinela = path.join(tasksDir(root, 'backlog'), 'sentinela.md')
   writeFileSync(sentinela, '## Descrição\n\nsentinela\n')
-  await waitFor(() => find(events, 'task.upserted', e => e.task.fileName === 'sentinela.md'))
+  // watcher aberto mantém o event loop vivo: sem fechar aqui, um timeout trava a suíte inteira
+  try {
+    await waitFor(() => find(events, 'task.upserted', e => e.task.fileName === 'sentinela.md'))
+  } catch (e) { await watcher.close(); throw e }
   events.length = 0
 
   return { events, watcher }
