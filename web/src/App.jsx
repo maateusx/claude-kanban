@@ -2577,6 +2577,60 @@ function AutonomySettings({ project, onPatch }) {
           onCommit={digestHour => patchAp({ digestHour })} />
         <span className="text-meta text-muted">{t('h (vazio = desligado) — evento daily_digest')}</span>
       </div>
+      <CleanupSettings project={project} cleanup={ap.cleanup || {}} patch={cleanup => patchAp({ cleanup })} />
+    </div>
+  )
+}
+
+// Limpeza de branches kanban/* e worktrees órfãos. No modo confirmar, o humano
+// carrega a lista de candidatos e remove o lote marcado.
+function CleanupSettings({ project, cleanup, patch }) {
+  const [cands, setCands] = useState(null)
+  const [sel, setSel] = useState(new Set())
+  const [msg, setMsg] = useState('')
+  const load = () => api.cleanup(project.id).then(c => {
+    setCands(c)
+    setSel(new Set([...c.branches.map(b => b.name), ...c.worktrees.map(w => w.dir)]))
+  }).catch(e => setMsg(e.message))
+  const toggle = k => setSel(s => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n })
+  const remove = () => api.applyCleanup(project.id, {
+    branches: cands.branches.map(b => b.name).filter(n => sel.has(n)),
+    worktrees: cands.worktrees.map(w => w.dir).filter(d => sel.has(d)),
+  }).then(r => {
+    setMsg(`${t('Removidos')}: ${r.branches.length} branch(es), ${r.worktrees.length} worktree(s)` +
+      (r.errors.length ? ` — ${r.errors.join('; ')}` : ''))
+    return load()
+  }).catch(e => setMsg(e.message))
+  const items = cands ? [
+    ...cands.worktrees.map(w => ({ key: w.dir, label: `worktree ${w.taskId}`, reason: w.reason })),
+    ...cands.branches.map(b => ({ key: b.name, label: b.name, reason: b.reason })),
+  ] : []
+  return (
+    <div className="space-y-2 border-t border-line pt-3">
+      <GitCheck label={t('Limpar branches kanban/* e worktrees órfãos')}
+        desc={t('Só entram branches já contidas na branch principal ou de tasks mergeadas, integradas ou descartadas — nunca de task em backlog/a fazer/em andamento ou com PR aberta. Worktree sem sessão viva recebe um commit de segurança antes de sair.')}
+        checked={!!cleanup.enabled} onChange={enabled => patch({ enabled })} />
+      <div className={`ml-7 flex flex-wrap items-center gap-2 ${cleanup.enabled ? '' : 'opacity-40'}`}>
+        <select value={cleanup.mode || 'confirm'} disabled={!cleanup.enabled} className={fieldCls}
+          onChange={e => patch({ mode: e.target.value })}>
+          <option value="confirm">{t('Confirmar na UI')}</option>
+          <option value="auto">{t('Automático (1x por hora, vai no resumo diário)')}</option>
+        </select>
+        <GitCheck label={t('Apagar também no remoto (origin)')} disabled={!cleanup.enabled}
+          checked={!!cleanup.remote} onChange={remote => patch({ remote })} />
+      </div>
+      <div className="ml-7 space-y-1">
+        <Btn onClick={load}>{t('Ver candidatos')}</Btn>
+        {cands && !items.length && <Hint>{t('Nada para limpar.')}</Hint>}
+        {items.map(i => (
+          <label key={i.key} className="flex items-center gap-2 font-mono text-meta">
+            <input type="checkbox" checked={sel.has(i.key)} onChange={() => toggle(i.key)} className="accent-[var(--color-accent)]" />
+            <span className="text-ink">{i.label}</span><span className="text-muted">({i.reason})</span>
+          </label>
+        ))}
+        {items.length > 0 && <Btn variant="danger" disabled={!sel.size} onClick={remove}>{t('Remover selecionados')}</Btn>}
+        {msg && <Hint>{msg}</Hint>}
+      </div>
     </div>
   )
 }

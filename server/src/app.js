@@ -7,7 +7,8 @@ import { bootstrapStatus } from './lib/bootstrap.js'
 import { listPendingActions } from './lib/pending.js'
 import { gitSettings, projectBranch } from './lib/git.js'
 import { retrySettings, turnLimit } from './lib/runner.js'
-import { autopilotSettings } from './lib/autopilot.js'
+import { autopilotSettings, Autopilot } from './lib/autopilot.js'
+import { saveProjects } from './lib/paths.js'
 import { auxModel } from './lib/models.js'
 import { normalizeKeys } from './lib/plugins.js'
 import { getUsage } from './lib/usage.js'
@@ -26,7 +27,7 @@ import searchSourceRoutes from './routes/search-sources.js'
 //
 // deps obrigatórias: db, runner, devServers, emit.
 // deps opcionais (o index.js passa as de verdade; os testes ficam com os defaults):
-//   claudeAvailable, sockets, startWatcher, stopWatcher, autoEnqueue, bootstrapErrors.
+//   claudeAvailable, sockets, startWatcher, stopWatcher, autoEnqueue, bootstrapErrors, autopilot.
 export async function buildApp(deps) {
   const { db, runner, devServers, emit } = deps
   const bootstrapErrors = deps.bootstrapErrors || new Map()
@@ -69,6 +70,7 @@ export async function buildApp(deps) {
     startWatcher: deps.startWatcher || (() => {}),
     stopWatcher: deps.stopWatcher || (() => {}),
     autoEnqueue: deps.autoEnqueue || (() => {}),
+    autopilot: deps.autopilot || new Autopilot({ db, saveProjects, runner, emit, claudeAvailable }),
   }
 
   // O servidor executa código (claude -p) via HTTP: sem essas checagens, qualquer

@@ -1,11 +1,14 @@
 import fs from 'node:fs'
-import { projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty, mergeTaskBranch, deleteTaskBranch } from '../lib/git.js'
-import { findTask, updateTask } from '../lib/tasks.js'
+import {
+  projectBranch, listBranches, checkoutBranch, fetchRemotes, isDirty, mergeTaskBranch, deleteTaskBranch, cleanupCandidates,
+} from '../lib/git.js'
+import { findTask, updateTask, listTasks } from '../lib/tasks.js'
+import { autopilotSettings } from '../lib/autopilot.js'
 import { diffFile } from '../lib/paths.js'
 import { withProject } from './helpers.js'
 
 export default function gitRoutes(app, ctx) {
-  const { emit, projectView, runner } = ctx
+  const { emit, projectView, runner, autopilot } = ctx
 
   // Aprovar/descartar o resultado de uma task pelo diff. São ações explícitas do
   // humano: o merge em `main` é justamente o que o guard.mjs bloqueia para o agente.
@@ -46,6 +49,22 @@ export default function gitRoutes(app, ctx) {
       // oferece "guardar e trocar". Se o stash já foi tentado, não reoferece.
       return reply.code(409).send({ error: e.message, canStash: !stash && isDirty(p.path) })
     }
+  })
+
+  // Limpeza de branches kanban/* e worktrees órfãos (modo confirm: a UI lista e
+  // o humano aprova o lote; o servidor recalcula e ignora o que deixou de ser candidato).
+  app.get('/api/projects/:projectId/cleanup', (req, reply) => {
+    const p = withProject(ctx, req, reply); if (!p) return
+    return { ...cleanupCandidates(p, listTasks(p.path), busyWithTask), last: p.autopilotState?.cleanupLast || null }
+  })
+
+  app.post('/api/projects/:projectId/cleanup', (req, reply) => {
+    const p = withProject(ctx, req, reply); if (!p) return
+    const { branches, worktrees } = req.body || {}
+    const list = v => v === undefined || (Array.isArray(v) && v.every(x => typeof x === 'string'))
+    if (!list(branches) || !list(worktrees)) return reply.code(400).send({ error: 'branches e worktrees devem ser listas de strings' })
+    const only = { branches: branches || [], worktrees: worktrees || [] }
+    return autopilot.cleanup(p, autopilotSettings(p).cleanup, only)
   })
 
   app.post('/api/projects/:projectId/tasks/:taskId/approve', (req, reply) => {
