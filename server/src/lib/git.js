@@ -165,7 +165,8 @@ function resolveStartPoint(root, base) {
 // para o agente ler por engano num Glob — nada ali ajuda a executar a task.
 // Tasks já concluídas ficam de fora pelo mesmo motivo: o board inteiro dentro do
 // contexto do agente é custo sem retorno.
-const WORKTREE_SKIP = ['logs', 'diffs', path.join('tasks', 'done'), path.join('tasks', 'archived')]
+// spec/ é versionada: vem da branch, não da cópia (possivelmente velha) do checkout principal.
+const WORKTREE_SKIP = ['logs', 'diffs', 'spec', path.join('tasks', 'done'), path.join('tasks', 'archived')]
   .map(p => path.join('.claude', 'claude-kanban', p))
 
 export function copyClaudeDir(root, dest) {

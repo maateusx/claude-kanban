@@ -100,7 +100,7 @@ test('decomposição: pai volta para todo esperando as filhas, fora do ledger', 
   assert.equal(p.status, 'todo')
   assert.ok(p.tags.includes(DECOMPOSED_TAG))
   assert.equal(p.decompose, false)
-  assert.equal(p.depends_on.length, 2)
+  assert.equal(p.depends_on.length, 3, 'nível 0 ganha a subtask de desenho na frente')
   assert.equal(p.run.total_cost_usd, 0.5)
   assert.ok(!wasSucceeded(parent.id))
   assert.deepEqual(runner.pendingDeps(project, parent.id), p.depends_on, 'gate segura o pai')

@@ -12,6 +12,7 @@ import { computeStats } from '../lib/stats.js'
 import { normalizeModel } from '../lib/models.js'
 import { parseWhen } from '../lib/scheduler.js'
 import { invalidModelMsg, withProject, PRIORITIES } from './helpers.js'
+import { readSpec } from '../lib/spec.js'
 
 // Valida depends_on: ids precisam existir no projeto, nada de auto-dependência e
 // nada de ciclo (A→B→A trava a fila para sempre). taskId é o id da própria task
@@ -41,6 +42,12 @@ export default function taskRoutes(app, ctx) {
   app.get('/api/projects/:projectId/templates', (req, reply) => {
     const p = withProject(ctx, req, reply); if (!p) return
     return { templates: listTemplates(p.path) }
+  })
+
+  // Spec e ADRs do projeto (somente leitura), do checkout principal: o que já foi mergeado.
+  app.get('/api/projects/:projectId/spec', (req, reply) => {
+    const p = withProject(ctx, req, reply); if (!p) return
+    return readSpec(p.path)
   })
 
   // Custos/histórico: agrega os blocos `run` dos .md por dia/modelo/status.

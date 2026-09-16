@@ -80,6 +80,9 @@ O custo de cada task acumula em `run.total_cost_usd` (todas as tentativas, decom
 ### 17d. Aprendizados entre tasks
 A sessão registra o que descobriu de não óbvio numa seção `## Aprendizados`; o orquestrador junta tudo em `.claude/claude-kanban/notes.md` e injeta nos prompts seguintes — a subtask 4 não repete o erro da 2. Quando o arquivo passa de 9 KB, o autopilot o compacta com o modelo auxiliar (junta duplicatas, descarta o que foi contradito), em vez de só cortar o começo.
 
+### 17d2. Spec e ADRs como fonte da verdade
+Cada projeto pode ter `.claude/claude-kanban/spec/SPEC.md` (resumo do sistema + uma seção `## ` por módulo com responsabilidades e contratos) e `spec/adr/NNNN-titulo.md` (decisões). Ao contrário do `notes.md`, a spec é **versionada**: as sessões a escrevem no worktree e ela chega às tasks seguintes pelo git (o worktree não recebe a cópia do checkout principal). Objetivo grande — task desmembrada de nível 0, ou com a tag `sistema` — ganha uma primeira subtask `desenho` que cria/atualiza a spec antes das demais. O prompt de execução injeta o resumo, a seção que mais combina com a task e a lista de ADRs (teto de 6 KB); a integração confere o código contra a spec e a atualiza. Com `autoDecide`, a decisão sai da spec/ADRs e vira um novo ADR, para tasks futuras não decidirem o contrário. Leitura na UI pelo menu do projeto → "Spec e ADRs do sistema". (`server/src/lib/spec.js`)
+
 ### 17e. Verify de referência
 Quando o `verifyCommand` falha, o mesmo comando roda na base de onde a branch saiu, num worktree destacado (em cache por commit). Se a base já falhava igual, a falha não conta contra a task; se a task trouxe falhas novas, elas vão destacadas no topo do log. Um teste quebrado na `main` deixa de consumir as tentativas de todo mundo. (`runner.js`, `git.js`)
 

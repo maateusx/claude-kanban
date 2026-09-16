@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { auxModel } from './models.js'
+import { needsDesign, SPEC_REL, DESIGN_TAG } from './spec.js'
 
 const TIMEOUT_MS = 5 * 60 * 1000
 const PRIORITIES = ['low', 'medium', 'high', 'urgent']
@@ -14,6 +15,21 @@ export const MAX_DECOMPOSE_LEVEL = 2
 
 export const subtaskLevel = task =>
   Number((task.tags || []).find(t => t.startsWith('nivel:'))?.slice(6)) || 0
+
+// Primeira subtask de um objetivo grande: cria/atualiza a spec antes das demais,
+// para as outras partes seguirem os mesmos contratos.
+export function designSubtask(parent) {
+  return {
+    title: `Desenho: spec e ADRs — ${parent.title}`.slice(0, 200),
+    description: `Crie ou atualize ${SPEC_REL}/SPEC.md (resumo do sistema no topo; uma seção "## " por
+módulo com responsabilidades e contratos) para cobrir o objetivo "${parent.title}", e registre as
+decisões de arquitetura em ${SPEC_REL}/adr/NNNN-titulo.md (número seguinte ao maior existente).
+Não implemente código: as próximas subtasks seguem esta spec.`,
+    priority: parent.priority || 'medium',
+    tags: [DESIGN_TAG],
+    decompose: false,
+  }
+}
 
 // mode 'forced': o usuário pediu para quebrar — sempre desmembra.
 // mode 'auto': o modelo decide se vale a pena; task pequena/atômica fica como está.
@@ -36,7 +52,10 @@ ${task.body || ''}
 </task>
 
 ${decision}
-
+${needsDesign(task, subtaskLevel(task)) ? `
+Uma subtask de desenho (spec em ${SPEC_REL}/) é criada automaticamente antes das
+suas — não crie outra; se a spec já existir, leia-a e siga os contratos dela.
+` : ''}
 Regras para as subtasks:
 - Entre 2 e ${MAX_SUBTASKS}, cada uma executável de forma independente por uma sessão do Claude.
 - Ordene por dependência: o que precisa vir primeiro aparece primeiro.

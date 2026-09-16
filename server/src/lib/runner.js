@@ -3,7 +3,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { loadState, saveState, diffFile, logFile, kanbanDir } from './paths.js'
 import { findTask, updateTask, appendToSection, listTasks, createTask, getSection, removeSection, replaceSection } from './tasks.js'
-import { decomposeTask, subtaskLevel, MAX_DECOMPOSE_LEVEL } from './decomposer.js'
+import { decomposeTask, subtaskLevel, designSubtask, MAX_DECOMPOSE_LEVEL } from './decomposer.js'
+import { specBlock, needsDesign, SPEC_REL } from './spec.js'
 import {
   prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, taskBranch,
   mergeTaskBranch, withDetachedWorktree, diffStats, diffBase,
@@ -152,7 +153,7 @@ export const MAX_AUTO_DECISIONS = 3
 // contrário de human-request, não tira a task do auto-pilot).
 export const AUTO_DECIDED_TAG = 'auto-decided'
 const AUTO_DECIDE_MARK = '[auto-decisão]'
-export const AUTO_DECIDE_RESPONSE = `${AUTO_DECIDE_MARK} Nenhum humano foi consultado: o projeto está com auto-decisão ligada. Assuma a opção que você mesmo recomendou (na falta de recomendação explícita, a mais simples e reversível), registre a escolha e o porquê em "## Resultado" e siga em frente.`
+export const AUTO_DECIDE_RESPONSE = `${AUTO_DECIDE_MARK} Nenhum humano foi consultado: o projeto está com auto-decisão ligada. Decida com base na spec e nos ADRs existentes (${SPEC_REL}/); se eles não cobrirem, assuma a opção que você mesmo recomendou (na falta de recomendação explícita, a mais simples e reversível). Registre a decisão como novo ADR (${SPEC_REL}/adr/NNNN-titulo.md) e em "## Resultado", e siga em frente.`
 
 // Quantas vezes esta task já foi decidida sozinha (o par pergunta/resposta fica
 // arquivado no histórico a cada retomada).
@@ -270,7 +271,8 @@ Esta task foi desmembrada em subtasks, que JÁ foram executadas e mergeadas na
 branch em que você está. Este é o run de INTEGRAÇÃO: confira se o conjunto
 entrega o que a descrição original pede — rode build e testes, corrija as
 costuras entre as partes e complete o que ficou faltando. Não refaça o que já
-está pronto.
+está pronto. Confira também se o código segue a spec (${SPEC_REL}/) e atualize
+nela o que mudou durante a execução.
 
 <subtasks>
 ${list}
@@ -637,14 +639,14 @@ export class Runner {
       : resumeFrom
       ? buildResumePrompt(taskRelPath, answer, workspace.branch, promptGit(project, task), !!project.autoDecide)
       : buildPrompt(taskRelPath, md, workspace.branch, promptGit(project, task), enrichMode, answer, !!project.autoDecide,
-        notesBlock(project.path) + conflictBlock(task.run?.merge_from)
+        notesBlock(project.path) + specBlock(workspace.cwd || project.path, task) + conflictBlock(task.run?.merge_from)
         + (task.tags?.includes(DECOMPOSED_TAG) ? integrationBlock(listTasks(project.path), taskId) : ''))
 
     // O Claude Code não auto-aprova edits em .claude/ mesmo com acceptEdits.
     // Como as tasks vivem em .claude/claude-kanban/tasks/, liberamos Edit/Write
     // desse caminho explicitamente para o modelo poder preencher o ## Resultado.
-    const kanbanGlob = '.claude/claude-kanban/tasks/**'
-    const allowRules = [`Edit(${kanbanGlob})`, `Write(${kanbanGlob})`]
+    const allowRules = ['.claude/claude-kanban/tasks/**', `${SPEC_REL}/**`]
+      .flatMap(glob => [`Edit(${glob})`, `Write(${glob})`])
     const allowedTools = [project.allowedTools, ...allowRules].filter(Boolean).join(' ')
 
     const turns = turnLimit(project)
@@ -797,17 +799,18 @@ export class Runner {
     const parent = findTask(project.path, a.taskId)
     const level = subtaskLevel(parent) + 1
     const created = []
-    for (const s of res.subtasks) {
+    const subtasks = needsDesign(parent, level - 1) ? [designSubtask(parent), ...res.subtasks] : res.subtasks
+    for (const s of subtasks) {
       const t = createTask(project.path, {
         title: s.title,
         description: `${s.description}\n\n_Subtask desmembrada de "${parent.title}" (${parent.id})._`,
         priority: s.priority,
-        tags: ['subtask', `pai:${parent.id}`, `nivel:${level}`],
+        tags: ['subtask', `pai:${parent.id}`, `nivel:${level}`, ...(s.tags || [])],
         status: 'todo',
         model: parent.model || null,
         // null = deixa o autoDecompose do projeto decidir se essa subtask ainda
         // vale quebrar; no último nível fecha a porta para não descer infinito.
-        decompose: level >= MAX_DECOMPOSE_LEVEL ? false : null,
+        decompose: s.decompose ?? (level >= MAX_DECOMPOSE_LEVEL ? false : null),
         // O modelo devolve as subtasks já ordenadas por dependência: encadeamos em
         // série para a fila respeitar essa ordem (a 3ª não roda antes da 1ª).
         depends_on: created.length ? [created[created.length - 1].id] : [],
@@ -1443,9 +1446,12 @@ o card para revisão humana.
 // inteira para voltar ao mesmo ponto. Decida você mesmo e deixe a escolha registrada.
 const AUTO_DECIDE_INSTRUCTIONS = `
 Este projeto está com auto-decisão ligada: NÃO existe humano para responder. Se a task
-depender de uma escolha (ambiguidade de produto, trade-off técnico), decida você mesmo
-pela opção que recomendaria — a mais simples e reversível — e registre em "## Resultado"
-a decisão, as alternativas e o porquê. Só abra uma seção "## Human Request" se a task
+depender de uma escolha (ambiguidade de produto, trade-off técnico), decida você mesmo:
+primeiro pela spec e pelos ADRs existentes (${SPEC_REL}/) — não contrarie uma decisão
+já registrada; se eles não cobrirem, pela opção que recomendaria (a mais simples e
+reversível). Registre a decisão como novo ADR em ${SPEC_REL}/adr/NNNN-titulo.md
+(número seguinte ao maior existente; contexto, decisão, alternativas, consequências),
+para tasks futuras não decidirem o contrário, e cite-a em "## Resultado". Só abra uma seção "## Human Request" se a task
 for de fato impossível sem um humano (credencial, acesso, aprovação externa).
 `
 

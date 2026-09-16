@@ -511,5 +511,7 @@
   "Ver candidatos": "Show candidates",
   "Nada para limpar.": "Nothing to clean up.",
   "Remover selecionados": "Remove selected",
-  "Removidos": "Removed"
+  "Removidos": "Removed",
+  "Spec e ADRs do sistema": "System spec & ADRs",
+  "Sem spec ainda: ela é criada pela subtask de desenho de um objetivo grande.": "No spec yet: it is created by the design subtask of a large goal."
 }

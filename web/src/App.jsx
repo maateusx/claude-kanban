@@ -143,6 +143,7 @@ export default function App() {
   const [showSources, setShowSources] = useState(false)
   const [showSearchTasks, setShowSearchTasks] = useState(false)
   const [showClaudeConfig, setShowClaudeConfig] = useState(false)
+  const [showSpec, setShowSpec] = useState(false)
   // null = fechado; t('global') | 'project' = escopo inicial da tela de extensões
   const [extScope, setExtScope] = useState(null)
   const [showAddProject, setShowAddProject] = useState(false)
@@ -398,6 +399,7 @@ export default function App() {
               onSearchSources={() => setShowSources(true)}
               onSearchTasks={() => setShowSearchTasks(true)}
               onClaudeConfig={() => setShowClaudeConfig(true)}
+              onSpec={() => setShowSpec(true)}
               onExtensions={() => setExtScope('project')}
               onSettings={() => setShowSettings(true)}
               onRerun={() => api.rebootstrap(project.id).then(refreshProjects)}
@@ -513,6 +515,7 @@ export default function App() {
           onResolve={aid => api.resolvePending(project.id, aid).then(d => setPending(d.actions))}
           onRun={aid => api.runPending(project.id, aid)} />
       )}
+      {showSpec && project && <SpecModal project={project} onClose={() => setShowSpec(false)} />}
       {showClaudeConfig && project && (
         <ClaudeConfigModal project={project} onClose={() => setShowClaudeConfig(false)} />
       )}
@@ -877,7 +880,7 @@ function UsageRail({ usage }) {
 /* ------------------------------------------------------------------- header */
 
 function BoardHeader({ project, health, view, onView, query, onQuery, searchRef, pendingCount,
-  onNewTask, onPending, onSuggest, onImportIssues, onSearchSources, onSearchTasks, onClaudeConfig, onExtensions, onSettings, onRerun, onAutoRun, onChanged }) {
+  onNewTask, onPending, onSuggest, onImportIssues, onSearchSources, onSearchTasks, onClaudeConfig, onSpec, onExtensions, onSettings, onRerun, onAutoRun, onChanged }) {
   return (
     <header className="border-b border-line px-4 py-3">
       <div className="flex items-center gap-2">
@@ -895,6 +898,7 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
         <Menu items={[
           { label: t('Re-rodar bootstrap (guardrails)'), onClick: onRerun },
           { label: t('Config do Claude (.claude)'), onClick: onClaudeConfig },
+          { label: t('Spec e ADRs do sistema'), onClick: onSpec },
           { label: t('Extensões (skills, hooks, agents, plugins)'), onClick: onExtensions },
           { label: t('✦ Sugerir tasks com o Claude'), onClick: onSuggest, disabled: !health.claudeAvailable },
           { label: t('Importar issues do GitHub'), onClick: onImportIssues },
@@ -2645,6 +2649,47 @@ const CONFIG_GROUPS = [
   { key: 'plugins', label: 'Plugins' },
   { key: 'outros', label: t('Outros') },
 ]
+
+// Spec do sistema e ADRs (.claude/claude-kanban/spec/), somente leitura.
+function SpecModal({ project, onClose }) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  const [selected, setSelected] = useState('SPEC.md')
+  useEffect(() => { api.spec(project.id).then(setData).catch(e => setError(e.message)) }, [project.id])
+  const adr = data?.adrs.find(a => a.file === selected)
+  const text = adr ? adr.content : data?.spec
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-scrim" onMouseDown={onClose} />
+      <div className="fixed inset-y-0 right-0 z-40 flex w-[900px] max-w-full flex-col border-l border-line bg-bg">
+        <div className="flex items-center gap-3 border-b border-line px-5 py-3">
+          <h2 className="font-semibold">{t('Spec e ADRs do sistema')} — {project.name}</h2>
+          <span className="text-meta text-muted">.claude/claude-kanban/spec/</span>
+          <div className="flex-1" />
+          <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
+        </div>
+        <div className="flex min-h-0 flex-1">
+          <div className="w-72 shrink-0 overflow-y-auto border-r border-line py-2">
+            {[{ file: 'SPEC.md', title: 'SPEC.md' }, ...(data?.adrs || [])].map(f => (
+              <button key={f.file} onClick={() => setSelected(f.file)}
+                className={`block w-full truncate px-4 py-1.5 text-left text-body hover:bg-hover ${selected === f.file ? 'bg-subtle font-medium' : ''}`}>
+                {f.title}
+              </button>
+            ))}
+          </div>
+          <div className="min-w-0 flex-1 overflow-y-auto p-5">
+            {error && <div className="text-danger">{error}</div>}
+            {!data && !error && <div className="text-meta text-muted">{t('carregando…')}</div>}
+            {data && (text
+              ? <Markdown text={text} />
+              : <Empty>{t('Sem spec ainda: ela é criada pela subtask de desenho de um objetivo grande.')}</Empty>)}
+          </div>
+        </div>
+      </div>
+    </>
+  )
+}
 
 function ClaudeConfigModal({ project, onClose }) {
   const [files, setFiles] = useState(null)
