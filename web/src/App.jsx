@@ -1224,6 +1224,7 @@ const EXIT_REASONS = {
   review_rejected: 'Revisão reprovou',
   goal_budget: 'Teto de custo do objetivo',
   integration_conflict: 'Conflito ao integrar na task pai',
+  stuck: 'Sessão travada',
 }
 const runFailed = run => !!run.exit_reason || (run.exit_code != null && run.exit_code !== 0)
 const exitLabel = run => {
@@ -1839,6 +1840,8 @@ function CostsView({ project, tasks, onOpen }) {
           hint={t('{n} turno(s)', { n: totals.numTurns })} />
       </div>
 
+      {stats.autonomy && <AutonomyStats a={stats.autonomy} />}
+
       <Panel title={t('Custo por dia')}>
         {byDay.length === 0 ? <Nothing /> : (
           <div className="flex h-40 items-end gap-1.5">
@@ -1890,6 +1893,38 @@ function CostsView({ project, tasks, onOpen }) {
         )}
       </Panel>
     </div>
+  )
+}
+
+// Quanto o projeto anda sozinho: o que passa de primeira, o que acaba num humano
+// e quanto custa, com todas as tentativas, cada task concluída.
+function AutonomyStats({ a }) {
+  return (
+    <>
+      <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Stat label={t('Passam de primeira')} value={fmtPct(a.firstPassRate)}
+          hint={t('{n} task(s) concluída(s)', { n: a.done })} />
+        <Stat label={t('Precisaram de humano')} value={fmtPct(a.humanRate)}
+          hint={t('blocked, pedido de decisão ou conflito')} />
+        <Stat label={t('Custo por task concluída')} value={a.costPerDone == null ? '—' : fmtUsd(a.costPerDone)}
+          hint={t('somando todas as tentativas')} />
+        <Stat label={t('Mergeadas')} value={a.autoMerged} />
+      </div>
+      {a.byExitReason.length > 0 && (
+        <Panel title={t('Por que os runs pararam')}>
+          <table className="w-full text-body">
+            <tbody>
+              {a.byExitReason.map(r => (
+                <tr key={r.reason} className="border-b border-line last:border-0">
+                  <td className="py-1.5">{EXIT_REASONS[r.reason] ? t(EXIT_REASONS[r.reason]) : r.reason}</td>
+                  <td className="py-1.5 text-right tabular-nums">{r.n}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      )}
+    </>
   )
 }
 
@@ -2420,6 +2455,132 @@ function DevServerSettings({ project, onPatch }) {
   )
 }
 
+const fieldCls = 'rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent'
+
+// Campo que só vira PATCH no blur/Enter. `parse` devolve undefined para valor
+// inválido: aí o campo volta ao salvo em vez de mandar lixo ao backend.
+function CommitField({ value, parse = v => v, onCommit, className = 'w-16', ...rest }) {
+  const shown = value == null ? '' : String(value)
+  const [v, setV] = useState(shown)
+  useEffect(() => setV(shown), [shown])
+  const commit = () => {
+    const next = parse(v)
+    if (next === undefined) return setV(shown)
+    if (String(next ?? '') !== shown) onCommit(next)
+  }
+  return (
+    <input value={v} onChange={e => setV(e.target.value)} onBlur={commit}
+      onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+      className={`${className} ${fieldCls}`} {...rest} />
+  )
+}
+
+const intIn = (min, max, empty = min) => v => {
+  if (v.trim() === '') return empty
+  const n = Number(v)
+  return Number.isInteger(n) && n >= min && n <= max ? n : undefined
+}
+const csv = v => v.split(',').map(x => x.trim()).filter(Boolean)
+const Hint = ({ children }) => <span className="mt-1 block text-meta text-muted">{children}</span>
+
+// Autonomia de ponta a ponta: travas da execução, o que acontece depois da task
+// (merge, PR) e o trabalho que chega sozinho. Os jobs do autopilot rodam a cada minuto.
+function AutonomySettings({ project, onPatch }) {
+  const ap = project.autopilot || {}
+  const am = ap.autoMerge || {}
+  const vc = project.visualCheck || {}
+  const patchAp = patch => onPatch({ autopilot: patch })
+  const row = 'flex flex-wrap items-center gap-2'
+  return (
+    <div className="space-y-3 rounded-[8px] border border-line p-3">
+      <div className="text-meta font-semibold uppercase tracking-wide text-muted">{t('Autonomia')}</div>
+
+      <label className="block">
+        <span className="text-ink">{t('Modelos nas retentativas')}</span>
+        <CommitField className="mt-1 w-full font-mono" value={(project.retry?.escalateModels || []).join(', ')}
+          placeholder={MODELS[0]?.id} parse={v => csv(v).join(', ')}
+          onCommit={v => onPatch({ retry: { escalateModels: csv(v) } })} />
+        <Hint>{t('A 2ª tentativa usa o primeiro da lista, a 3ª o segundo (ou o último). A 1ª segue o modelo da task/projeto. Vazio: sempre o mesmo modelo.')}</Hint>
+      </label>
+      <GitCheck label={t('Encerrar sessões travadas')}
+        desc={t('Mata a sessão quando ela chama a mesma tool com o mesmo input 3 vezes seguidas ou passa 40 chamadas sem editar arquivo. Conta como tentativa falha.')}
+        checked={project.stuckDetection !== false} onChange={v => onPatch({ stuckDetection: v })} />
+      <GitCheck label={t('Sandbox do Claude Code')}
+        desc={t('Bash roda confinado (filesystem e rede; só GitHub e registries liberados), além dos guardrails. macOS/Linux. Se o sandbox não estiver disponível, a sessão falha em vez de rodar sem ele. Recomendado antes de ligar o auto-merge.')}
+        checked={!!project.sandbox} onChange={v => onPatch({ sandbox: v })} />
+      <div>
+        <span className="text-ink">{t('Checagem visual na revisão')}</span>
+        <div className={`mt-1 ${row}`}>
+          <CommitField className="flex-1 font-mono" value={vc.command || ''} placeholder="npm run dev -- --port 5999"
+            aria-label={t('Comando da checagem visual')}
+            onCommit={command => onPatch({ visualCheck: { ...vc, command: command.trim() } })} />
+          <CommitField className="flex-1 font-mono" value={vc.url || ''} placeholder="http://localhost:5999"
+            aria-label={t('URL da checagem visual')} parse={v => (!v.trim() || /^https?:\/\//i.test(v.trim()) ? v.trim() : undefined)}
+            onCommit={url => onPatch({ visualCheck: { ...vc, url } })} />
+        </div>
+        <Hint>{t('Com a revisão automática ligada, sobe a app a partir do worktree da task, tira um screenshot (Playwright — rode `npx playwright install chromium` uma vez) e o revisor confere a parte visual.')}</Hint>
+      </div>
+
+      <div className="border-t border-line pt-3">
+        <GitCheck label={t('Mergear sozinho quando a política deixa')}
+          desc={t('Exige revisão automática aprovada. Sem PR, mergeia na branch principal ao concluir; com PR, o autopilot mergeia quando o CI passa. Conflito vira uma sessão de resolução.')}
+          checked={!!am.enabled} onChange={v => patchAp({ autoMerge: { enabled: v } })} />
+        <div className={`ml-7 mt-2 ${row} ${am.enabled ? '' : 'opacity-40'}`}>
+          <span className="text-meta text-muted">{t('até')}</span>
+          <CommitField value={am.maxLines ?? 300} parse={intIn(1, 100000, undefined)} disabled={!am.enabled}
+            aria-label={t('Máximo de linhas do diff')} onCommit={n => patchAp({ autoMerge: { maxLines: n } })} />
+          <span className="text-meta text-muted">{t('linhas; nunca em')}</span>
+          <CommitField className="flex-1 font-mono" value={(am.protectedPaths || []).join(', ')} disabled={!am.enabled}
+            placeholder=".github/**, migrations/**" aria-label={t('Caminhos protegidos')} parse={v => csv(v).join(', ')}
+            onCommit={v => patchAp({ autoMerge: { protectedPaths: csv(v) } })} />
+        </div>
+      </div>
+      <GitCheck label={t('Acompanhar a PR')}
+        desc={t('CI vermelho ou comentário novo na PR devolve a task para a fila com o feedback; a sessão corrige e dá push na mesma branch. Depois de 3 rodadas, avisa por webhook (pr_needs_human).')}
+        checked={!!ap.prFollowUp} onChange={v => patchAp({ prFollowUp: v })} />
+
+      <div className="space-y-2 border-t border-line pt-3">
+        <div className={row}>
+          <span className="text-ink">{t('Importar issues com a label')}</span>
+          <CommitField className="w-32 font-mono" value={ap.issuesLabel || ''} placeholder="claude"
+            aria-label={t('Label das issues')} parse={v => v.trim()} onCommit={issuesLabel => patchAp({ issuesLabel })} />
+          <span className="text-meta text-muted">{t('a cada')}</span>
+          <CommitField value={ap.issuesMinutes || 0} parse={intIn(0, 10080)} aria-label={t('Intervalo das issues (min)')}
+            onCommit={issuesMinutes => patchAp({ issuesMinutes })} />
+          <span className="text-meta text-muted">{t('min (0 = desligado)')}</span>
+        </div>
+        <GitCheck label={t('CI vermelho na branch principal vira task urgente')}
+          checked={!!ap.watchMainCI} onChange={v => patchAp({ watchMainCI: v })} />
+        <div className={row}>
+          <span className="text-ink">{t('Sugerir tasks a cada')}</span>
+          <CommitField value={ap.suggestHours || 0} parse={intIn(0, 720)} aria-label={t('Intervalo das sugestões (h)')}
+            onCommit={suggestHours => patchAp({ suggestHours })} />
+          <span className="text-meta text-muted">{t('h, com no máximo')}</span>
+          <CommitField value={ap.suggestMax ?? 5} parse={intIn(1, 50, undefined)} aria-label={t('Máximo de sugestões abertas')}
+            onCommit={suggestMax => patchAp({ suggestMax })} />
+          <span className="text-meta text-muted">{t('abertas ao mesmo tempo (0 h = desligado)')}</span>
+        </div>
+        <label className={row}>
+          <span className="text-ink">{t('O que chega sozinho entra em')}</span>
+          <select value={ap.importStatus || 'backlog'} onChange={e => patchAp({ importStatus: e.target.value })}
+            className={fieldCls}>
+            <option value="backlog">Backlog</option>
+            <option value="todo">{t('A fazer (roda com o auto-pilot)')}</option>
+          </select>
+        </label>
+        <Hint>{t('Vale para issues, fontes de busca com intervalo, CI quebrado e sugestões agendadas.')}</Hint>
+      </div>
+
+      <div className={`border-t border-line pt-3 ${row}`}>
+        <span className="text-ink">{t('Resumo diário por webhook às')}</span>
+        <CommitField value={ap.digestHour ?? ''} placeholder="—" parse={intIn(0, 23, null)} aria-label={t('Hora do resumo diário')}
+          onCommit={digestHour => patchAp({ digestHour })} />
+        <span className="text-meta text-muted">{t('h (vazio = desligado) — evento daily_digest')}</span>
+      </div>
+    </div>
+  )
+}
+
 const CONFIG_GROUPS = [
   { key: 'settings', label: 'Settings' },
   { key: 'mcp', label: 'MCP' },
@@ -2754,7 +2915,8 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
             <span className="mt-1 block text-meta text-muted">
               POST com JSON quando uma task <strong>muda de status</strong> (<code>task_status_changed</code>), quando um run
               <strong> falha</strong> (<code>run_failed</code>) ou quando <strong>precisa de humano</strong>
-              (<code>human_request</code> e <code>pending_action</code>) — para saber sem o board aberto. Vazio: desligado.
+              (<code>human_request</code>, <code>pending_action</code> e <code>pr_needs_human</code>) — para saber sem o board aberto.
+              Também leva o resumo diário (<code>daily_digest</code>) se ele estiver ligado em Autonomia. Vazio: desligado.
             </span>
           </span>
         </label>
@@ -2780,6 +2942,8 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
             </span>
           </span>
         </div>
+
+        <AutonomySettings project={project} onPatch={onPatch} />
 
         <DevServerSettings project={project} onPatch={onPatch} />
 

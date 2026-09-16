@@ -30,7 +30,7 @@ test('retrySettings cai nos defaults e valida os limites', () => {
   assert.deepEqual(retrySettings({ retry: {} }), DEFAULT_RETRY)
   assert.deepEqual(retrySettings({ retry: { maxAttempts: 0 } }), DEFAULT_RETRY)
   assert.deepEqual(retrySettings({ retry: { maxAttempts: 'x', backoffMinutes: -1 } }), DEFAULT_RETRY)
-  assert.deepEqual(retrySettings({ retry: { maxAttempts: 1, backoffMinutes: 5 } }), { maxAttempts: 1, backoffMinutes: 5 })
+  assert.deepEqual(retrySettings({ retry: { maxAttempts: 1, backoffMinutes: 5 } }), { maxAttempts: 1, backoffMinutes: 5, escalateModels: [] })
 })
 
 test('maxAttempts 1: primeira falha já marca blocked', () => {

@@ -4,8 +4,11 @@ import path from 'node:path'
 import { loadState, saveState, diffFile, logFile, kanbanDir } from './paths.js'
 import { findTask, updateTask, appendToSection, listTasks, createTask, getSection, removeSection, replaceSection } from './tasks.js'
 import { decomposeTask, subtaskLevel, MAX_DECOMPOSE_LEVEL } from './decomposer.js'
-import { prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, taskBranch } from './git.js'
-import { reviewTask } from './reviewer.js'
+import {
+  prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, taskBranch,
+  mergeTaskBranch, withDetachedWorktree, diffStats, diffBase,
+} from './git.js'
+import { reviewTask, screenshotApp } from './reviewer.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
 import { PRIORITY_RANK } from './sort.js'
 import { normalizeModel } from './models.js'
@@ -30,7 +33,7 @@ export function turnLimit(project) {
 // (rede, lock de git); da terceira em diante é quase sempre a mesma falha
 // determinística sendo paga de novo por uma sessão inteira. O backoff evita que o
 // auto-run repesque a task no mesmo tick, sem nenhuma chance de o mundo mudar.
-export const DEFAULT_RETRY = { maxAttempts: 2, backoffMinutes: 10 }
+export const DEFAULT_RETRY = { maxAttempts: 2, backoffMinutes: 10, escalateModels: [] }
 
 export function retrySettings(project) {
   const r = project?.retry || {}
@@ -39,7 +42,97 @@ export function retrySettings(project) {
   return {
     maxAttempts: Number.isFinite(maxAttempts) && maxAttempts >= 1 ? Math.round(maxAttempts) : DEFAULT_RETRY.maxAttempts,
     backoffMinutes: Number.isFinite(backoffMinutes) && backoffMinutes >= 0 ? backoffMinutes : DEFAULT_RETRY.backoffMinutes,
+    escalateModels: (Array.isArray(r.escalateModels) ? r.escalateModels : []).map(normalizeModel).filter(Boolean),
   }
+}
+
+// Escalação de modelo: a 2ª tentativa usa escalateModels[0], a 3ª o [1] (ou o
+// último da lista). A 1ª segue task > projeto. Só vale em retentativa — a
+// maioria das tasks passa de primeira no modelo barato.
+export function escalatedModel(project, attempt) {
+  const list = retrySettings(project).escalateModels
+  if (!(attempt >= 2) || !list.length) return null
+  return list[Math.min(attempt - 2, list.length - 1)]
+}
+
+// Detecção de sessão travada, olhando o stream: a mesma tool com o mesmo input
+// N vezes seguidas, ou muitas chamadas de tool sem nenhuma edição de arquivo.
+// Mata cedo em vez de esperar o timeout de 30 min ou o teto de turnos.
+export const STUCK_REPEATS = 3
+// ponytail: só Edit/Write/MultiEdit/NotebookEdit contam como progresso — quem
+// edita por heredoc no Bash conta como parado. Vira configuração se incomodar.
+export const STUCK_IDLE_TOOLS = 40
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+
+// w: estado mutável { lastKey, repeats, idle }. Devolve o motivo, ou null.
+export function stuckCheck(w, event) {
+  if (event?.type !== 'assistant') return null
+  for (const c of event.message?.content || []) {
+    if (c.type !== 'tool_use') continue
+    const key = c.name + JSON.stringify(c.input ?? null)
+    w.repeats = key === w.lastKey ? w.repeats + 1 : 1
+    w.lastKey = key
+    w.idle = EDIT_TOOLS.has(c.name) ? 0 : (w.idle || 0) + 1
+    if (w.repeats >= STUCK_REPEATS) return `${c.name} chamada ${w.repeats}x seguidas com o mesmo input`
+    if (w.idle >= STUCK_IDLE_TOOLS) return `${w.idle} chamadas de tool seguidas sem editar nenhum arquivo`
+  }
+  return null
+}
+
+// Verify de referência: linhas que parecem falha, normalizadas (sem durações)
+// para comparar a saída da task com a da base.
+// ponytail: heurística por palavra-chave; um reporter que não escreve
+// fail/error cai na comparação da saída inteira.
+const FAIL_RE = /\b(fail|failed|failing|failure|error|errors)\b|✖|✗|\bnot ok\b/i
+const normLine = l => l.replace(/\(?\d+(\.\d+)?\s?m?s\)?/g, '').replace(/\s+/g, ' ').trim()
+const failLines = out => new Set(String(out).split('\n').filter(l => FAIL_RE.test(l)).map(normLine))
+
+// Falhas da task que a base não tinha. [] = tudo que falhou já falhava antes.
+export function newFailures(taskOut, baseOut) {
+  const mine = failLines(taskOut)
+  if (!mine.size) {
+    const norm = s => String(s).split('\n').map(normLine).join('\n').trim()
+    return norm(taskOut) === norm(baseOut) ? [] : ['(a saída difere da base e não tem linhas de falha reconhecíveis)']
+  }
+  const base = failLines(baseOut)
+  return [...mine].filter(l => !base.has(l))
+}
+
+// Política de auto-merge (project.autopilot.autoMerge). Devolve null quando pode
+// mergear sozinho, ou o motivo de não poder.
+export const DEFAULT_AUTO_MERGE = { enabled: false, maxLines: 300, protectedPaths: ['.github/**'] }
+export const autoMergeSettings = project => ({ ...DEFAULT_AUTO_MERGE, ...(project?.autopilot?.autoMerge || {}) })
+
+const globMatch = (file, pattern) => {
+  try { return path.matchesGlob(file, pattern) } catch { return file.startsWith(pattern.replace(/\*.*$/, '')) }
+}
+
+export function autoMergeBlocker(project, { reviewApproved, diff }) {
+  const s = autoMergeSettings(project)
+  if (!s.enabled) return 'auto-merge desligado'
+  if (reviewApproved !== true) return 'sem revisão automática aprovada'
+  const { files, lines } = diffStats(diff)
+  if (!files.length) return 'diff vazio'
+  if (lines > s.maxLines) return `diff com ${lines} linhas (teto ${s.maxLines})`
+  const hit = files.find(f => s.protectedPaths.some(p => globMatch(f, p)))
+  if (hit) return `toca caminho protegido (${hit})`
+  return null
+}
+
+// Conflito de merge: em vez de blocked direto, uma sessão tenta resolver
+// mergeando `merge_from` na branch da task. Até MAX_CONFLICT_ROUNDS por task.
+export const CONFLICT_TAG = 'conflito'
+function conflictBlock(mergeFrom) {
+  if (!mergeFrom) return ''
+  const fetch = mergeFrom.startsWith('origin/') ? 'git fetch origin && ' : ''
+  return `
+ATENÇÃO — esta execução é para RESOLVER UM CONFLITO DE MERGE. O trabalho da task já
+está feito nesta branch, mas ela conflita com "${mergeFrom}". Faça:
+  1. \`${fetch}git merge ${mergeFrom}\`
+  2. resolva os conflitos preservando a intenção dos dois lados;
+  3. rode build/testes e corrija o que o merge quebrou;
+  4. commite o merge. Não reimplemente a task.
+`
 }
 // Tag aplicada quando o agente termina sinalizando que depende de decisão humana.
 // Cards com ela ficam fora do auto-pilot até o humano responder e re-executar.
@@ -236,6 +329,7 @@ export class Runner {
     this.paused = !!state.paused
     this.pausedUntil = state.pausedUntil || null
     this.actives = new Map()        // taskId -> { projectId, taskId, child, timer, ... }
+    this.baselines = new Map()      // `${projectId}:${sha}:${cmd}` -> resultado do verify na base
   }
 
   persist() {
@@ -505,11 +599,7 @@ export class Runner {
 
     let workspace
     try {
-      // Run de integração: o diff (e a revisão) cobre o objetivo inteiro, não só
-      // o que esta sessão mexeu por cima das filhas.
-      workspace = prepareWorkspace(project, taskId, {
-        parentId: parentIdOf(task), fullDiff: !!task.tags?.includes(DECOMPOSED_TAG),
-      })
+      workspace = prepareWorkspace(project, taskId, { parentId: parentIdOf(task) })
     } catch (e) {
       updateTask(project.path, taskId, { status: 'todo' })
       appendToSection(project.path, taskId, 'Log de erros',
@@ -521,7 +611,9 @@ export class Runner {
     // Modelo: task > default do projeto > default do claude-code (sem --model).
     // normalizeModel converte apelidos legados ("opus") no slug oficial, que é o
     // que de fato vai para `claude --model` — a sessão roda no modelo escolhido.
-    const model = normalizeModel(task.model) || normalizeModel(project.defaultModel) || null
+    // Retentativa com escalateModels configurado sobe de modelo.
+    const model = escalatedModel(project, task.run?.attempts)
+      || normalizeModel(task.model) || normalizeModel(project.defaultModel) || null
 
     if (workspace.branch || model) {
       task = updateTask(project.path, taskId, {
@@ -543,7 +635,8 @@ export class Runner {
       : resumeFrom
       ? buildResumePrompt(taskRelPath, answer, workspace.branch, promptGit(project, task), !!project.autoDecide)
       : buildPrompt(taskRelPath, md, workspace.branch, promptGit(project, task), enrichMode, answer, !!project.autoDecide,
-        notesBlock(project.path) + (task.tags?.includes(DECOMPOSED_TAG) ? integrationBlock(listTasks(project.path), taskId) : ''))
+        notesBlock(project.path) + conflictBlock(task.run?.merge_from)
+        + (task.tags?.includes(DECOMPOSED_TAG) ? integrationBlock(listTasks(project.path), taskId) : ''))
 
     // O Claude Code não auto-aprova edits em .claude/ mesmo com acceptEdits.
     // Como as tasks vivem em .claude/claude-kanban/tasks/, liberamos Edit/Write
@@ -560,6 +653,7 @@ export class Runner {
       '--verbose',
       ...(turns ? ['--max-turns', String(turns)] : []),
       ...(model ? ['--model', model] : []),
+      ...sandboxArgs(project),
       ...(rawPhase === 'plan'
         ? ['--permission-mode', 'plan']
         : project.skipPermissions
@@ -577,6 +671,9 @@ export class Runner {
     const a = {
       projectId, taskId, child, timer: null, result: null, stderr: '', workspace, taskRelPath, timeoutMs,
       logStream: null, logBytes: 0, logEvents: [], resumeFrom, answer, rawPhase, rawExec, plan: null,
+      // Plan mode não edita arquivo por definição: a ociosidade o mataria.
+      watch: project.stuckDetection === false || rawPhase === 'plan' ? null : { lastKey: null, repeats: 0, idle: 0 },
+      stuck: null,
     }
 
     // Log persistido: cada run recomeça o arquivo do zero (o drawer mostra a
@@ -617,6 +714,12 @@ export class Runner {
         if (rawPhase === 'plan') a.plan = exitPlanText(event) ?? a.plan
         this.recordLog(a, event)
         this.emit('run.log', { projectId, taskId, event })
+        const stuck = a.watch && !a.stuck && stuckCheck(a.watch, event)
+        if (stuck) {
+          a.stuck = stuck
+          this.logEvent(a, { type: 'raw', text: `[travada] ${stuck} — encerrando a sessão` })
+          this.kill(taskId)
+        }
       }
     })
     child.stderr.on('data', d => { a.stderr += d })
@@ -776,9 +879,37 @@ export class Runner {
     const verifyCommand = String(project.verifyCommand || '').trim()
     a.verify = null
     if (exitCode !== 0 || a.killed || a.timedOut || !verifyCommand) return null
-    const verify = a.verify = runVerify(verifyCommand, a.workspace.cwd)
-    this.logEvent(a, { type: 'verify', command: verify.command, ok: verify.ok, exitCode: verify.exitCode, text: verify.output })
+    let verify = runVerify(verifyCommand, a.workspace.cwd)
+    if (!verify.ok) verify = this.compareWithBaseline(project, a.workspace, verify)
+    a.verify = verify
+    this.logEvent(a, {
+      type: 'verify', command: verify.command, ok: verify.ok, exitCode: verify.exitCode,
+      text: verify.preexisting ? `[as falhas abaixo já existiam na base — não contam contra a task]\n\n${verify.output}` : verify.output,
+    })
     return verify
+  }
+
+  // Verify de referência: a base (de onde a branch saiu) roda o mesmo comando
+  // num worktree destacado. Se a base já falhava igual, a falha não é da task —
+  // sem isso, um teste quebrado na main consome as tentativas de todo mundo.
+  // ponytail: spawnSync como o verify normal — bloqueia o event loop enquanto
+  // roda; só acontece quando o verify da task falha, e fica em cache por sha.
+  compareWithBaseline(project, workspace, verify) {
+    const sha = workspace?.baseSha
+    if (!sha || !isGitRepo(project.path)) return verify
+    const key = `${project.id}:${sha}:${verify.command}`
+    if (!this.baselines.has(key)) {
+      if (this.baselines.size > 50) this.baselines.clear()
+      let res = null
+      try { res = withDetachedWorktree(project.path, sha, dir => runVerify(verify.command, dir)) } catch {}
+      this.baselines.set(key, res)
+    }
+    const base = this.baselines.get(key)
+    if (!base || base.ok) return verify
+    const fresh = newFailures(verify.output, base.output)
+    if (!fresh.length) return { ...verify, ok: true, preexisting: true }
+    const head = `Falhas novas — a base ${sha.slice(0, 8)} já falhava, mas não nestas linhas:\n${fresh.join('\n')}\n\n`
+    return { ...verify, output: head + verify.output.slice(-(MAX_VERIFY_OUTPUT - head.length)) }
   }
 
   logEvent(a, event) {
@@ -806,9 +937,22 @@ export class Runner {
     if (hasHumanRequest(md)) return
     this.logEvent(a, { type: 'raw', text: '[revisão] conferindo se o diff entrega o que a task pede…' })
     let diff = null
-    try { diff = captureDiff(a.workspace.cwd, a.workspace.startSha) } catch {}
+    try { diff = captureDiff(a.workspace.cwd, diffBase(a.workspace)) } catch {}
     const title = findTask(project.path, a.taskId)?.title || ''
-    a.review = await reviewTask(project, { title, body: md }, diff, a.workspace.cwd)
+    // Checagem visual: sobe a app a partir do worktree e tira um screenshot para
+    // o revisor olhar. Falhar aqui não reprova — só fica sem a imagem.
+    let shot = null
+    const vc = project.visualCheck
+    if (vc?.command && vc?.url) {
+      this.logEvent(a, { type: 'raw', text: '[revisão] subindo a aplicação para o screenshot…' })
+      shot = await screenshotApp(vc, a.workspace.cwd)
+      this.logEvent(a, { type: 'raw', text: shot.path ? `[revisão] screenshot: ${shot.path}` : `[revisão] sem screenshot: ${shot.error}` })
+    }
+    try {
+      a.review = await reviewTask(project, { title, body: md }, diff, a.workspace.cwd, shot?.path)
+    } finally {
+      if (shot?.path) fs.rmSync(shot.path, { force: true })
+    }
     this.logEvent(a, { type: 'review', approved: a.review.approved, text: a.review.feedback || 'aprovado' })
   }
 
@@ -844,8 +988,9 @@ export class Runner {
     // Captura o diff antes/depois do que a task produziu — precisa acontecer
     // antes de remover o worktree.
     let hasDiff = false
+    let diff = null
     try {
-      const diff = captureDiff(a.workspace.cwd, a.workspace.startSha)
+      diff = captureDiff(a.workspace.cwd, diffBase(a.workspace))
       if (diff) {
         const file = diffFile(project.path, a.taskId)
         fs.mkdirSync(path.dirname(file), { recursive: true })
@@ -881,6 +1026,8 @@ export class Runner {
       duration_ms: r.duration_ms ?? null,
       num_turns: r.num_turns ?? null,
       exit_reason: exitReason(a, exitCode, verify),
+      // null = revisão não rodou (ou revisor fora do ar). Base do auto-merge.
+      review_approved: a.review && !a.review.skipped ? a.review.approved : null,
     }
 
     const task = prev
@@ -903,7 +1050,7 @@ export class Runner {
         : { noResume: true, human: a.answer })
       return
     }
-    if (a.killed && !a.timedOut) {
+    if (a.killed && !a.timedOut && !a.stuck) {
       updateTask(project.path, a.taskId, { status: 'todo', run: runMeta })
       appendToSection(project.path, a.taskId, 'Log de erros',
         `[${runMeta.completed_at}] Sessão morta manualmente pelo usuário.`)
@@ -990,27 +1137,32 @@ export class Runner {
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
       })
     } else if (exitCode === 0 && !a.timedOut && (integrateError = this.integrate(project, task, a.workspace))) {
-      // A subtask passou, mas não entrou na branch do pai: repetir não resolve
-      // conflito, então vai para revisão humana (o pai segue esperando).
-      updateTask(project.path, a.taskId, {
-        status: 'todo', run: { ...runMeta, exit_reason: 'integration_conflict' }, tags: withTag(task.tags, 'blocked'),
-      })
-      appendToSection(project.path, a.taskId, 'Log de erros',
-        `[${runMeta.completed_at}] Não consegui mergear ${a.workspace.branch} na branch da task pai: ${integrateError}`)
+      // A subtask passou, mas não entrou na branch do pai. Repetir do zero não
+      // resolve conflito: uma sessão mergeia a branch do pai na da task e resolve;
+      // se já tentou demais, vai para revisão humana (o pai segue esperando).
+      const into = taskBranch(parentIdOf(task))
+      const resolving = this.scheduleConflictFix(project, task, into, { ...runMeta, exit_reason: 'integration_conflict' },
+        `Não consegui mergear ${a.workspace.branch} na branch da task pai: ${integrateError}`)
       this.emit('run.finished', {
-        projectId: a.projectId, taskId: a.taskId, exitCode: -1, exitReason: 'integration_conflict',
+        projectId: a.projectId, taskId: a.taskId, exitCode: resolving ? 0 : -1, exitReason: 'integration_conflict',
+        conflictResolving: resolving,
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
       })
+      if (resolving) this.enqueue(a.projectId, a.taskId)
     } else if (exitCode === 0 && !a.timedOut) {
       // No modo cru o agente não sabe do arquivo da task: a resposta final da
       // sessão vira o "## Resultado".
       if (a.rawPhase && r.result?.trim()) {
         updateTask(project.path, a.taskId, { body: replaceSection(task.body, 'Resultado', r.result.trim()) })
       }
+      let tags = (task.tags || []).filter(t => t !== CONFLICT_TAG)
+      if (parentIdOf(task) && a.workspace.branch) tags = withTag(tags, INTEGRATED_TAG)
+      // O feedback da PR já foi atendido nesta execução.
+      const cur = findTask(project.path, a.taskId)
       const done = updateTask(project.path, a.taskId, {
-        status: 'done', run: runMeta,
-        ...(parentIdOf(task) && a.workspace.branch ? { tags: withTag(task.tags, INTEGRATED_TAG) } : {}),
+        status: 'done', tags, run: { ...runMeta, merge_from: null },
+        ...(getSection(cur?.body, PR_FEEDBACK) ? { body: removeSection(cur.body, PR_FEEDBACK) } : {}),
       })
       try { harvestNotes(project.path, done) } catch {}
       // Registra no ledger ANTES de qualquer coisa depender do status: mesmo que
@@ -1022,9 +1174,11 @@ export class Runner {
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
         pr: runMeta.pr,
       })
+      this.autoMerge(project, done, diff, a.workspace.branch)
     } else {
       const reason = a.timedOut
         ? `Timeout da execução. Limite configurado: ${Math.round((a.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)} min.`
+        : a.stuck ? `Sessão travada: ${a.stuck}.`
         : `${EXIT_REASON_TEXT[runMeta.exit_reason] || 'Falha'} (exit code ${exitCode ?? 'nenhum'}).`
       // O CLI reporta a maioria dos erros (API, crédito, custo) no evento result,
       // não no stderr — sem isso o log mostrava só "Exit code 1" e um bloco vazio.
@@ -1058,6 +1212,51 @@ export class Runner {
       })
     }
     this.tick()
+  }
+
+  // Agenda a sessão que resolve um conflito (merge de `mergeFrom` na branch da
+  // task). Devolve false — e marca blocked — quando não dá para tentar de novo.
+  scheduleConflictFix(project, task, mergeFrom, runMeta, message) {
+    const rounds = task.run?.conflict_rounds || 0
+    const resolving = !rawModeOf(project) && rounds < MAX_CONFLICT_ROUNDS
+    const updated = updateTask(project.path, task.id, {
+      status: 'todo',
+      run: resolving ? { ...runMeta, merge_from: mergeFrom, conflict_rounds: rounds + 1 } : runMeta,
+      tags: resolving ? withTag(task.tags, CONFLICT_TAG) : withTag(task.tags, 'blocked'),
+    })
+    appendToSection(project.path, task.id, 'Log de erros', `[${new Date().toISOString()}] ${message}` +
+      (resolving ? `\nUma nova sessão vai mergear ${mergeFrom} na branch da task e resolver o conflito.` : ''))
+    // Ledger antes do emit: o auto-run reage ao upsert e, com a task ainda no
+    // ledger, a reconciliaria de volta para done.
+    if (resolving) clearExecuted(task.id)
+    this.emit('task.upserted', { projectId: project.id, task: updated })
+    return resolving
+  }
+
+  // Auto-merge local na base, sem humano, quando a política deixa. Com PR aberta
+  // quem mergeia é o autopilot (depois do CI). Subtask integra no pai, não aqui.
+  autoMerge(project, task, diff, branch) {
+    if (!task || parentIdOf(task) || task.run?.pr || !branch) return
+    if (autoMergeBlocker(project, { reviewApproved: task.run.review_approved, diff })) return
+    const base = gitSettings(project).baseBranch
+    try {
+      const res = mergeTaskBranch(project, branch)
+      const merged = updateTask(project.path, task.id, { status: 'archived', tags: withTag(task.tags, 'merged') })
+      appendToSection(project.path, task.id, 'Resultado',
+        `_Mergeado automaticamente em ${base} pela política de auto-merge${res.pushed ? ' (com push)' : ''}._`)
+      this.emit('task.moved', { projectId: project.id, taskId: task.id, from: task.status, to: 'archived' })
+      this.emit('task.upserted', { projectId: project.id, task: merged })
+    } catch (e) {
+      if (e.conflict) {
+        if (this.scheduleConflictFix(project, task, base, {}, `Auto-merge em ${base} conflitou: ${e.message}`)) {
+          this.enqueue(project.id, task.id)
+        }
+        return
+      }
+      // Checkout sujo, base inexistente…: fica para o humano aprovar pelo diff.
+      appendToSection(project.path, task.id, 'Log de erros',
+        `[${new Date().toISOString()}] Auto-merge não aconteceu: ${e.message}`)
+    }
   }
 
   // Subtask concluída: a branch dela entra na branch de integração do pai, de
@@ -1099,6 +1298,7 @@ export class Runner {
 export function exitReason(a, exitCode, verify) {
   const r = a.result || {}
   if (a.timedOut) return 'timeout'
+  if (a.stuck) return 'stuck'
   if (a.killed) return 'killed'
   if (r.subtype === 'error_max_turns') return 'max_turns'
   if (exitCode === 0) return verify && !verify.ok ? (verify.review ? 'review_rejected' : 'verify_failed') : null
@@ -1107,6 +1307,35 @@ export function exitReason(a, exitCode, verify) {
   if (r.is_error) return 'api_error'
   // Sem exit code = processo morto por sinal que não veio do orquestrador (OOM, kill externo).
   return exitCode == null ? 'signal' : 'exit_code'
+}
+
+const MAX_CONFLICT_ROUNDS = 2
+export const PR_FEEDBACK = 'Feedback da PR'
+
+// Sandbox nativo do Claude Code (project.sandbox): Bash confinado em filesystem
+// e rede, além dos guardrails por regex. Vai por --settings para não mexer no
+// settings.json do usuário.
+// forbid: um comando barrado não é repetido fora do sandbox (o default "retry"
+// anularia o confinamento numa sessão sem humano). gh fica de fora porque, no
+// macOS, CLIs em Go falham a verificação TLS dentro do Seatbelt.
+export const SANDBOX_SETTINGS = {
+  enabled: true,
+  failIfUnavailable: true,
+  autoAllowBashIfSandboxed: true,
+  allowUnsandboxedCommands: 'forbid',
+  excludedCommands: ['gh'],
+  network: {
+    allowLocalBinding: true,
+    allowedDomains: [
+      'github.com', '*.github.com', '*.githubusercontent.com',
+      'registry.npmjs.org', 'pypi.org', 'files.pythonhosted.org',
+    ],
+  },
+}
+
+export function sandboxArgs(project) {
+  if (!project?.sandbox) return []
+  return ['--settings', JSON.stringify({ sandbox: SANDBOX_SETTINGS })]
 }
 
 const REPLAN_NOTE = 'Replanejando: com o autoDecompose do projeto ligado, a task será desmembrada levando este log como contexto.'

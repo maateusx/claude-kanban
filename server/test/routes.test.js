@@ -98,7 +98,7 @@ test('PATCH persiste retry e maxTurns e valida os limites', async () => {
     payload: { retry: { maxAttempts: 1, backoffMinutes: 30 }, maxTurns: 25, auxModel: 'claude-haiku-4-5-20251001' },
   })
   assert.equal(ok.statusCode, 200)
-  assert.deepEqual(json(ok).project.retry, { maxAttempts: 1, backoffMinutes: 30 })
+  assert.deepEqual(json(ok).project.retry, { maxAttempts: 1, backoffMinutes: 30, escalateModels: [] })
   assert.equal(json(ok).project.maxTurns, 25)
   assert.equal(json(ok).project.auxModel, 'claude-haiku-4-5-20251001')
 
@@ -106,7 +106,7 @@ test('PATCH persiste retry e maxTurns e valida os limites', async () => {
   const partial = await app.inject({
     method: 'PATCH', url: `/api/projects/${p.id}`, payload: { retry: { maxAttempts: 3 } },
   })
-  assert.deepEqual(json(partial).project.retry, { maxAttempts: 3, backoffMinutes: 30 })
+  assert.deepEqual(json(partial).project.retry, { maxAttempts: 3, backoffMinutes: 30, escalateModels: [] })
 
   // 0 desliga o teto de turnos (volta ao comportamento antigo).
   const off = await app.inject({ method: 'PATCH', url: `/api/projects/${p.id}`, payload: { maxTurns: 0 } })

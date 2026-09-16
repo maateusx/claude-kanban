@@ -7,6 +7,7 @@ import { watchProject } from './lib/watcher.js'
 import { Runner } from './lib/runner.js'
 import { DevServers } from './lib/devservers.js'
 import { Scheduler, isFuture } from './lib/scheduler.js'
+import { Autopilot } from './lib/autopilot.js'
 import { notifyWebhook } from './lib/webhook.js'
 import { listPendingActions } from './lib/pending.js'
 import { buildApp } from './app.js'
@@ -108,6 +109,8 @@ for (const p of db.projects) autoEnqueue(p)
 // Depois do recover/autoEnqueue: o primeiro tick já solta o que venceu enquanto
 // o servidor estava fora do ar.
 scheduler.start()
+const autopilot = new Autopilot({ db, saveProjects, runner, emit, claudeAvailable: () => claudeAvailable })
+autopilot.start()
 
 // ---- app ----
 const app = await buildApp({

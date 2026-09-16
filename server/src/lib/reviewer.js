@@ -1,4 +1,6 @@
-import { spawn } from 'node:child_process'
+import { spawn, execFile } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
 import { auxModel } from './models.js'
 import { getSection } from './tasks.js'
 
@@ -45,15 +47,20 @@ export function parseReview(text) {
   return { approved: parsed.approved, feedback: String(parsed.feedback || '').trim() }
 }
 
+const shotNote = shot => shot ? `
+Um screenshot da aplicação rodando com esta mudança está em ${shot}. Abra com
+Read e confira se a parte visual está coerente com o que a task pede.
+` : ''
+
 // Resolve { approved, feedback, costUsd }. Nunca rejeita: revisor fora do ar não
 // pode reprovar trabalho que passou nos testes — vira aprovado com a nota do erro.
-export function reviewTask(project, task, diff, cwd) {
+export function reviewTask(project, task, diff, cwd, shot = null) {
   return new Promise(resolve => {
     const pass = why => resolve({ approved: true, feedback: `(revisão não rodou: ${why})`, costUsd: null, skipped: true })
     let child
     try {
       child = spawn('claude', [
-        '-p', buildReviewPrompt(task, diff),
+        '-p', buildReviewPrompt(task, diff) + shotNote(shot),
         '--output-format', 'json',
         '--allowedTools', 'Read Glob Grep',
         '--model', auxModel(project),
@@ -73,4 +80,36 @@ export function reviewTask(project, task, diff, cwd) {
       } catch (e) { pass(e.message) }
     })
   })
+}
+
+const APP_BOOT_MS = 90_000
+const SHOT_TIMEOUT_MS = 90_000
+
+// Checagem visual (project.visualCheck = { command, url }): sobe a app a partir
+// do worktree da task, espera a URL responder e tira um screenshot com o CLI do
+// Playwright. Resolve { path } ou { error } — nunca rejeita.
+// ponytail: exige `npx playwright install chromium` feito uma vez na máquina, e
+// a porta do comando é fixa (com concorrência > 1, duas revisões disputam a porta).
+export async function screenshotApp({ command, url }, cwd) {
+  const child = spawn(command, { cwd, shell: true, stdio: 'ignore', detached: process.platform !== 'win32' })
+  const stop = () => { try { process.kill(-child.pid, 'SIGTERM') } catch { try { child.kill('SIGTERM') } catch {} } }
+  try {
+    const deadline = Date.now() + APP_BOOT_MS
+    let up = false
+    while (!up && Date.now() < deadline && child.exitCode === null) {
+      try { up = (await fetch(url, { signal: AbortSignal.timeout(3000) })).status < 500 } catch {}
+      if (!up) await new Promise(r => setTimeout(r, 1500))
+    }
+    if (!up) return { error: `a aplicação não respondeu em ${url}` }
+    const file = path.join(cwd, '.claude', 'claude-kanban', 'review-shot.png')
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    await new Promise((resolve, reject) => execFile('npx',
+      ['--yes', 'playwright', 'screenshot', '--full-page', url, file],
+      { cwd, timeout: SHOT_TIMEOUT_MS }, err => (err ? reject(err) : resolve())))
+    return fs.existsSync(file) ? { path: file } : { error: 'playwright não gerou a imagem' }
+  } catch (e) {
+    return { error: String(e.message || e).slice(0, 300) }
+  } finally {
+    stop()
+  }
 }

@@ -194,9 +194,10 @@ function ensureParentBranch(root, g, parentId) {
 // Prepara o workspace da task conforme as configurações de git do projeto.
 // parentId: task de que esta é subtask — o ponto de partida vira a branch do pai.
 // Retorna { cwd, branch, worktreeDir, startSha } — nulos quando não se aplicam.
-// fullDiff: branch já existente (integração) — startSha vira o ponto em que ela
-// saiu do startPoint, para o diff mostrar tudo que ela acumula.
-export function prepareWorkspace(project, taskId, { parentId = null, fullDiff = false } = {}) {
+// Branch já existente (integração, retry, feedback de PR, conflito): startSha
+// vira o ponto em que ela saiu do startPoint, para o diff (e a revisão, e a
+// política de auto-merge) cobrir tudo que ela acumula, não só a última sessão.
+export function prepareWorkspace(project, taskId, { parentId = null } = {}) {
   const g = gitSettings(project)
   const root = project.path
   if (!isGitRepo(root)) return { cwd: root, branch: null, worktreeDir: null, startSha: null }
@@ -207,7 +208,7 @@ export function prepareWorkspace(project, taskId, { parentId = null, fullDiff = 
   if (g.useWorktree) {
     // Worktree exige branch própria (git não permite a mesma branch em dois worktrees),
     // então aqui a task sempre roda em branch nova.
-    let startPoint = 'HEAD'
+    let startPoint = headSha(root)
     if (parentBranch) startPoint = parentBranch
     else if (!g.useCurrentBranch) {
       if (g.pullBeforeStart) updateBase(root, g.baseBranch)
@@ -223,11 +224,16 @@ export function prepareWorkspace(project, taskId, { parentId = null, fullDiff = 
     if (fs.existsSync(path.join(root, '.claude'))) copyClaudeDir(root, path.join(dir, '.claude'))
     excludeKanbanFromCommits(dir)
     let startSha = headSha(dir)
-    if (existed && fullDiff) { try { startSha = git(root, 'merge-base', startPoint, newBranch) } catch {} }
-    return { cwd: dir, branch: newBranch, worktreeDir: dir, startSha }
+    // baseSha: de onde a branch saiu — é contra ele que o verify de referência
+    // roda (numa branch retomada, o HEAD já tem commits da própria task).
+    let baseSha = startSha
+    try { baseSha = git(root, 'merge-base', startPoint, newBranch) } catch {}
+    if (existed) startSha = baseSha
+    return { cwd: dir, branch: newBranch, worktreeDir: dir, startSha, baseSha, startPoint }
   }
 
   let branch = currentBranch(root)
+  let baseSha = null
   if (parentBranch) {
     if (branch !== parentBranch) git(root, 'checkout', parentBranch)
     branch = parentBranch
@@ -240,12 +246,52 @@ export function prepareWorkspace(project, taskId, { parentId = null, fullDiff = 
     }
     branch = g.baseBranch
   }
+  baseSha = headSha(root)
   if (g.commitToNewBranch) {
     branchExists(root, newBranch) ? git(root, 'checkout', newBranch) : git(root, 'checkout', '-b', newBranch)
     branch = newBranch
   }
   excludeKanbanFromCommits(root)
-  return { cwd: root, branch, worktreeDir: null, startSha: headSha(root) }
+  const startPoint = g.commitToNewBranch ? (parentBranch || (g.useCurrentBranch ? baseSha : g.baseBranch)) : null
+  return { cwd: root, branch, worktreeDir: null, startSha: headSha(root), baseSha, startPoint }
+}
+
+// De onde medir o diff no FIM da sessão: o merge-base com o ponto de partida,
+// recalculado — se a sessão mergeou a base (resolução de conflito), o que veio
+// da base não é trabalho da task.
+export function diffBase(ws) {
+  if (!ws?.startPoint) return ws?.startSha || null
+  try { return git(ws.cwd, 'merge-base', ws.startPoint, 'HEAD') } catch { return ws.startSha || null }
+}
+
+// Roda fn(dir) num worktree destacado em `sha` e remove o worktree no fim.
+// Usado pelo verify de referência: saber se a base já falhava sem tocar no
+// checkout de ninguém.
+export function withDetachedWorktree(root, sha, fn) {
+  const dir = path.join(HOME_DIR, 'worktrees', '_baseline', `${path.basename(root)}-${sha.slice(0, 12)}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+  try { git(root, 'worktree', 'prune') } catch {}
+  git(root, 'worktree', 'add', '--detach', dir, sha)
+  try {
+    return fn(dir)
+  } finally {
+    try { git(root, 'worktree', 'remove', '--force', dir) } catch {
+      fs.rmSync(dir, { recursive: true, force: true })
+      try { git(root, 'worktree', 'prune') } catch {}
+    }
+  }
+}
+
+// Arquivos e linhas (+/-) tocados por um diff unificado — base da política de auto-merge.
+export function diffStats(diff) {
+  const files = new Set()
+  let lines = 0
+  for (const l of String(diff || '').split('\n')) {
+    const m = l.match(/^diff --git a\/(.+?) b\//)
+    if (m) files.add(m[1])
+    else if ((l.startsWith('+') && !l.startsWith('+++')) || (l.startsWith('-') && !l.startsWith('---'))) lines++
+  }
+  return { files: [...files], lines }
 }
 
 const headSha = dir => { try { return git(dir, 'rev-parse', 'HEAD') } catch { return null } }

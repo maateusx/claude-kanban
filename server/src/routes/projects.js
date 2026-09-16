@@ -19,6 +19,49 @@ function validateProjectPath(projectPath, create = false) {
   return null
 }
 
+const intIn = (v, min, max) => Number.isInteger(v) && v >= min && v <= max
+
+// Valida e mescla project.autopilot. Devolve a mensagem de erro, ou null.
+export function applyAutopilot(p, input) {
+  if (!input || typeof input !== 'object') return 'autopilot deve ser um objeto'
+  const next = { ...(p.autopilot || {}) }
+  for (const k of ['prFollowUp', 'watchMainCI']) if (input[k] !== undefined) next[k] = !!input[k]
+  if (input.issuesLabel !== undefined) next.issuesLabel = String(input.issuesLabel || '').trim()
+  const ints = { issuesMinutes: [0, 10080], suggestHours: [0, 720], suggestMax: [1, 50] }
+  for (const [k, [min, max]] of Object.entries(ints)) {
+    if (input[k] === undefined) continue
+    const n = input[k] === null || input[k] === '' ? min : Number(input[k])
+    if (!intIn(n, min, max)) return `autopilot.${k} deve ser um inteiro entre ${min} e ${max}`
+    next[k] = n
+  }
+  if (input.importStatus !== undefined) {
+    if (!['backlog', 'todo'].includes(input.importStatus)) return 'autopilot.importStatus deve ser backlog ou todo'
+    next.importStatus = input.importStatus
+  }
+  if (input.digestHour !== undefined) {
+    const h = input.digestHour === null || input.digestHour === '' ? null : Number(input.digestHour)
+    if (h !== null && !intIn(h, 0, 23)) return 'autopilot.digestHour deve ser uma hora entre 0 e 23 (vazio desliga)'
+    next.digestHour = h
+  }
+  if (input.autoMerge !== undefined) {
+    const m = input.autoMerge || {}
+    const am = { ...(next.autoMerge || {}) }
+    if (m.enabled !== undefined) am.enabled = !!m.enabled
+    if (m.maxLines !== undefined) {
+      const n = Number(m.maxLines)
+      if (!intIn(n, 1, 100000)) return 'autopilot.autoMerge.maxLines deve ser um inteiro positivo'
+      am.maxLines = n
+    }
+    if (m.protectedPaths !== undefined) {
+      if (!Array.isArray(m.protectedPaths)) return 'autopilot.autoMerge.protectedPaths deve ser uma lista de globs'
+      am.protectedPaths = m.protectedPaths.map(x => String(x).trim()).filter(Boolean)
+    }
+    next.autoMerge = am
+  }
+  p.autopilot = next
+  return null
+}
+
 export default function projectRoutes(app, ctx) {
   const { db, runner, devServers, projectView, bootstrapErrors } = ctx
 
@@ -63,7 +106,7 @@ export default function projectRoutes(app, ctx) {
     const p = withProjectRecord(ctx, req, reply); if (!p) return
     const { name, description, path: projectPath, skipPermissions, git, defaultModel, auxModel: auxModelIn,
       autoRun, autoDecompose, autoDecide, reviewGate, goalBudgetUsd, devServer, timeoutMs, enrichMode, rawMode, retry, maxTurns,
-      webhookUrl, webhookStatuses } = req.body || {}
+      webhookUrl, webhookStatuses, verifyCommand, stuckDetection, sandbox, visualCheck, autopilot } = req.body || {}
     if (name !== undefined) {
       if (!String(name).trim()) return reply.code(400).send({ error: 'name não pode ser vazio' })
       p.name = String(name).trim()
@@ -95,36 +138,6 @@ export default function projectRoutes(app, ctx) {
         }
         p.timeoutMs = Math.round(ms)
       }
-    }
-    if (maxTurns !== undefined) {
-      if (maxTurns === null || maxTurns === '') {
-        p.maxTurns = null
-      } else {
-        const n = Number(maxTurns)
-        // 0 desliga o teto (comportamento antigo: só o timeout limita a sessão).
-        if (!Number.isInteger(n) || n < 0 || n > MAX_MAX_TURNS) {
-          return reply.code(400).send({ error: `maxTurns deve ser 0 (sem limite) ou um inteiro até ${MAX_MAX_TURNS}` })
-        }
-        p.maxTurns = n
-      }
-    }
-    if (retry !== undefined && typeof retry === 'object') {
-      const next = { ...(p.retry || {}) }
-      if (retry.maxAttempts !== undefined) {
-        const n = Number(retry.maxAttempts)
-        if (!Number.isInteger(n) || n < 1 || n > 10) {
-          return reply.code(400).send({ error: 'retry.maxAttempts deve ser um inteiro entre 1 e 10' })
-        }
-        next.maxAttempts = n
-      }
-      if (retry.backoffMinutes !== undefined) {
-        const n = Number(retry.backoffMinutes)
-        if (!Number.isFinite(n) || n < 0 || n > 1440) {
-          return reply.code(400).send({ error: 'retry.backoffMinutes deve estar entre 0 e 1440' })
-        }
-        next.backoffMinutes = n
-      }
-      p.retry = next
     }
     if (defaultModel !== undefined) {
       if (defaultModel && !normalizeModel(defaultModel)) {
@@ -166,7 +179,26 @@ export default function projectRoutes(app, ctx) {
         }
         next.backoffMinutes = n
       }
+      if (retry.escalateModels !== undefined) {
+        const list = retry.escalateModels || []
+        const bad = Array.isArray(list) ? list.find(m => !normalizeModel(m)) : '(não é lista)'
+        if (bad !== undefined) return reply.code(400).send({ error: `retry.escalateModels: ${invalidModelMsg(bad)}` })
+        next.escalateModels = list.map(normalizeModel)
+      }
       p.retry = next
+    }
+    if (verifyCommand !== undefined) p.verifyCommand = String(verifyCommand || '').trim()
+    if (stuckDetection !== undefined) p.stuckDetection = !!stuckDetection
+    if (sandbox !== undefined) p.sandbox = !!sandbox
+    if (visualCheck !== undefined) {
+      const v = visualCheck || {}
+      const url = String(v.url || '').trim()
+      if (url && !/^https?:\/\//i.test(url)) return reply.code(400).send({ error: 'visualCheck.url deve começar com http:// ou https://' })
+      p.visualCheck = { command: String(v.command || '').trim(), url }
+    }
+    if (autopilot !== undefined) {
+      const err = applyAutopilot(p, autopilot)
+      if (err) return reply.code(400).send({ error: err })
     }
     if (enrichMode !== undefined) {
       if (!['off', 'auto', 'always'].includes(enrichMode)) {
