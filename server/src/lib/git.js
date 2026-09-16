@@ -404,32 +404,65 @@ export function mergeTaskBranch(project, branch, { noFF = true } = {}) {
   }
 }
 
-// Merge de `branch` em `into` sem checkout nenhum (merge-tree + commit-tree):
-// a branch de integração de uma task desmembrada não está checada em lugar
-// algum enquanto as filhas rodam. Fast-forward quando dá; conflito sobe
-// MergeConflictError e nada é escrito. Exige git >= 2.38.
-export function mergeIntoBranch(root, branch, into) {
+const isAncestor = (root, a, b) => {
+  try { git(root, 'merge-base', '--is-ancestor', a, b); return true } catch { return false }
+}
+
+// Resultado do merge de `branch` em `into`, sem escrever ref nenhuma (merge-tree +
+// commit-tree): { head, sha, merged, tested }. tested = a árvore resultante é a
+// da própria branch (fast-forward), que o gate da task já verificou. A fila de
+// merge roda o verify em cima de `sha` antes de gravar. Conflito sobe
+// MergeConflictError. Exige git >= 2.38.
+export function mergeResult(root, branch, into) {
   const head = git(root, 'rev-parse', into)
   const tip = git(root, 'rev-parse', branch)
-  if (head === tip) return { sha: head, merged: false }
-  const isAncestor = (a, b) => {
-    try { git(root, 'merge-base', '--is-ancestor', a, b); return true } catch { return false }
+  if (head === tip || isAncestor(root, tip, head)) return { head, sha: head, merged: false, tested: true }
+  if (isAncestor(root, head, tip)) return { head, sha: tip, merged: true, tested: true }
+  let tree
+  try {
+    tree = execFileSync('git', ['merge-tree', '--write-tree', head, tip],
+      { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n')[0].trim()
+  } catch (e) {
+    // Conflito: merge-tree sai com 1 e lista os arquivos no stdout.
+    throw new MergeConflictError((e.stdout || e.message).toString().trim())
   }
-  if (isAncestor(tip, head)) return { sha: head, merged: false }
-  let sha = tip
-  if (!isAncestor(head, tip)) {
-    let tree
-    try {
-      tree = execFileSync('git', ['merge-tree', '--write-tree', head, tip],
-        { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n')[0].trim()
-    } catch (e) {
-      // Conflito: merge-tree sai com 1 e lista os arquivos no stdout.
-      throw new MergeConflictError((e.stdout || e.message).toString().trim())
-    }
-    sha = git(root, 'commit-tree', tree, '-p', head, '-p', tip, '-m', `Merge branch '${branch}' into ${into} (claude-kanban)`)
-  }
-  git(root, 'update-ref', `refs/heads/${into}`, sha, head)
-  return { sha, merged: true }
+  const sha = git(root, 'commit-tree', tree, '-p', head, '-p', tip, '-m', `Merge branch '${branch}' into ${into} (claude-kanban)`)
+  return { head, sha, merged: true, tested: false }
+}
+
+// Merge de `branch` em `into` sem checkout nenhum: a branch de integração de uma
+// task desmembrada não está checada em lugar algum enquanto as filhas rodam.
+// Fast-forward quando dá; conflito sobe MergeConflictError e nada é escrito.
+export function mergeIntoBranch(root, branch, into) {
+  const r = mergeResult(root, branch, into)
+  if (r.merged) git(root, 'update-ref', `refs/heads/${into}`, r.sha, r.head)
+  return { sha: r.sha, merged: r.merged }
+}
+
+// A base remota (origin/<base>) não está contida em `sha`? Para a fila de merge
+// das PRs: branch atrás da base é atualizada antes do merge. Sem remote, ou sem o
+// commit localmente, responde false (não há como saber).
+export function isBehindBase(root, base, sha) {
+  try { fetchRemotes(root) } catch {}
+  const ref = remoteBranchRef(root, base)
+  if (!ref || !resolveRef(root, sha)) return false
+  return !isAncestor(root, ref, sha)
+}
+
+// Revert de `sha` (merge ou commit simples) em cima de `onto`, gravado na branch
+// `branch` — nada muda na base aqui. Devolve o sha do commit de revert.
+export function revertOnBranch(root, sha, onto, branch) {
+  const parents = git(root, 'rev-list', '--parents', '-n', '1', sha).split(' ').length - 1
+  return withDetachedWorktree(root, onto, dir => {
+    git(dir, 'revert', '--no-edit', ...(parents > 1 ? ['-m', '1'] : []), sha)
+    const head = git(dir, 'rev-parse', 'HEAD')
+    git(root, 'branch', '-f', branch, head)
+    return head
+  }, '_revert')
+}
+
+export function pushBranch(root, branch) {
+  git(root, 'push', '-u', 'origin', branch)
 }
 
 // Descarta o trabalho da task: apaga a branch local (e o worktree, se sobrou).

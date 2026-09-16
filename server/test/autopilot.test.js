@@ -62,6 +62,7 @@ function runnerFor(project) {
   const runner = new Runner(id => (id === project.id ? project : null), (type, p) => emitted.push({ type, ...p }))
   runner.tick = () => {}
   runner.queue = []
+  runner.mergeQueue = []
   return { runner, emitted }
 }
 

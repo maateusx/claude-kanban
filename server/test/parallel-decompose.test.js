@@ -25,6 +25,7 @@ function runnerFor(project) {
   const runner = new Runner(id => (id === project.id ? project : null), () => {})
   runner.tick = () => {}
   runner.queue = []
+  runner.mergeQueue = []
   return runner
 }
 
@@ -108,7 +109,7 @@ function repo() {
   return root
 }
 
-test('irmãs paralelas integram no pai uma de cada vez; conflito vira sessão de resolução', () => {
+test('irmãs paralelas integram no pai uma de cada vez; conflito vira sessão de resolução', async () => {
   const root = repo()
   const project = { id: 'pm1', path: root }
   const parent = createTask(root, { title: 'Pai', status: 'todo', tags: [DECOMPOSED_TAG] })
@@ -131,6 +132,7 @@ test('irmãs paralelas integram no pai uma de cada vez; conflito vira sessão de
   }))
   for (const a of actives) runner.actives.set(a.taskId, a)
   for (const a of actives) runner.finish(a, 0)
+  await runner.mergeDrain
 
   const into = taskBranch(parent.id)
   assert.equal(sh(root, 'show', `${into}:api.txt`), 'api')

@@ -4,6 +4,7 @@ import { listTasks, createTask, updateTask, replaceSection, appendToSection } fr
 import { clearExecuted } from './ledger.js'
 import {
   prStatus, prInlineComments, mergePR, summarizePR, failedRunLog, latestRun, listIssues, issueTag, issueDescription,
+  prMergeSha, updatePRBranch, createPR,
 } from './github.js'
 import { fetchSource, itemDescription } from './searchFetch.js'
 import { listSearchSources } from './searchSources.js'
@@ -11,7 +12,10 @@ import { analyzeProject, findGaps } from './analyzer.js'
 import {
   autoMergeBlocker, autoMergeSettings, notesFile, PR_FEEDBACK, parentIdOf, goalBudget, treeCost, isGoal,
 } from './runner.js'
-import { gitSettings, applyCleanup, isGitRepo, resolveRef, taskBranch, withDetachedWorktree } from './git.js'
+import {
+  gitSettings, applyCleanup, isGitRepo, resolveRef, taskBranch, withDetachedWorktree, isBehindBase, revertOnBranch,
+  pushBranch, mergeTaskBranch, fetchRemotes,
+} from './git.js'
 import { diffFile } from './paths.js'
 import { auxModel } from './models.js'
 import { postWebhook, webhookUrl } from './webhook.js'
@@ -30,6 +34,8 @@ export const NOTES_COMPACT_AT = 9000
 export const SUGGESTED_TAG = 'auto-sugestao'
 export const GAP_TAG = 'lacuna'
 export const SPEC_DONE_TAG = 'spec-cumprida'
+// Merge do autopilot que quebrou o CI da base e foi revertido — só uma vez por task.
+export const REVERTED_TAG = 'revertido'
 const IMPORT_STATUSES = ['backlog', 'todo']
 
 export const DEFAULT_AUTOPILOT = {
@@ -148,7 +154,10 @@ export class Autopilot {
 
   // ponytail: gh síncrono (execFileSync), uma PR por vez — trava o event loop
   // alguns segundos a cada 3 min com muitas PRs abertas; vira execFile se pesar.
+  // Fila de merge das PRs: uma por tick. PR atrás da base é atualizada
+  // (update-branch) e só mergeia quando o CI passar de novo em cima da base atual.
   followPRs(p, s) {
+    let landed = false
     const tasks = listTasks(p.path).filter(t =>
       t.status === 'done' && t.run?.pr?.number && (t.run.pr.state ?? 'OPEN') === 'OPEN' && !this.busy(t.id))
     for (const t of tasks) {
@@ -199,15 +208,23 @@ export class Autopilot {
       if (!ciOk || sum.changesRequested || sum.conflicting) continue
       let diff = ''
       try { diff = fs.readFileSync(diffFile(p.path, t.id), 'utf8') } catch {}
-      if (autoMergeBlocker(p, { reviewApproved: t.run.review_approved, diff })) continue
+      if (landed || autoMergeBlocker(p, { reviewApproved: t.run.review_approved, diff })) continue
+      const base = gitSettings(p).baseBranch
+      if (isBehindBase(p.path, base, sum.sha)) {
+        try { updatePRBranch(p.path, n) } catch (e) { console.error(`autopilot: update-branch da PR #${n} falhou: ${e.message}`) }
+        continue
+      }
       try { mergePR(p.path, n) } catch (e) {
         console.error(`autopilot: merge da PR #${n} falhou: ${e.message}`)
         continue
       }
+      landed = true
+      let mergeSha = null
+      try { mergeSha = prMergeSha(p.path, n) } catch {}
       const u = updateTask(p.path, t.id, {
         status: 'archived',
         tags: [...new Set([...(t.tags || []), 'merged'])],
-        run: { pr: { ...t.run.pr, state: 'MERGED' } },
+        run: { pr: { ...t.run.pr, state: 'MERGED' }, merge_sha: mergeSha },
       })
       this.emit('task.moved', { projectId: p.id, taskId: t.id, from: 'done', to: 'archived' })
       this.emit('task.upserted', { projectId: p.id, task: u })
@@ -259,8 +276,11 @@ export class Autopilot {
     const run = latestRun(p.path, base)
     if (run?.conclusion !== 'failure' || !run.headSha) return
     const tag = `ci:${run.headSha.slice(0, 10)}`
-    if (tagsOf(listTasks(p.path)).has(tag)) return
+    const tasks = listTasks(p.path)
+    if (tagsOf(tasks).has(tag)) return
     const log = failedRunLog(p.path, run.url)
+    const culprit = tasks.find(t => t.run?.merge_sha === run.headSha && !(t.tags || []).includes(REVERTED_TAG))
+    if (culprit && this.revertMerge(p, culprit, run, log, tag)) return
     this.created(p, createTask(p.path, {
       title: `CI quebrado em ${base}: ${run.workflowName || 'workflow'}`,
       description: `O workflow **${run.workflowName || '?'}** falhou em \`${base}\` no commit \`${run.headSha.slice(0, 10)}\` ` +
@@ -268,6 +288,50 @@ export class Autopilot {
         (log ? `Cauda do log das etapas que falharam:\n\n\`\`\`\n${log}\n\`\`\`` : 'Veja o log com `gh run view --log-failed`.'),
       priority: 'urgent', tags: ['ci', tag], status: importStatus(s),
     }))
+  }
+
+  // O CI da base quebrou no merge que o autopilot fez: reverte numa branch
+  // (merge local → a fila mergeia o revert como mergeou a task; PR → abre PR de
+  // revert) e reabre a task com o log. Devolve false se não deu (vira task de CI).
+  revertMerge(p, t, run, log, ciTag) {
+    const base = gitSettings(p).baseBranch
+    const viaPR = !!t.run?.pr
+    const branch = `kanban/revert-${t.id}`
+    const sha = run.headSha
+    let where, revertSha
+    try {
+      if (viaPR) fetchRemotes(p.path)
+      const onto = resolveRef(p.path, viaPR ? `origin/${base}` : base)
+      if (!onto) throw new Error(`base ${base} não encontrada`)
+      revertSha = revertOnBranch(p.path, sha, onto, branch)
+      if (viaPR) {
+        pushBranch(p.path, branch)
+        const url = createPR(p.path, {
+          base, head: branch, title: `Revert: ${t.title}`,
+          body: `O merge ${sha.slice(0, 10)} (task ${t.id}) quebrou o CI de \`${base}\`: ${run.url}\n\nRevert aberto pelo autopilot do claude-kanban.`,
+        })
+        where = `PR ${url} — precisa ser mergeada`
+        this.emit('task.attention', { projectId: p.id, taskId: t.id, reason: `merge quebrou o CI de ${base}; PR de revert aberta: ${url}` })
+      } else {
+        const res = mergeTaskBranch(p, branch)
+        where = `já mergeado em ${base}${res.pushed ? ' (com push)' : ''}`
+      }
+    } catch (e) {
+      console.error(`autopilot: revert de ${sha.slice(0, 10)} falhou: ${e.message}`)
+      return false
+    }
+    const ref = viaPR ? `origin/${base}` : base
+    const feedback = `O merge desta task em \`${base}\` (commit ${sha.slice(0, 10)}) quebrou o CI ([run](${run.url})) e foi ` +
+      `revertido automaticamente na branch \`${branch}\` (commit ${revertSha.slice(0, 10)}, ${where}).\n\n` +
+      `Antes de corrigir, nesta branch: \`${viaPR ? 'git fetch origin && ' : ''}git merge ${ref}\`. Se depois disso o commit ` +
+      `${revertSha.slice(0, 10)} estiver no histórico (\`git merge-base --is-ancestor ${revertSha.slice(0, 10)} HEAD\`), ` +
+      `rode \`git revert --no-edit ${revertSha.slice(0, 10)}\` para trazer seu trabalho de volta — senão ele some no próximo merge. ` +
+      `Então corrija a causa da falha, rode os testes e commite.` +
+      (log ? `\n\nCauda do log das etapas que falharam:\n\n\`\`\`\n${log}\n\`\`\`` : '')
+    const tags = [...new Set([...(t.tags || []).filter(x => x !== 'merged'), REVERTED_TAG, ciTag])]
+    const cur = updateTask(p.path, t.id, { tags })
+    this.reopen(p, cur, feedback, { merge_sha: null, pr: null, pr_rounds: 0 })
+    return true
   }
 
   async suggest(p, s) {

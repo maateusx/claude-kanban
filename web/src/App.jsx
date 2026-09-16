@@ -129,7 +129,7 @@ export default function App() {
   const [projects, setProjects] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [{ tasks, pending, logs }, dispatch] = useReducer(reducer, initialState)
-  const [queue, setQueue] = useState({ actives: [], queue: [], maxConcurrency: 1, paused: false, pausedUntil: null })
+  const [queue, setQueue] = useState({ actives: [], queue: [], merges: [], maxConcurrency: 1, paused: false, pausedUntil: null })
   const usage = useUsage()
   const [logTask, setLogTask] = useState(null)
   const [diffTask, setDiffTask] = useState(null)
@@ -3498,6 +3498,17 @@ function QueueBar({ queue, tasks, projects, usage, onOpen, onKill, onReorder, on
           <button onClick={() => move(i, 1)} className="px-0.5 text-muted hover:text-ink">▸</button>
           <button onClick={() => onDequeue(q.taskId)} title={t('Cancelar (tirar da fila)')}
             className="px-0.5 text-muted hover:text-danger">✕</button>
+        </div>
+      ))}
+      {(queue.merges || []).map((m, i) => (
+        <div key={`merge-${m.taskId}`} title={`${m.branch} → ${m.into}`}
+          className="flex shrink-0 items-center gap-1.5 rounded-[6px] bg-subtle px-3 py-1.5 text-ink-2">
+          <span className="font-mono text-muted">⇢{i + 1}</span>
+          <button onClick={() => onOpen(m, false)} title={t('Ver detalhes')} className="hover:text-ink hover:underline">{label(m)}</button>
+          <span className="font-mono text-muted">→ {m.into}</span>
+          <span className={m.stage ? 'animate-pulse text-st-doing' : 'text-muted'}>
+            {m.stage === 'verify' ? t('verificando merge') : i === 0 ? t('mergeando') : t('fila de merge')}
+          </span>
         </div>
       ))}
       </div>

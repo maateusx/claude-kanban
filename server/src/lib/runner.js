@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync, exec } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadState, saveState, diffFile, logFile, kanbanDir } from './paths.js'
@@ -8,7 +8,7 @@ import { specBlock, needsDesign, SPEC_REL, DESIGN_TAG } from './spec.js'
 import { diagnoseTask, DIAGNOSED_PREFIX } from './diagnoser.js'
 import {
   prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, taskBranch,
-  mergeTaskBranch, withDetachedWorktree, diffStats, diffBase,
+  mergeTaskBranch, withDetachedWorktree, diffStats, diffBase, mergeResult, resolveRef,
 } from './git.js'
 import { reviewTask, screenshotApp } from './reviewer.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
@@ -343,15 +343,23 @@ export function runVerify(command, cwd) {
     cwd, shell: true, encoding: 'utf8',
     timeout: VERIFY_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
   })
-  const out = [res.stdout, res.stderr].filter(Boolean).join('\n').trim()
-  const failedToRun = !!res.error
-  const output = (failedToRun ? `${out}\n${res.error.message}`.trim() : out).slice(-MAX_VERIFY_OUTPUT)
-  return {
-    command,
-    ok: !failedToRun && res.status === 0,
-    exitCode: failedToRun ? -1 : res.status,
-    output: output || '(sem saída)',
-  }
+  return verifyResult(command, res.stdout, res.stderr, res.error ? -1 : res.status, res.error?.message)
+}
+
+// Mesmo verify sem travar o event loop — a fila de merge roda enquanto a UI acompanha.
+export function runVerifyAsync(command, cwd) {
+  return new Promise(resolve => exec(command, {
+    cwd, encoding: 'utf8', timeout: VERIFY_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
+  }, (err, stdout, stderr) => {
+    const code = !err ? 0 : typeof err.code === 'number' ? err.code : -1
+    resolve(verifyResult(command, stdout, stderr, code, code === -1 ? err.message : null))
+  }))
+}
+
+function verifyResult(command, stdout, stderr, exitCode, error) {
+  const out = [stdout, stderr].filter(Boolean).join('\n').trim()
+  const output = (error ? `${out}\n${error}`.trim() : out).slice(-MAX_VERIFY_OUTPUT)
+  return { command, ok: exitCode === 0, exitCode, output: output || '(sem saída)' }
 }
 
 // Teto do log persistido por task. Um run longo com tool_results grandes passa
@@ -378,6 +386,10 @@ export class Runner {
     this.actives = new Map()        // taskId -> { projectId, taskId, child, timer, ... }
     this.baselines = new Map()      // `${projectId}:${sha}:${cmd}` -> resultado do verify na base
     this.diagnosing = new Map()     // taskId -> promise do diagnóstico em andamento
+    // Fila de merge (estilo bors): branches concluídas entram na base/no pai uma
+    // de cada vez. [{ projectId, taskId, branch, into, kind: 'base'|'parent', stage }]
+    this.mergeQueue = (state.mergeQueue || []).map(m => ({ ...m, stage: null }))
+    this.mergeDrain = null          // promise do processamento em andamento
   }
 
   persist() {
@@ -386,6 +398,7 @@ export class Runner {
       maxConcurrency: this.maxConcurrency,
       paused: this.paused,
       pausedUntil: this.pausedUntil,
+      mergeQueue: this.mergeQueue,
     })
   }
 
@@ -480,6 +493,7 @@ export class Runner {
   dropProject(projectId) {
     const dropped = this.queue.filter(q => q.projectId === projectId)
     this.queue = this.queue.filter(q => q.projectId !== projectId)
+    this.mergeQueue = this.mergeQueue.filter(m => m.projectId !== projectId || m.stage)
     for (const a of [...this.actives.values()]) {
       if (a.projectId === projectId) this.kill(a.taskId)
     }
@@ -517,6 +531,7 @@ export class Runner {
       maxConcurrency: this.maxConcurrency,
       paused: this.paused,
       pausedUntil: this.pausedUntil,
+      merges: this.mergeQueue,
     }
   }
 
@@ -548,6 +563,8 @@ export class Runner {
     return task.depends_on.filter(id => {
       const dep = byId.get(id)
       if (!dep) return false
+      // Concluída mas ainda na fila de merge: o pai não parte sem o código dela.
+      if (this.mergeQueue.some(m => m.taskId === id)) return true
       return dep.status !== 'done' && dep.status !== 'archived' && !wasSucceeded(id)
     })
   }
@@ -1269,7 +1286,6 @@ export class Runner {
     }
 
     const task = prev
-    let integrateError = null
     const attempts = task?.run?.attempts || 0
     // Teto de turnos estourado: a sessão parou no meio, não falhou por acaso.
     // Re-executar do zero gastaria tudo de novo para parar no mesmo lugar, então
@@ -1374,28 +1390,13 @@ export class Runner {
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
       })
-    } else if (exitCode === 0 && !a.timedOut && (integrateError = this.integrate(project, task, a.workspace))) {
-      // A subtask passou, mas não entrou na branch do pai. Repetir do zero não
-      // resolve conflito: uma sessão mergeia a branch do pai na da task e resolve;
-      // se já tentou demais, vai para revisão humana (o pai segue esperando).
-      const into = taskBranch(parentIdOf(task))
-      const resolving = this.scheduleConflictFix(project, task, into, { ...runMeta, exit_reason: 'integration_conflict' },
-        `Não consegui mergear ${a.workspace.branch} na branch da task pai: ${integrateError}`)
-      this.emit('run.finished', {
-        projectId: a.projectId, taskId: a.taskId, exitCode: resolving ? 0 : -1, exitReason: 'integration_conflict',
-        conflictResolving: resolving,
-        costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
-        numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
-      })
-      if (resolving) this.enqueue(a.projectId, a.taskId)
     } else if (exitCode === 0 && !a.timedOut) {
       // No modo cru o agente não sabe do arquivo da task: a resposta final da
       // sessão vira o "## Resultado".
       if (a.rawPhase && r.result?.trim()) {
         updateTask(project.path, a.taskId, { body: replaceSection(task.body, 'Resultado', r.result.trim()) })
       }
-      let tags = (task.tags || []).filter(t => t !== CONFLICT_TAG)
-      if (parentIdOf(task) && a.workspace.branch) tags = withTag(tags, INTEGRATED_TAG)
+      const tags = (task.tags || []).filter(t => t !== CONFLICT_TAG)
       // O feedback da PR já foi atendido nesta execução.
       const cur = findTask(project.path, a.taskId)
       const done = updateTask(project.path, a.taskId, {
@@ -1419,7 +1420,15 @@ export class Runner {
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
         pr: runMeta.pr,
       })
-      this.autoMerge(project, done, diff, a.workspace.branch)
+      // Subtask integra no pai; o resto vai para a base se a política deixar.
+      const into = parentIdOf(task) && taskBranch(parentIdOf(task))
+      if (into) {
+        if (a.workspace.branch && a.workspace.branch !== into) {
+          this.enqueueMerge({ projectId: project.id, taskId: a.taskId, branch: a.workspace.branch, into, kind: 'parent' })
+        }
+      } else {
+        this.autoMerge(project, done, diff, a.workspace.branch)
+      }
     } else {
       const reason = a.timedOut
         ? `Timeout da execução. Limite configurado: ${Math.round((a.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)} min.`
@@ -1483,42 +1492,109 @@ export class Runner {
   autoMerge(project, task, diff, branch) {
     if (!task || parentIdOf(task) || task.run?.pr || !branch) return
     if (autoMergeBlocker(project, { reviewApproved: task.run.review_approved, diff })) return
-    const base = gitSettings(project).baseBranch
-    try {
-      const res = mergeTaskBranch(project, branch)
-      const merged = updateTask(project.path, task.id, { status: 'archived', tags: withTag(task.tags, 'merged') })
-      appendToSection(project.path, task.id, 'Resultado',
-        `_Mergeado automaticamente em ${base} pela política de auto-merge${res.pushed ? ' (com push)' : ''}._`)
-      this.emit('task.moved', { projectId: project.id, taskId: task.id, from: task.status, to: 'archived' })
-      this.emit('task.upserted', { projectId: project.id, task: merged })
-    } catch (e) {
-      if (e.conflict) {
-        if (this.scheduleConflictFix(project, task, base, {}, `Auto-merge em ${base} conflitou: ${e.message}`)) {
-          this.enqueue(project.id, task.id)
+    this.enqueueMerge({ projectId: project.id, taskId: task.id, branch, into: gitSettings(project).baseBranch, kind: 'base' })
+  }
+
+  // ---- fila de merge ----
+  // Branches que passam sozinhas podem quebrar juntas. Cada item: atualiza com a
+  // ponta atual do destino (merge-tree, sem checkout) → verifyCommand em cima do
+  // resultado → grava. Um item por vez, em todos os projetos.
+  // ponytail: serialização global; por destino se a fila virar gargalo.
+  enqueueMerge(item) {
+    if (this.mergeQueue.some(m => m.taskId === item.taskId)) return
+    this.mergeQueue.push({ ...item, stage: null })
+    this.persist()
+    this.emit('run.queue', this.getQueueView())
+    this.drainMerges()
+  }
+
+  drainMerges() {
+    if (this.mergeDrain) return this.mergeDrain
+    this.mergeDrain = (async () => {
+      while (this.mergeQueue.length) {
+        const item = this.mergeQueue[0]
+        let again = false
+        try { again = await this.processMerge(item) } catch (e) {
+          console.error(`fila de merge: ${item.branch} → ${item.into}: ${e.message}`)
         }
-        return
+        this.mergeQueue = this.mergeQueue.filter(m => m !== item)
+        // O destino andou durante o verify: o resultado testado não vale mais.
+        if (again) this.mergeQueue.push({ ...item, stage: null })
+        this.persist()
+        this.emit('run.queue', this.getQueueView())
       }
+    })().finally(() => {
+      this.mergeDrain = null
+      if (this.mergeQueue.length) this.drainMerges()
+      this.tick() // o pai pode ter ficado elegível
+    })
+    return this.mergeDrain
+  }
+
+  // Devolve true quando o item precisa voltar para o fim da fila.
+  async processMerge(item) {
+    const project = this.getProject(item.projectId)
+    const task = project && findTask(project.path, item.taskId)
+    if (!task) return false
+    let r
+    try { r = mergeResult(project.path, item.branch, item.into) } catch (e) {
+      if (e.conflict) return this.mergeRejected(project, task, item, `Merge de ${item.branch} em ${item.into} conflitou: ${e.message}`)
+      appendToSection(project.path, task.id, 'Log de erros', `[${new Date().toISOString()}] Merge em ${item.into} não aconteceu: ${e.message}`)
+      return false
+    }
+    const cmd = String(project.verifyCommand || '').trim()
+    if (cmd && !r.tested) {
+      item.stage = 'verify'
+      this.emit('run.queue', this.getQueueView())
+      const v = await withDetachedWorktree(project.path, r.sha, async dir => {
+        const out = await runVerifyAsync(cmd, dir)
+        return out.ok ? out : this.compareWithBaseline(project, { baseSha: r.head, cwd: dir }, out)
+      }, '_merge')
+      if (!v.ok) {
+        return this.mergeRejected(project, task, item, `A branch passou sozinha, mas quebra junto com o que já está em ${item.into}: ` +
+          `\`${v.command}\` falhou no resultado do merge (exit ${v.exitCode}).\n\n\`\`\`\n${v.output}\n\`\`\``)
+      }
+    }
+    if (resolveRef(project.path, item.into) !== r.head) return true
+    return item.kind === 'parent' ? this.landParent(project, task, item) : this.landBase(project, task, item)
+  }
+
+  landParent(project, task, item) {
+    mergeIntoBranch(project.path, item.branch, item.into)
+    const t = updateTask(project.path, task.id, { tags: withTag(task.tags, INTEGRATED_TAG) })
+    this.emit('task.upserted', { projectId: project.id, task: t })
+    return false
+  }
+
+  landBase(project, task, item) {
+    let res
+    try { res = mergeTaskBranch(project, item.branch) } catch (e) {
+      if (e.conflict) return this.mergeRejected(project, task, item, `Auto-merge em ${item.into} conflitou: ${e.message}`)
       // Checkout sujo, base inexistente…: fica para o humano aprovar pelo diff.
       appendToSection(project.path, task.id, 'Log de erros',
         `[${new Date().toISOString()}] Auto-merge não aconteceu: ${e.message}`)
+      return false
     }
+    // merge_sha: o autopilot reverte este merge se o CI da base quebrar nele.
+    const merged = updateTask(project.path, task.id, {
+      status: 'archived', tags: withTag(task.tags, 'merged'), run: { merge_sha: res.sha },
+    })
+    appendToSection(project.path, task.id, 'Resultado',
+      `_Mergeado automaticamente em ${res.base} pela fila de merge${res.pushed ? ' (com push)' : ''}._`)
+    this.emit('task.moved', { projectId: project.id, taskId: task.id, from: task.status, to: 'archived' })
+    this.emit('task.upserted', { projectId: project.id, task: merged })
+    return false
   }
 
-  // Subtask concluída: a branch dela entra na branch de integração do pai, de
-  // onde a próxima irmã parte. Devolve a mensagem de erro, ou null.
-  // Irmãs paralelas integram uma de cada vez: finish() e mergeIntoBranch são
-  // síncronos (nada intercala no event loop) e o update-ref confere o valor
-  // antigo. Quem conflita com o que a irmã já integrou vai para a resolução.
-  integrate(project, task, workspace) {
-    const parentId = parentIdOf(task)
-    const into = parentId && taskBranch(parentId)
-    if (!into || !workspace.branch || workspace.branch === into) return null
-    try {
-      mergeIntoBranch(project.path, workspace.branch, into)
-      return null
-    } catch (e) {
-      return e.message || String(e)
-    }
+  // Conflito ou verify reprovado depois de atualizar: a task volta com a
+  // resolução de conflito (mergeia o destino na branch dela e corrige).
+  mergeRejected(project, task, item, message) {
+    const run = item.kind === 'parent' ? { exit_reason: 'integration_conflict' } : {}
+    const resolving = this.scheduleConflictFix(project, task, item.into, run, message)
+    // Fora do ledger também quando vai para o humano: o pai não conta como integrada.
+    clearExecuted(task.id)
+    if (resolving) this.enqueue(project.id, task.id)
+    return false
   }
 
   // Crash recovery: tasks presas em doing/ sem processo ativo voltam para todo/
@@ -1538,6 +1614,8 @@ export class Runner {
           `[${new Date().toISOString()}] Execução interrompida (restart do orquestrador).`)
       }
     }
+    // Merge que estava na fila (ou no meio) quando o servidor caiu: refaz do zero.
+    if (this.mergeQueue.length) this.drainMerges()
   }
 }
 

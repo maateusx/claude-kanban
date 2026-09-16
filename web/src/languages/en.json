@@ -529,5 +529,8 @@
   "Spec ambígua": "Ambiguous spec",
   "Grande demais": "Too big",
   "Falta dependência": "Missing dependency",
-  "Externa (precisa de humano)": "External (needs a human)"
+  "Externa (precisa de humano)": "External (needs a human)",
+  "verificando merge": "verifying merge",
+  "mergeando": "merging",
+  "fila de merge": "merge queue"
 }

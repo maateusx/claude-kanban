@@ -529,5 +529,8 @@
   "Spec ambígua": "Spec ambígua",
   "Grande demais": "Grande demais",
   "Falta dependência": "Falta dependência",
-  "Externa (precisa de humano)": "Externa (precisa de humano)"
+  "Externa (precisa de humano)": "Externa (precisa de humano)",
+  "verificando merge": "verificando merge",
+  "mergeando": "mergeando",
+  "fila de merge": "fila de merge"
 }
