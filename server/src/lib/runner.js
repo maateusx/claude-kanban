@@ -661,6 +661,7 @@ export class Runner {
       cost_usd: r.total_cost_usd ?? null,
       duration_ms: r.duration_ms ?? null,
       num_turns: r.num_turns ?? null,
+      exit_reason: exitReason(a, exitCode, verify),
     }
 
     const task = findTask(project.path, a.taskId)
@@ -751,7 +752,11 @@ export class Runner {
     } else {
       const reason = a.timedOut
         ? `Timeout da execução. Limite configurado: ${Math.round((a.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)} min.`
-        : `Exit code ${exitCode}.`
+        : `${EXIT_REASON_TEXT[runMeta.exit_reason] || 'Falha'} (exit code ${exitCode ?? 'nenhum'}).`
+      // O CLI reporta a maioria dos erros (API, crédito, custo) no evento result,
+      // não no stderr — sem isso o log mostrava só "Exit code 1" e um bloco vazio.
+      const detail = [r.result, ...(Array.isArray(r.errors) ? r.errors : [])]
+        .filter(x => typeof x === 'string' && x.trim()).join('\n').slice(-2000)
       const { maxAttempts, backoffMinutes } = retrySettings(project)
       const patch = { status: 'todo', run: runMeta }
       let retryAt = null
@@ -769,9 +774,11 @@ export class Runner {
         ? `\nNova tentativa agendada para ${retryAt} (tentativa ${attempts + 1} de ${maxAttempts}).`
         : ''
       appendToSection(project.path, a.taskId, 'Log de erros',
-        `[${runMeta.completed_at}] ${reason}${retryNote}\n\n\`\`\`\n${(a.stderr || '').slice(-2000)}\n\`\`\``)
+        `[${runMeta.completed_at}] ${reason}${retryNote}` +
+        (detail ? `\n\nMensagem da sessão:\n\n> ${detail.replace(/\n/g, '\n> ')}` : '') +
+        `\n\n\`\`\`\n${(a.stderr || '').slice(-2000)}\n\`\`\``)
       this.emit('run.finished', {
-        projectId: a.projectId, taskId: a.taskId, exitCode,
+        projectId: a.projectId, taskId: a.taskId, exitCode, exitReason: runMeta.exit_reason,
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
       })
@@ -797,6 +804,29 @@ export class Runner {
       }
     }
   }
+}
+
+// Por que o run terminou, gravado em run.exit_reason (null = sucesso ou pedido
+// humano). Mesma precedência dos ramos de finish(); a UI traduz o código.
+export function exitReason(a, exitCode, verify) {
+  const r = a.result || {}
+  if (a.timedOut) return 'timeout'
+  if (a.killed) return 'killed'
+  if (r.subtype === 'error_max_turns') return 'max_turns'
+  if (exitCode === 0) return verify && !verify.ok ? 'verify_failed' : null
+  if (r.subtype === 'error_max_budget_usd') return 'max_budget'
+  if (r.subtype === 'error_during_execution') return 'execution_error'
+  if (r.is_error) return 'api_error'
+  // Sem exit code = processo morto por sinal que não veio do orquestrador (OOM, kill externo).
+  return exitCode == null ? 'signal' : 'exit_code'
+}
+
+const EXIT_REASON_TEXT = {
+  max_budget: 'Teto de custo da sessão atingido',
+  execution_error: 'Erro durante a execução da sessão',
+  api_error: 'A sessão terminou com erro da API/CLI do Claude',
+  signal: 'Processo encerrado por sinal externo (OOM, kill…)',
+  exit_code: 'Processo do Claude saiu com erro',
 }
 
 function gitInstructions(branch, g) {

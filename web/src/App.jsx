@@ -1173,6 +1173,24 @@ function CardBody({ task, queue, onRun, onOpen, selected, defaultModel, pending 
   )
 }
 
+// Motivo do fim do run (run.exit_reason, gravado pelo runner). Runs antigos só
+// têm exit_code — cai no "exit N" de sempre.
+const EXIT_REASONS = {
+  timeout: 'Tempo esgotado',
+  killed: 'Cancelada pelo usuário',
+  max_turns: 'Teto de turnos atingido',
+  max_budget: 'Teto de custo atingido',
+  execution_error: 'Erro na execução',
+  api_error: 'Erro da API do Claude',
+  signal: 'Processo encerrado por sinal',
+  verify_failed: 'Verificação falhou',
+}
+const runFailed = run => !!run.exit_reason || (run.exit_code != null && run.exit_code !== 0)
+const exitLabel = run => {
+  const code = run.exit_code != null ? ` (exit ${run.exit_code})` : ''
+  return EXIT_REASONS[run.exit_reason] ? t(EXIT_REASONS[run.exit_reason]) + code : `exit ${run.exit_code ?? '?'}`
+}
+
 // Assinatura da UI: bloco inset com o estado do run — vivo enquanto executa,
 // pós-mortem quando termina.
 function RunStrip({ task, running, openPending, onRun }) {
@@ -1188,7 +1206,7 @@ function RunStrip({ task, running, openPending, onRun }) {
       </button>
     )
   }
-  const failed = !running && run.exit_code != null && run.exit_code !== 0
+  const failed = !running && runFailed(run)
   return (
     <div className="mt-3 rounded-[6px] bg-subtle px-2.5 py-2 text-meta">
       {openPending > 0 && (
@@ -1208,7 +1226,7 @@ function RunStrip({ task, running, openPending, onRun }) {
       ) : (
         <div className="flex flex-wrap items-center gap-x-1.5 text-ink-2">
           <Dot className={`size-1.5 ${failed ? 'bg-danger' : 'bg-success'}`} />
-          <span>{failed ? `exit ${run.exit_code}` : t('concluído')}</span>
+          <span className={failed ? 'text-danger' : ''}>{failed ? exitLabel(run) : t('concluído')}</span>
           {run.completed_at && <span className="text-muted">· {ago(run.completed_at)}</span>}
           {run.cost_usd != null && <span className="font-mono text-muted">· {fmtCost(run.cost_usd)}</span>}
           {run.duration_ms != null && <span className="text-muted">· {fmtDur(run.duration_ms)}</span>}
@@ -1468,9 +1486,9 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
         ) : (
           <div className="rounded-[6px] border border-line p-2.5 text-meta">
             <div className="flex items-center gap-2">
-              <Dot className={running ? 'animate-pulse bg-success' : run.exit_code ? 'bg-danger' : 'bg-muted'} />
+              <Dot className={running ? 'animate-pulse bg-success' : runFailed(run) ? 'bg-danger' : 'bg-muted'} />
               <span className="text-ink-2">
-                {running ? t('Ativa') : run.exit_code ? t('Falhou (exit {code})', { code: run.exit_code }) : t('Concluída')}
+                {running ? t('Ativa') : runFailed(run) ? t('Falhou: {reason}', { reason: exitLabel(run) }) : t('Concluída')}
               </span>
               <div className="flex-1" />
               <button onClick={onLog} className="text-accent hover:underline">

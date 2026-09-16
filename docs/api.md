@@ -75,12 +75,15 @@ Retornado por `/api/projects` e afins (é o projeto persistido em `projects.json
     "session_id": null, "started_at": "...", "completed_at": null,
     "exit_code": null, "cost_usd": null, "duration_ms": null,
     "num_turns": null, "attempts": 1, "has_diff": false, "branch": "kanban/a472lb",
+    "exit_reason": null,
     "pr": { "url": "https://github.com/org/repo/pull/12", "number": 12, "state": "OPEN" }
   },
   "body": "## Descrição\n…",
   "filePath": "/abs/.claude/claude-kanban/tasks/doing/documentar-a-api--a472lb.md"
 }
 ```
+
+`run.exit_reason` diz por que o último run terminou (`null` = sucesso ou pedido humano): `timeout`, `killed` (cancelado pelo usuário), `max_turns`, `max_budget`, `execution_error`, `api_error` (erro no evento `result` do CLI, ex.: crédito insuficiente — a mensagem vai para o "## Log de erros"), `signal` (processo morto sem exit code), `verify_failed` ou `exit_code` (saída não-zero sem outra pista). Também vai como `exitReason` no evento `run.finished` das falhas genéricas. A UI mostra o motivo no card e no detalhe da task.
 
 `run.pr` é a pull request aberta pela sessão quando o projeto tem `git.autoPR` ligado: ao terminar um run com `exit_code: 0` e `autoPush`, o servidor pergunta ao `gh` (`gh pr view <branch> --json url,number,state`) qual é a PR da branch da task e grava `{ url, number, state }` no frontmatter. Sem `gh` instalado/autenticado, ou sem PR aberta, o campo fica `null` e a UI não mostra o botão "Ver PR".
 
