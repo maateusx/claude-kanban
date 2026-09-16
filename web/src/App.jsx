@@ -3026,8 +3026,11 @@ function QueueBar({ queue, tasks, projects, usage, onOpen, onKill, onReorder, on
     onReorder(ids)
   }
   return (
-    <footer className="flex items-center gap-2 overflow-x-auto border-t border-line px-4 py-2 text-meta">
+    // O botão de pausa fica fora do container com scroll: overflow-x-auto também
+    // recorta no eixo y e esconderia o popover que abre para cima.
+    <footer className="flex items-center gap-2 border-t border-line px-4 py-2 text-meta">
       <GlobalPauseButton queue={queue} usage={usage} onPause={onPause} onResume={onResume} />
+      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
       {(queue.actives || []).map(a => (
         <div key={a.taskId} className="flex shrink-0 items-center gap-2 rounded-[6px] bg-subtle px-3 py-1.5">
           <Dot className="animate-pulse bg-st-doing" />
@@ -3045,6 +3048,7 @@ function QueueBar({ queue, tasks, projects, usage, onOpen, onKill, onReorder, on
             className="px-0.5 text-muted hover:text-danger">✕</button>
         </div>
       ))}
+      </div>
     </footer>
   )
 }
