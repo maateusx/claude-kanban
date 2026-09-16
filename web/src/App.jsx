@@ -2805,6 +2805,7 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
   const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
   const [verifyCommand, setVerifyCommand] = useState(project.verifyCommand || '')
+  const [acceptanceCommand, setAcceptanceCommand] = useState(project.acceptanceCommand || '')
   const [goalBudget, setGoalBudget] = useState(project.goalBudgetUsd != null ? String(project.goalBudgetUsd) : '')
   const [webhookUrl, setWebhookUrl] = useState(project.webhookUrl || '')
   const whStatuses = project.webhookStatuses || []
@@ -2952,6 +2953,20 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
               className="w-full rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
             <span className="mt-1 block text-meta text-muted">
               {t('Rodado no worktree da task depois do run. Se falhar, a task volta para "A fazer" com a saída no log de erros em vez de ir para "Concluído". Vazio: sem verificação.')}
+            </span>
+          </span>
+        </label>
+
+        <label className="flex items-start gap-3">
+          <span className="mt-1">{t('Comando de aceite')}</span>
+          <span className="flex-1">
+            <input value={acceptanceCommand} onChange={e => setAcceptanceCommand(e.target.value)}
+              onBlur={() => onPatch({ acceptanceCommand })}
+              onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+              placeholder="npm run test:e2e"
+              className="w-full rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
+            <span className="mt-1 block text-meta text-muted">
+              {t('Testes de aceite do objetivo: rodados na integração de uma task desmembrada, que só conclui se passarem. A subtask de desenho pode registrar um comando próprio do objetivo. Vazio: só o do objetivo, se houver.')}
             </span>
           </span>
         </label>

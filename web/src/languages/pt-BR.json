@@ -518,5 +518,7 @@
   "Quando um objetivo desmembrado termina a integração, uma sessão somente leitura compara a spec e os critérios de aceite com o código; o que faltar vira task (tag lacuna) e o objetivo integra de novo. Para sem lacunas (tag spec-cumprida), no teto de rodadas ou no teto de custo — aí avisa por webhook (goal_needs_human).": "Quando um objetivo desmembrado termina a integração, uma sessão somente leitura compara a spec e os critérios de aceite com o código; o que faltar vira task (tag lacuna) e o objetivo integra de novo. Para sem lacunas (tag spec-cumprida), no teto de rodadas ou no teto de custo — aí avisa por webhook (goal_needs_human).",
   "no máximo": "no máximo",
   "Máximo de rodadas de lacunas": "Máximo de rodadas de lacunas",
-  "rodadas por objetivo": "rodadas por objetivo"
+  "rodadas por objetivo": "rodadas por objetivo",
+  "Comando de aceite": "Comando de aceite",
+  "Testes de aceite do objetivo: rodados na integração de uma task desmembrada, que só conclui se passarem. A subtask de desenho pode registrar um comando próprio do objetivo. Vazio: só o do objetivo, se houver.": "Testes de aceite do objetivo: rodados na integração de uma task desmembrada, que só conclui se passarem. A subtask de desenho pode registrar um comando próprio do objetivo. Vazio: só o do objetivo, se houver."
 }

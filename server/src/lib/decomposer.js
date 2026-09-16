@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { auxModel } from './models.js'
 import { needsDesign, SPEC_REL, DESIGN_TAG } from './spec.js'
+import { getSection } from './tasks.js'
 
 const TIMEOUT_MS = 5 * 60 * 1000
 const PRIORITIES = ['low', 'medium', 'high', 'urgent']
@@ -24,7 +25,17 @@ export function designSubtask(parent) {
     description: `Crie ou atualize ${SPEC_REL}/SPEC.md (resumo do sistema no topo; uma seção "## " por
 módulo com responsabilidades e contratos) para cobrir o objetivo "${parent.title}", e registre as
 decisões de arquitetura em ${SPEC_REL}/adr/NNNN-titulo.md (número seguinte ao maior existente).
-Não implemente código: as próximas subtasks seguem esta spec.`,
+
+Escreva também os testes de aceite (e2e/integração) para os critérios do objetivo, marcados
+como pendentes/skip — as próximas subtasks os fazem passar. Registre neste arquivo de task uma
+seção "## Comando de aceite" com o comando que roda esses testes, num bloco \`\`\`; o objetivo
+só conclui quando ele passar.
+
+Não implemente a funcionalidade: as próximas subtasks seguem esta spec.
+
+<objetivo>
+${(getSection(parent.body, 'Descrição') || parent.body || '').trim().slice(0, 4000)}
+</objetivo>`,
     priority: parent.priority || 'medium',
     tags: [DESIGN_TAG],
     decompose: false,

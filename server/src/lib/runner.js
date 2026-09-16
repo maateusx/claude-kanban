@@ -4,7 +4,7 @@ import path from 'node:path'
 import { loadState, saveState, diffFile, logFile, kanbanDir } from './paths.js'
 import { findTask, updateTask, appendToSection, listTasks, createTask, getSection, removeSection, replaceSection } from './tasks.js'
 import { decomposeTask, subtaskLevel, designSubtask, MAX_DECOMPOSE_LEVEL } from './decomposer.js'
-import { specBlock, needsDesign, SPEC_REL } from './spec.js'
+import { specBlock, needsDesign, SPEC_REL, DESIGN_TAG } from './spec.js'
 import {
   prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, taskBranch,
   mergeTaskBranch, withDetachedWorktree, diffStats, diffBase,
@@ -260,8 +260,44 @@ ${notes}
 
 const MAX_CHILD_RESULT = 1500
 
+// Critérios de aceite como teste: a subtask de desenho escreve os testes (em
+// skip) e registra o comando em "## Comando de aceite"; o servidor copia para o
+// `acceptance_command` do objetivo, que só conclui com ele passando.
+export const ACCEPTANCE_SECTION = 'Comando de aceite'
+// Task com tag bug: a sessão escreve antes um teste que reproduz e registra o
+// comando aqui; o servidor confere que ele falha na base e passa na branch.
+export const BUG_TAG = 'bug'
+export const REPRO_SECTION = 'Teste de reprodução'
+
+// Comando registrado numa seção: o primeiro bloco ``` ou o texto da seção.
+export function sectionCommand(body, name) {
+  const s = getSection(body, name)
+  const m = s.match(/```[^\n]*\n([\s\S]*?)```/)
+  return (m ? m[1] : s).trim().replace(/^`+|`+$/g, '').trim()
+}
+
+// Comando de aceite que vale para a task: o dela, ou o do projeto se ela é objetivo.
+export const acceptanceCommandOf = (project, task) =>
+  String(task?.acceptance_command || (isGoal(task) ? project?.acceptanceCommand : '') || '').trim()
+
+// Arquivos de teste de um diff — os que vão para a base na checagem do bug.
+// ponytail: heurística por caminho; lista explícita na seção se errar muito.
+const TEST_FILE_RE = /(^|\/)(tests?|__tests__|specs?|e2e)\/|[._-](test|spec)\.[^/]+$/
+export const testFiles = files => files.filter(f => !f.startsWith('.claude/') && TEST_FILE_RE.test(f))
+
+function bugBlock(task) {
+  if (!task.tags?.includes(BUG_TAG)) return ''
+  return `
+Esta task é um BUG. Antes de corrigir, escreva um teste automatizado que
+reproduz o problema (ele deve FALHAR sem a correção) e registre no arquivo da
+task uma seção "## ${REPRO_SECTION}" com o comando que roda só esse teste, num
+bloco \`\`\`. O servidor roda esse comando na base (com seus arquivos de teste
+copiados) e na sua branch: se ele não falhar na base, a task volta para você.
+`
+}
+
 // Contexto do run de integração de uma task desmembrada: o que cada filha fez.
-function integrationBlock(tasks, parentId) {
+function integrationBlock(tasks, parentId, acceptance = '') {
   const children = tasks.filter(t => parentIdOf(t) === parentId)
   if (!children.length) return ''
   const list = children.map(c => {
@@ -274,7 +310,9 @@ branch em que você está. Este é o run de INTEGRAÇÃO: confira se o conjunto
 entrega o que a descrição original pede — rode build e testes, corrija as
 costuras entre as partes e complete o que ficou faltando. Não refaça o que já
 está pronto. Confira também se o código segue a spec (${SPEC_REL}/) e atualize
-nela o que mudou durante a execução.
+nela o que mudou durante a execução.${acceptance ? `
+O objetivo só conclui se o comando de aceite passar: \`${acceptance}\`. Tire
+o skip/pendente dos testes de aceite que ainda estiverem marcados e faça-os passar.` : ''}
 
 <subtasks>
 ${list}
@@ -642,7 +680,8 @@ export class Runner {
       ? buildResumePrompt(taskRelPath, answer, workspace.branch, promptGit(project, task), !!project.autoDecide)
       : buildPrompt(taskRelPath, md, workspace.branch, promptGit(project, task), enrichMode, answer, !!project.autoDecide,
         notesBlock(project.path) + specBlock(workspace.cwd || project.path, task) + conflictBlock(task.run?.merge_from)
-        + (task.tags?.includes(DECOMPOSED_TAG) ? integrationBlock(listTasks(project.path), taskId) : ''))
+        + (task.tags?.includes(DECOMPOSED_TAG) ? integrationBlock(listTasks(project.path), taskId, acceptanceCommandOf(project, task)) : '')
+        + bugBlock(task))
 
     // O Claude Code não auto-aprova edits em .claude/ mesmo com acceptEdits.
     // Como as tasks vivem em .claude/claude-kanban/tasks/, liberamos Edit/Write
@@ -879,21 +918,82 @@ export class Runner {
     return events.slice(-MAX_LOG_EVENTS)
   }
 
-  // Gate de verificação: `exit 0` do claude não basta para virar done se o
-  // projeto define um comando (testes/lint). Roda no worktree da task, antes
-  // do cleanup, e o resultado vai para o log do run (visível no drawer).
+  // Gate de verificação: `exit 0` do claude não basta para virar done. Roda,
+  // no worktree da task e antes do cleanup, o verifyCommand do projeto, o
+  // comando de aceite (objetivo) e a checagem do teste de reprodução (bug);
+  // para no primeiro que reprova. Cada um vai para o log do run como `verify`.
   verifyGate(a, project, exitCode) {
-    const verifyCommand = String(project.verifyCommand || '').trim()
     a.verify = null
-    if (exitCode !== 0 || a.killed || a.timedOut || !verifyCommand) return null
-    let verify = runVerify(verifyCommand, a.workspace.cwd)
-    if (!verify.ok) verify = this.compareWithBaseline(project, a.workspace, verify)
-    a.verify = verify
-    this.logEvent(a, {
-      type: 'verify', command: verify.command, ok: verify.ok, exitCode: verify.exitCode,
-      text: verify.preexisting ? `[as falhas abaixo já existiam na base — não contam contra a task]\n\n${verify.output}` : verify.output,
-    })
-    return verify
+    a.evidence = []
+    if (exitCode !== 0 || a.killed || a.timedOut) return null
+    const task = findTask(project.path, a.taskId)
+    const checks = [
+      () => {
+        const cmd = String(project.verifyCommand || '').trim()
+        if (!cmd) return null
+        const v = runVerify(cmd, a.workspace.cwd)
+        return v.ok ? v : this.compareWithBaseline(project, a.workspace, v)
+      },
+      () => {
+        const cmd = acceptanceCommandOf(project, task)
+        if (!cmd) return null
+        const v = { ...runVerify(cmd, a.workspace.cwd), acceptance: true }
+        a.evidence.push(`Testes de aceite (\`${cmd}\`): ${v.ok ? 'passaram' : 'FALHARAM'}.\n${v.output.slice(-2000)}`)
+        return v
+      },
+      () => task?.tags?.includes(BUG_TAG) && !a.rawPhase ? this.reproCheck(a, project) : null,
+    ]
+    for (const check of checks) {
+      const v = check()
+      if (!v) continue
+      a.verify = v
+      this.logEvent(a, {
+        type: 'verify', command: v.command, ok: v.ok, exitCode: v.exitCode,
+        text: v.preexisting ? `[as falhas abaixo já existiam na base — não contam contra a task]\n\n${v.output}` : v.output,
+      })
+      if (!v.ok) break
+    }
+    return a.verify
+  }
+
+  // Bug: o teste registrado em "## Teste de reprodução" tem de passar na branch
+  // e falhar na base — rodado no worktree destacado do verify de referência,
+  // com os arquivos de teste da branch copiados (senão "arquivo não existe"
+  // contaria como reprodução).
+  reproCheck(a, project) {
+    const ws = a.workspace
+    let md = ''
+    try { md = fs.readFileSync(path.join(ws.cwd, a.taskRelPath), 'utf8') } catch {}
+    const command = sectionCommand(md || findTask(project.path, a.taskId)?.body, REPRO_SECTION)
+    const fail = (output, exitCode = 1) => ({ command: command || 'teste de reprodução', ok: false, exitCode, output })
+    if (!command) {
+      return fail(`Task com tag \`${BUG_TAG}\` sem teste que reproduz o bug. Escreva primeiro um teste que falha sem a ` +
+        `correção e registre o comando que o roda na seção "## ${REPRO_SECTION}" do arquivo da task.`)
+    }
+    const mine = runVerify(command, ws.cwd)
+    if (!mine.ok) return fail(`O teste de reprodução não passa na branch:\n\n${mine.output}`, mine.exitCode)
+    const sha = ws.baseSha
+    if (!sha || !isGitRepo(project.path)) return { ...mine, output: `(sem base git para conferir a reprodução)\n\n${mine.output}` }
+    let files = []
+    try { files = testFiles(diffStats(captureDiff(ws.cwd, diffBase(ws))).files) } catch {}
+    let base
+    try {
+      base = withDetachedWorktree(project.path, sha, dir => {
+        for (const f of files) {
+          const src = path.join(ws.cwd, f)
+          if (!fs.existsSync(src)) continue
+          fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true })
+          fs.copyFileSync(src, path.join(dir, f))
+        }
+        return runVerify(command, dir)
+      }, '_repro')
+    } catch (e) { return { ...mine, output: `(não consegui rodar na base: ${e.message})\n\n${mine.output}` } }
+    a.evidence.push(`Teste de reprodução (\`${command}\`): falha na base ${sha.slice(0, 8)}: ${!base.ok ? 'sim' : 'NÃO'}; passa na branch: sim.`)
+    if (base.ok) {
+      return fail(`O teste de reprodução \`${command}\` passa na base ${sha.slice(0, 8)} — ele não reproduz o bug. ` +
+        `Escreva um teste que falhe sem a correção.\n\n${base.output}`)
+    }
+    return { ...mine, output: `Falha na base ${sha.slice(0, 8)} e passa na branch.\n\n${mine.output}` }
   }
 
   // Verify de referência: a base (de onde a branch saiu) roda o mesmo comando
@@ -963,7 +1063,7 @@ export class Runner {
       this.logEvent(a, { type: 'raw', text: shot.path ? `[revisão] screenshot: ${shot.path}` : `[revisão] sem screenshot: ${shot.error}` })
     }
     try {
-      a.review = await reviewTask(project, { title, body: md }, diff, a.workspace.cwd, shot?.path)
+      a.review = await reviewTask(project, { title, body: md }, diff, a.workspace.cwd, shot?.path, a.evidence)
     } finally {
       if (shot?.path) fs.rmSync(shot.path, { force: true })
     }
@@ -1181,6 +1281,11 @@ export class Runner {
         ...(getSection(cur?.body, PR_FEEDBACK) ? { body: removeSection(cur.body, PR_FEEDBACK) } : {}),
       })
       try { harvestNotes(project.path, done) } catch {}
+      const acceptance = task.tags?.includes(DESIGN_TAG) && parentIdOf(task) && sectionCommand(done.body, ACCEPTANCE_SECTION)
+      if (acceptance) {
+        const goal = updateTask(project.path, parentIdOf(task), { acceptance_command: acceptance })
+        if (goal) this.emit('task.upserted', { projectId: a.projectId, task: goal })
+      }
       // Registra no ledger ANTES de qualquer coisa depender do status: mesmo que
       // o done/ se perca depois, o card não roda de novo.
       markSucceeded(a.taskId, { completedAt: runMeta.completed_at, sessionId: runMeta.session_id })

@@ -199,7 +199,7 @@ export function updateTask(projectPath, taskId, patch) {
   const { frontmatter: fm, body } = parseTaskFile(task.filePath)
 
   const newBody = patch.body !== undefined ? patch.body : body
-  for (const k of ['title', 'priority', 'tags', 'status', 'model', 'enrich', 'decompose', 'scheduled_at']) {
+  for (const k of ['title', 'priority', 'tags', 'status', 'model', 'enrich', 'decompose', 'scheduled_at', 'acceptance_command']) {
     if (patch[k] !== undefined) fm[k] = patch[k]
   }
   if (patch.depends_on !== undefined) fm.depends_on = normalizeDependsOn(patch.depends_on)
