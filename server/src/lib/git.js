@@ -455,13 +455,20 @@ export function capturePR(cwd, branch) {
 // A branch da task é preservada — os commits ficam acessíveis no repositório principal.
 export function cleanupWorkspace(project, workspace, taskRelPath) {
   if (!workspace?.worktreeDir) return
-  // Rede de segurança: se a sessão esqueceu de commitar, NÃO perde o trabalho.
-  // Commita o que sobrou na branch da task antes de remover o worktree (que é
-  // apagado com --force e levaria junto qualquer mudança não commitada). Os
-  // metadados do kanban ficam de fora via info/exclude, então `git add -A` só
-  // pega código real.
   try {
-    const dir = workspace.worktreeDir
+    const src = path.join(workspace.worktreeDir, taskRelPath)
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(project.path, taskRelPath))
+  } catch {}
+  removeWorktree(project.path, workspace.worktreeDir)
+}
+
+// Rede de segurança: se a sessão esqueceu de commitar, NÃO perde o trabalho.
+// Commita o que sobrou na branch da task antes de remover o worktree (que é
+// apagado com --force e levaria junto qualquer mudança não commitada). Os
+// metadados do kanban ficam de fora via info/exclude, então `git add -A` só
+// pega código real.
+function removeWorktree(root, dir) {
+  try {
     if (isDirty(dir)) {
       git(dir, 'add', '-A')
       git(dir, 'commit', '--no-verify', '-m',
@@ -469,13 +476,105 @@ export function cleanupWorkspace(project, workspace, taskRelPath) {
     }
   } catch { /* best-effort: se falhar, o try abaixo ainda tenta remover */ }
   try {
-    const src = path.join(workspace.worktreeDir, taskRelPath)
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(project.path, taskRelPath))
-  } catch {}
-  try {
-    git(project.path, 'worktree', 'remove', '--force', workspace.worktreeDir)
+    git(root, 'worktree', 'remove', '--force', dir)
   } catch {
-    fs.rmSync(workspace.worktreeDir, { recursive: true, force: true })
-    try { git(project.path, 'worktree', 'prune') } catch {}
+    fs.rmSync(dir, { recursive: true, force: true })
+    try { git(root, 'worktree', 'prune') } catch {}
   }
+}
+
+// ---- limpeza de branches kanban/* e worktrees órfãos ----
+// Ação do servidor (o guard proíbe a *sessão* de apagar branch). Conservadora:
+// só é candidata a branch cujo conteúdo já está salvo em outro lugar — contida na
+// base, ou de task com tag merged (squash no GitHub não deixa ancestral),
+// integrada (está na branch do pai) ou discarded (o humano descartou). Branch de
+// task em backlog/todo/doing, com PR aberta, checada num worktree vivo ou com
+// trabalho não mergeado de task sem essas tags nunca entra.
+const SAFE_TAGS = ['merged', 'integrada', 'discarded']
+const ACTIVE_STATUSES = ['backlog', 'todo', 'doing']
+
+function worktreeList(root) {
+  let out = ''
+  try { out = git(root, 'worktree', 'list', '--porcelain') } catch { return [] }
+  const list = []
+  for (const line of out.split('\n')) {
+    if (line.startsWith('worktree ')) list.push({ dir: line.slice('worktree '.length), branch: null })
+    else if (line.startsWith('branch refs/heads/') && list.length) list.at(-1).branch = line.slice('branch refs/heads/'.length)
+  }
+  return list
+}
+
+// tasks: listTasks do projeto. busy(taskId): o runner está com a task (ativa ou na fila).
+// Worktree de task é criado e removido pelo runner no mesmo run, então qualquer
+// um em worktrees/<projeto>/ sem sessão viva sobrou de um crash.
+// Devolve { branches: [{ name, taskId, reason }], worktrees: [{ dir, taskId, reason }] }.
+export function cleanupCandidates(project, tasks, busy = () => false) {
+  const root = project.path
+  if (!isGitRepo(root)) return { branches: [], worktrees: [] }
+  const byId = new Map(tasks.map(t => [t.id, t]))
+  const wts = worktreeList(root)
+  // realpath: no macOS o git devolve /private/var/... para um HOME em /var/...
+  const real = p => { try { return fs.realpathSync(p) } catch { return path.resolve(p) } }
+  const wtRoot = real(path.join(HOME_DIR, 'worktrees', project.id))
+
+  const worktrees = []
+  for (const w of wts) {
+    if (real(path.dirname(w.dir)) !== wtRoot) continue // checkout principal, _baseline, outros projetos
+    const taskId = path.basename(w.dir)
+    if (busy(taskId)) continue
+    const reason = !fs.existsSync(w.dir) ? 'missing' : byId.has(taskId) ? 'idle' : 'task-gone'
+    worktrees.push({ dir: w.dir, taskId, reason })
+  }
+
+  const base = gitSettings(project).baseBranch
+  const baseRef = branchExists(root, base) ? base : remoteBranchRef(root, base)
+  const merged = new Set()
+  if (baseRef) {
+    try {
+      git(root, 'branch', '--format=%(refname:short)', '--merged', baseRef, '--list', 'kanban/*')
+        .split('\n').filter(Boolean).forEach(b => merged.add(b))
+    } catch {}
+  }
+  // Branch checada num worktree que vai continuar existindo (checkout principal ou sessão viva) fica.
+  const orphan = new Set(worktrees.map(w => w.dir))
+  const checkedOut = new Set(wts.filter(w => !orphan.has(w.dir)).map(w => w.branch))
+
+  const branches = []
+  let names = []
+  try { names = git(root, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/kanban/').split('\n').filter(Boolean) } catch {}
+  for (const name of names) {
+    const taskId = name.slice('kanban/'.length)
+    const t = byId.get(taskId)
+    if (name === base || checkedOut.has(name) || busy(taskId)) continue
+    if (t && ACTIVE_STATUSES.includes(t.status)) continue
+    if (t?.run?.pr?.number && (t.run.pr.state ?? 'OPEN') === 'OPEN') continue
+    const reason = merged.has(name) ? 'merged' : SAFE_TAGS.find(x => (t?.tags || []).includes(x))
+    if (reason) branches.push({ name, taskId, reason })
+  }
+  return { branches, worktrees }
+}
+
+// Remove os candidatos — todos, ou só os de `only` ({ branches: [nomes],
+// worktrees: [dirs] }, o lote que o humano aprovou). Recalcula na hora: o que
+// deixou de ser candidato entre a listagem e a aprovação é ignorado. Worktrees
+// primeiro, para liberar as branches presas neles. remote: apaga também
+// origin/<branch>, se existir.
+export function applyCleanup(project, tasks, { busy, only, remote = false } = {}) {
+  const root = project.path
+  const res = { branches: [], worktrees: [], errors: [] }
+  const pick = (list, key, allowed) => (allowed ? list.filter(x => allowed.includes(x[key])) : list)
+  for (const w of pick(cleanupCandidates(project, tasks, busy).worktrees, 'dir', only?.worktrees)) {
+    if (w.reason !== 'missing') removeWorktree(root, w.dir)
+    res.worktrees.push(w.dir)
+  }
+  try { git(root, 'worktree', 'prune') } catch {}
+  const withRemote = remote && hasRemote(root)
+  for (const b of pick(cleanupCandidates(project, tasks, busy).branches, 'name', only?.branches)) {
+    try { git(root, 'branch', '-D', b.name) } catch (e) { res.errors.push(e.message); continue }
+    res.branches.push(b.name)
+    if (withRemote && remoteBranchRef(root, b.name)) {
+      try { git(root, 'push', 'origin', '--delete', b.name) } catch (e) { res.errors.push(e.message) }
+    }
+  }
+  return res
 }

@@ -58,6 +58,16 @@ export function applyAutopilot(p, input) {
     }
     next.autoMerge = am
   }
+  if (input.cleanup !== undefined) {
+    const c = input.cleanup || {}
+    const cl = { ...(next.cleanup || {}) }
+    for (const k of ['enabled', 'remote']) if (c[k] !== undefined) cl[k] = !!c[k]
+    if (c.mode !== undefined) {
+      if (!['confirm', 'auto'].includes(c.mode)) return 'autopilot.cleanup.mode deve ser confirm ou auto'
+      cl.mode = c.mode
+    }
+    next.cleanup = cl
+  }
   p.autopilot = next
   return null
 }

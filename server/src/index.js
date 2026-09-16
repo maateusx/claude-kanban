@@ -114,7 +114,7 @@ autopilot.start()
 
 // ---- app ----
 const app = await buildApp({
-  db, runner, devServers, emit, sockets, bootstrapErrors,
+  db, runner, devServers, emit, sockets, bootstrapErrors, autopilot,
   claudeAvailable: () => claudeAvailable,
   startWatcher, stopWatcher, autoEnqueue,
 })

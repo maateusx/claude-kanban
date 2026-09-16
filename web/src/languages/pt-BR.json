@@ -502,5 +502,14 @@
   "O autopilot busca sozinho a cada N minutos e importa o que for novo. 0 = só busca manual.": "O autopilot busca sozinho a cada N minutos e importa o que for novo. 0 = só busca manual.",
   "Buscar sozinho a cada": "Buscar sozinho a cada",
   "Intervalo de busca automática (min)": "Intervalo de busca automática (min)",
-  "Sessão travada": "Sessão travada"
+  "Sessão travada": "Sessão travada",
+  "Limpar branches kanban/* e worktrees órfãos": "Limpar branches kanban/* e worktrees órfãos",
+  "Só entram branches já contidas na branch principal ou de tasks mergeadas, integradas ou descartadas — nunca de task em backlog/a fazer/em andamento ou com PR aberta. Worktree sem sessão viva recebe um commit de segurança antes de sair.": "Só entram branches já contidas na branch principal ou de tasks mergeadas, integradas ou descartadas — nunca de task em backlog/a fazer/em andamento ou com PR aberta. Worktree sem sessão viva recebe um commit de segurança antes de sair.",
+  "Confirmar na UI": "Confirmar na UI",
+  "Automático (1x por hora, vai no resumo diário)": "Automático (1x por hora, vai no resumo diário)",
+  "Apagar também no remoto (origin)": "Apagar também no remoto (origin)",
+  "Ver candidatos": "Ver candidatos",
+  "Nada para limpar.": "Nada para limpar.",
+  "Remover selecionados": "Remover selecionados",
+  "Removidos": "Removidos"
 }

@@ -9,7 +9,7 @@ import { fetchSource, itemDescription } from './searchFetch.js'
 import { listSearchSources } from './searchSources.js'
 import { analyzeProject } from './analyzer.js'
 import { autoMergeBlocker, autoMergeSettings, notesFile, PR_FEEDBACK } from './runner.js'
-import { gitSettings } from './git.js'
+import { gitSettings, applyCleanup } from './git.js'
 import { diffFile } from './paths.js'
 import { auxModel } from './models.js'
 import { postWebhook, webhookUrl } from './webhook.js'
@@ -22,6 +22,7 @@ export const TICK_MS = 60_000
 const PR_EVERY_MS = 3 * 60_000
 const CI_EVERY_MS = 5 * 60_000
 const NOTES_EVERY_MS = 60 * 60_000
+const CLEANUP_EVERY_MS = 60 * 60_000
 export const MAX_PR_ROUNDS = 3
 export const NOTES_COMPACT_AT = 9000
 export const SUGGESTED_TAG = 'auto-sugestao'
@@ -36,10 +37,13 @@ export const DEFAULT_AUTOPILOT = {
   suggestMax: 5,           // teto de sugestões abertas ao mesmo tempo
   importStatus: 'backlog', // onde entra o que chega sozinho
   digestHour: null,        // hora local do resumo diário por webhook
+  // limpeza de branches kanban/* e worktrees órfãos; confirm = humano aprova na UI
+  cleanup: { enabled: false, mode: 'confirm', remote: false },
 }
 
 export const autopilotSettings = p => ({
   ...DEFAULT_AUTOPILOT, ...(p?.autopilot || {}), autoMerge: autoMergeSettings(p),
+  cleanup: { ...DEFAULT_AUTOPILOT.cleanup, ...(p?.autopilot?.cleanup || {}) },
 })
 
 const due = (at, everyMs, now) => !at || now - Date.parse(at) >= everyMs
@@ -87,6 +91,8 @@ export class Autopilot {
       run('suggest', s.suggestHours > 0 && this.claudeAvailable() && due(st.suggest, s.suggestHours * 3600_000, now),
         () => this.suggest(p, s))
       run('notes', this.claudeAvailable() && due(st.notes, NOTES_EVERY_MS, now), () => compactNotes(p))
+      run('cleanup', s.cleanup.enabled && s.cleanup.mode === 'auto' && due(st.cleanup, CLEANUP_EVERY_MS, now),
+        () => this.cleanup(p, s.cleanup))
       run('digest', digestDue(s, st, now) && webhookUrl(p), () => this.digest(p, now))
       for (const src of listSearchSources(p)) {
         const min = Number(src.pollMinutes) || 0
@@ -107,14 +113,31 @@ export class Autopilot {
     return task
   }
 
+  busy(id) {
+    return this.runner.actives.has(id) || this.runner.queue.some(q => q.taskId === id)
+  }
+
+  // Limpeza de branches/worktrees. only: lote aprovado pelo humano (modo confirm).
+  // O resultado fica em autopilotState.cleanupLast (entra no resumo diário).
+  cleanup(p, { remote }, only) {
+    const res = applyCleanup(p, listTasks(p.path), { busy: id => this.busy(id), only, remote })
+    if (res.branches.length || res.worktrees.length || res.errors.length) {
+      console.log(`autopilot cleanup (${p.name}): ${res.branches.length} branch(es), ${res.worktrees.length} worktree(s)` +
+        (res.errors.length ? ` — erros: ${res.errors.join('; ')}` : ''))
+      p.autopilotState = { ...(p.autopilotState || {}), cleanupLast: { at: new Date().toISOString(), ...res } }
+      this.saveProjects(this.db)
+      this.emit('project.updated', { projectId: p.id })
+    }
+    return res
+  }
+
   // ---- PR: CI, comentários, conflito e merge ----
 
   // ponytail: gh síncrono (execFileSync), uma PR por vez — trava o event loop
   // alguns segundos a cada 3 min com muitas PRs abertas; vira execFile se pesar.
   followPRs(p, s) {
-    const busy = id => this.runner.actives.has(id) || this.runner.queue.some(q => q.taskId === id)
     const tasks = listTasks(p.path).filter(t =>
-      t.status === 'done' && t.run?.pr?.number && (t.run.pr.state ?? 'OPEN') === 'OPEN' && !busy(t.id))
+      t.status === 'done' && t.run?.pr?.number && (t.run.pr.state ?? 'OPEN') === 'OPEN' && !this.busy(t.id))
     for (const t of tasks) {
       const n = t.run.pr.number
       let sum
@@ -254,7 +277,7 @@ export class Autopilot {
     if (!url) return
     postWebhook(url, {
       event: 'daily_digest', projectId: p.id, project: p.name, at: new Date(now).toISOString(),
-      ...buildDigest(listTasks(p.path), now),
+      ...buildDigest(listTasks(p.path), now, p.autopilotState?.cleanupLast),
     })
   }
 }
@@ -271,7 +294,7 @@ export function digestDue(s, st, now) {
 }
 
 // Resumo das últimas 24h: o que concluiu, o que travou, o que espera gente e o gasto.
-export function buildDigest(tasks, now = Date.now()) {
+export function buildDigest(tasks, now = Date.now(), cleanupLast = null) {
   const since = now - 86400_000
   const recent = tasks.filter(t => (Date.parse(t.run?.completed_at || '') || 0) >= since)
   const titles = list => list.map(t => ({ id: t.id, title: t.title }))
@@ -280,11 +303,13 @@ export function buildDigest(tasks, now = Date.now()) {
   const waiting = tasks.filter(t => (t.tags || []).includes('human-request'))
   const costUsd = recent.reduce((sum, t) => sum + (t.run?.cost_usd || 0), 0)
   const line = (label, list) => list.length ? `${label}: ${list.map(t => t.title).join('; ')}` : null
+  const cleaned = (Date.parse(cleanupLast?.at || '') || 0) >= since ? cleanupLast.branches : []
   const text = [
     `${done.length} concluída(s), ${blocked.length} travada(s), ${waiting.length} esperando decisão — US$ ${costUsd.toFixed(2)} nas últimas 24h.`,
     line('Concluídas', done), line('Travadas', blocked), line('Esperando decisão', waiting),
+    cleaned.length ? `Branches removidas: ${cleaned.join(', ')}` : null,
   ].filter(Boolean).join('\n')
-  return { done: titles(done), blocked: titles(blocked), waiting: titles(waiting), costUsd, text }
+  return { done: titles(done), blocked: titles(blocked), waiting: titles(waiting), costUsd, text, cleanedBranches: cleaned }
 }
 
 // Texto da seção "## Feedback da PR" que o run seguinte lê.

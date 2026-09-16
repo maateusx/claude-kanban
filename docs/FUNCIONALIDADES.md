@@ -104,6 +104,9 @@ O autopilot também puxa trabalho: issues com uma label (`issuesLabel` a cada `i
 ### 17l. Resumo diário
 Com `autopilot.digestHour` e `webhookUrl`, uma vez por dia sai o webhook `daily_digest`: o que concluiu, o que travou, o que espera decisão e o gasto das últimas 24h.
 
+### 17m. Limpeza de branches e worktrees
+`autopilot.cleanup` (`enabled`, `mode: confirm | auto`, `remote`) remove as branches `kanban/<id>` que já não guardam nada único — contidas na branch principal, ou de tasks com tag `merged` (squash no GitHub), `integrada` (estão na branch do pai) ou `discarded` — e os worktrees que sobraram de sessões mortas (com commit de segurança antes). Nunca toca task em backlog/a fazer/em andamento, na fila, com PR aberta, nem trabalho não mergeado de task sem essas tags. Em `confirm`, as Configurações do projeto listam os candidatos e o humano remove o lote marcado; em `auto`, o autopilot limpa 1x por hora e o resumo diário lista as branches. `remote: true` apaga também no `origin`. É o servidor quem apaga — a sessão continua proibida pelo guard. (`server/src/lib/git.js`, `server/src/lib/autopilot.js`)
+
 ### 18. Ledger de idempotência
 Só sucessos entram no `ledger.json`; caminhos automáticos nunca re-executam uma task já registrada (evita loops quando o status na pasta se perde). Um run pedido explicitamente por humano limpa o registro. (`server/src/lib/ledger.js`)
 
