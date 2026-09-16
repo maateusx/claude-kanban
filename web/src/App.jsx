@@ -2626,7 +2626,31 @@ function AutonomySettings({ project, onPatch }) {
             <option value="todo">{t('A fazer (roda com o auto-pilot)')}</option>
           </select>
         </label>
-        <Hint>{t('Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas e lacunas da spec.')}</Hint>
+        <Hint>{t('Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas, manutenção e lacunas da spec.')}</Hint>
+      </div>
+
+      <div className="space-y-2 border-t border-line pt-3">
+        <div className="text-ink">{t('Manutenção agendada')}</div>
+        <Hint>{t('Uma sessão somente leitura procura dívida técnica do tipo e abre tasks com a tag manutencao:<tipo>, sem repetir título.')}</Hint>
+        {[
+          ['cobertura', t('Cobertura de testes')], ['lint', t('Lint e código morto')],
+          ['dependencias', t('Dependências')], ['docs', t('README por módulo')],
+        ].map(([kind, label]) => {
+          const m = ap.maintenance?.[kind] || {}
+          const patchM = v => patchAp({ maintenance: { [kind]: v } })
+          return (
+            <div key={kind} className={row}>
+              <span className="w-40 text-ink">{label}</span>
+              <span className="text-meta text-muted">{t('a cada')}</span>
+              <CommitField value={m.hours || 0} parse={intIn(0, 720)} aria-label={`${label}: ${t('intervalo (h)')}`}
+                onCommit={hours => patchM({ hours })} />
+              <span className="text-meta text-muted">{t('h, com no máximo')}</span>
+              <CommitField value={m.max ?? 2} parse={intIn(1, 50, undefined)} aria-label={`${label}: ${t('máximo de tasks abertas')}`}
+                onCommit={max => patchM({ max })} />
+              <span className="text-meta text-muted">{t('abertas (0 h = desligado)')}</span>
+            </div>
+          )
+        })}
       </div>
 
       <div className="border-t border-line pt-3">

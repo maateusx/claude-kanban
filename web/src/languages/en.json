@@ -495,7 +495,7 @@
   "abertas ao mesmo tempo (0 h = desligado)": "open at a time (0 h = off)",
   "O que chega sozinho entra em": "Incoming work goes to",
   "A fazer (roda com o auto-pilot)": "To do (runs with auto-pilot)",
-  "Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas e lacunas da spec.": "Applies to issues, search sources with an interval, broken CI, scheduled suggestions and spec gaps.",
+  "Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas, manutenção e lacunas da spec.": "Applies to issues, search sources with an interval, broken CI, scheduled suggestions, maintenance and spec gaps.",
   "Resumo diário por webhook às": "Daily webhook digest at",
   "Hora do resumo diário": "Daily digest hour",
   "h (vazio = desligado) — evento daily_digest": "h (empty = off) — daily_digest event",
@@ -535,5 +535,13 @@
   "fila de merge": "merge queue",
   "Ações que o servidor executa sozinho": "Actions the server runs on its own",
   "Um padrão por linha (* = qualquer trecho). Comando bloqueado pelos guardrails que casar inteiro é executado pelo servidor e resolvido na hora, com a saída no item. Nunca casa: ; && | $() aspas, leitura de .env ou push na branch principal. Vazio: tudo vai para o humano.": "One pattern per line (* = any text). A command blocked by the guardrails that matches in full is run by the server and resolved right away, with the output in the item. Never matches: ; && | $() quotes, reading .env or pushing to the main branch. Empty: everything goes to a human.",
-  "pela política {p}": "by policy {p}"
+  "pela política {p}": "by policy {p}",
+  "Manutenção agendada": "Scheduled maintenance",
+  "Uma sessão somente leitura procura dívida técnica do tipo e abre tasks com a tag manutencao:<tipo>, sem repetir título.": "A read-only session looks for technical debt of that kind and opens tasks tagged manutencao:<type>, without repeating titles.",
+  "Cobertura de testes": "Test coverage",
+  "Lint e código morto": "Lint and dead code",
+  "README por módulo": "README per module",
+  "intervalo (h)": "interval (h)",
+  "máximo de tasks abertas": "max open tasks",
+  "abertas (0 h = desligado)": "open (0 h = off)"
 }

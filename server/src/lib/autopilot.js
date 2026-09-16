@@ -37,6 +37,34 @@ export const SPEC_DONE_TAG = 'spec-cumprida'
 // Merge do autopilot que quebrou o CI da base e foi revertido — só uma vez por task.
 export const REVERTED_TAG = 'revertido'
 const IMPORT_STATUSES = ['backlog', 'todo']
+const OPEN_STATUSES = ['backlog', 'todo', 'doing']
+export const MAINTENANCE_TAG = 'manutencao'
+// Manutenção agendada: cada tipo vira um pedido ao analyzer (somente leitura),
+// restrito a um tipo de sugestão. As tasks saem com `manutencao:<tipo>`.
+export const MAINTENANCE_TYPES = {
+  cobertura: {
+    type: 'teste',
+    question: 'Aponte áreas do código sem teste (módulos, funções ou fluxos que nenhum teste exercita), comparando o ' +
+      'código com os testes existentes. Uma task por área, listando os casos a testar.',
+  },
+  lint: {
+    type: 'refatoracao',
+    question: 'Aponte código morto (exports, funções, arquivos e dependências sem uso), duplicação e problemas que um ' +
+      'linter pegaria. Uma task por limpeza coesa, sem mudar comportamento.',
+  },
+  dependencias: {
+    type: 'melhoria',
+    question: 'Confira as dependências declaradas (package.json, lockfiles, requirements, go.mod etc.) e aponte as que ' +
+      'valem atualizar: muito desatualizadas, deprecadas ou com vulnerabilidade conhecida. Uma task por dependência ou ' +
+      'grupo coeso, dizendo o que conferir depois da atualização.',
+  },
+  docs: {
+    type: 'documentacao',
+    question: 'Cada módulo (pasta principal de código) deve ter um README.md atualizado com propósito, arquivos ' +
+      'principais, contratos e armadilhas — ele é o contexto que as próximas tasks leem. Aponte os READMEs que faltam ' +
+      'e os que divergem do código. Uma task por módulo.',
+  },
+}
 
 export const DEFAULT_AUTOPILOT = {
   prFollowUp: false,       // CI/comentários da PR reabrem a task
@@ -53,6 +81,8 @@ export const DEFAULT_AUTOPILOT = {
   gapLoop: { enabled: false, maxRounds: 3 },
   // esgotou as tentativas → diagnóstico no auxModel em vez de blocked (runner.diagnose)
   diagnose: { enabled: false },
+  // manutenção agendada: por tipo, intervalo em horas (0 = desligado) e teto de tasks abertas
+  maintenance: Object.fromEntries(Object.keys(MAINTENANCE_TYPES).map(k => [k, { hours: 0, max: 2 }])),
 }
 
 export const autopilotSettings = p => ({
@@ -60,6 +90,8 @@ export const autopilotSettings = p => ({
   cleanup: { ...DEFAULT_AUTOPILOT.cleanup, ...(p?.autopilot?.cleanup || {}) },
   gapLoop: { ...DEFAULT_AUTOPILOT.gapLoop, ...(p?.autopilot?.gapLoop || {}) },
   diagnose: { ...DEFAULT_AUTOPILOT.diagnose, ...(p?.autopilot?.diagnose || {}) },
+  maintenance: Object.fromEntries(Object.entries(DEFAULT_AUTOPILOT.maintenance)
+    .map(([k, v]) => [k, { ...v, ...(p?.autopilot?.maintenance?.[k] || {}) }])),
 })
 
 const due = (at, everyMs, now) => !at || now - Date.parse(at) >= everyMs
@@ -106,6 +138,11 @@ export class Autopilot {
       run('ci', s.watchMainCI && due(st.ci, CI_EVERY_MS, now), () => this.watchCI(p, s))
       run('suggest', s.suggestHours > 0 && this.claudeAvailable() && due(st.suggest, s.suggestHours * 3600_000, now),
         () => this.suggest(p, s))
+      for (const [kind, m] of Object.entries(s.maintenance)) {
+        const key = `maintenance:${kind}`
+        run(key, m.hours > 0 && this.claudeAvailable() && due(st[key], m.hours * 3600_000, now),
+          () => this.maintain(p, s, kind))
+      }
       run('notes', this.claudeAvailable() && due(st.notes, NOTES_EVERY_MS, now), () => compactNotes(p))
       run('cleanup', s.cleanup.enabled && s.cleanup.mode === 'auto' && due(st.cleanup, CLEANUP_EVERY_MS, now),
         () => this.cleanup(p, s.cleanup))
@@ -334,17 +371,31 @@ export class Autopilot {
     return true
   }
 
-  async suggest(p, s) {
-    const tasks = listTasks(p.path)
-    const open = tasks.filter(t => (t.tags || []).includes(SUGGESTED_TAG) && ['backlog', 'todo', 'doing'].includes(t.status))
-    const room = s.suggestMax - open.length
+  suggest(p, s) {
+    return this.fromAnalysis(p, s, { tag: SUGGESTED_TAG, max: s.suggestMax, tags: sug => [sug.type, SUGGESTED_TAG] })
+  }
+
+  maintain(p, s, kind) {
+    const { type, question } = MAINTENANCE_TYPES[kind]
+    const tag = `${MAINTENANCE_TAG}:${kind}`
+    return this.fromAnalysis(p, s, {
+      tag, max: s.maintenance[kind].max, types: [type], question, tags: () => [type, MAINTENANCE_TAG, tag],
+    })
+  }
+
+  // Abre sugestões do analyzer até `max` tasks abertas com `tag`; dedupe por título.
+  async fromAnalysis(p, s, { tag, max, types = [], question = '', tags }) {
+    const open = listTasks(p.path).filter(t => (t.tags || []).includes(tag) && OPEN_STATUSES.includes(t.status))
+    const room = max - open.length
     if (room <= 0) return
-    const { suggestions } = await analyzeProject(p, [], '', false)
-    const titles = new Set(tasks.map(t => t.title.toLowerCase()))
-    for (const sug of suggestions.filter(x => !titles.has(x.title.toLowerCase())).slice(0, room)) {
+    const { suggestions } = await analyzeProject(p, types, question, false)
+    // Relê depois da análise: outro job pode ter criado tasks no meio.
+    const titles = new Set(listTasks(p.path).map(t => t.title.toLowerCase()))
+    const fresh = suggestions.filter(x => !titles.has(x.title.toLowerCase()) && titles.add(x.title.toLowerCase()))
+    for (const sug of fresh.slice(0, room)) {
       this.created(p, createTask(p.path, {
         title: sug.title, description: sug.description, priority: sug.priority,
-        tags: [sug.type, SUGGESTED_TAG], status: importStatus(s),
+        tags: tags(sug), status: importStatus(s),
       }))
     }
   }

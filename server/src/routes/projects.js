@@ -4,6 +4,7 @@ import { saveProjects, STATUSES } from '../lib/paths.js'
 import { bootstrapProject, uninstallGuardrails } from '../lib/bootstrap.js'
 import { DEFAULT_GIT, gitSettings } from '../lib/git.js'
 import { normalizeModel } from '../lib/models.js'
+import { MAINTENANCE_TYPES } from '../lib/autopilot.js'
 import { retrySettings, MAX_MAX_TURNS, RAW_MODES } from '../lib/runner.js'
 import { pluginsView, syncProjectPlugins, normalizeKeys, PLUGIN_KEYS } from '../lib/plugins.js'
 import { invalidModelMsg, withProject, withProjectRecord, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS } from './helpers.js'
@@ -81,6 +82,23 @@ export function applyAutopilot(p, input) {
   }
   if (input.diagnose !== undefined) {
     next.diagnose = { ...(next.diagnose || {}), enabled: !!input.diagnose?.enabled }
+  }
+  if (input.maintenance !== undefined) {
+    const m = input.maintenance || {}
+    if (typeof m !== 'object' || Array.isArray(m)) return 'autopilot.maintenance deve ser um objeto por tipo'
+    const mt = { ...(next.maintenance || {}) }
+    for (const [kind, v] of Object.entries(m)) {
+      if (!MAINTENANCE_TYPES[kind]) return `autopilot.maintenance: tipo desconhecido "${kind}" (${Object.keys(MAINTENANCE_TYPES).join(', ')})`
+      const cur = { ...(mt[kind] || {}) }
+      for (const [k, [min, max]] of Object.entries({ hours: [0, 720], max: [1, 50] })) {
+        if (v?.[k] === undefined) continue
+        const n = Number(v[k])
+        if (!intIn(n, min, max)) return `autopilot.maintenance.${kind}.${k} deve ser um inteiro entre ${min} e ${max}`
+        cur[k] = n
+      }
+      mt[kind] = cur
+    }
+    next.maintenance = mt
   }
   p.autopilot = next
   return null

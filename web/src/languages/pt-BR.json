@@ -495,7 +495,7 @@
   "abertas ao mesmo tempo (0 h = desligado)": "abertas ao mesmo tempo (0 h = desligado)",
   "O que chega sozinho entra em": "O que chega sozinho entra em",
   "A fazer (roda com o auto-pilot)": "A fazer (roda com o auto-pilot)",
-  "Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas e lacunas da spec.": "Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas e lacunas da spec.",
+  "Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas, manutenção e lacunas da spec.": "Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas, manutenção e lacunas da spec.",
   "Resumo diário por webhook às": "Resumo diário por webhook às",
   "Hora do resumo diário": "Hora do resumo diário",
   "h (vazio = desligado) — evento daily_digest": "h (vazio = desligado) — evento daily_digest",
@@ -535,5 +535,13 @@
   "fila de merge": "fila de merge",
   "Ações que o servidor executa sozinho": "Ações que o servidor executa sozinho",
   "Um padrão por linha (* = qualquer trecho). Comando bloqueado pelos guardrails que casar inteiro é executado pelo servidor e resolvido na hora, com a saída no item. Nunca casa: ; && | $() aspas, leitura de .env ou push na branch principal. Vazio: tudo vai para o humano.": "Um padrão por linha (* = qualquer trecho). Comando bloqueado pelos guardrails que casar inteiro é executado pelo servidor e resolvido na hora, com a saída no item. Nunca casa: ; && | $() aspas, leitura de .env ou push na branch principal. Vazio: tudo vai para o humano.",
-  "pela política {p}": "pela política {p}"
+  "pela política {p}": "pela política {p}",
+  "Manutenção agendada": "Manutenção agendada",
+  "Uma sessão somente leitura procura dívida técnica do tipo e abre tasks com a tag manutencao:<tipo>, sem repetir título.": "Uma sessão somente leitura procura dívida técnica do tipo e abre tasks com a tag manutencao:<tipo>, sem repetir título.",
+  "Cobertura de testes": "Cobertura de testes",
+  "Lint e código morto": "Lint e código morto",
+  "README por módulo": "README por módulo",
+  "intervalo (h)": "intervalo (h)",
+  "máximo de tasks abertas": "máximo de tasks abertas",
+  "abertas (0 h = desligado)": "abertas (0 h = desligado)"
 }
