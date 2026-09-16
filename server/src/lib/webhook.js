@@ -20,7 +20,9 @@ export function webhookUrl(project) {
 export function webhookEventsFor(evt, seen = new Set(), statuses = null) {
   switch (evt.type) {
     case 'run.finished':
-      if (evt.humanRequest) return [{ event: 'human_request', taskId: evt.taskId }]
+      // autoDecided: o próprio Claude respondeu e a task voltou para a fila —
+      // não há decisão pendente para avisar ninguém.
+      if (evt.humanRequest) return evt.autoDecided ? [] : [{ event: 'human_request', taskId: evt.taskId }]
       // verifyFailed vem com exitCode 0 (o run passou, a verificação é que não).
       if (evt.exitCode !== 0 || evt.verifyFailed) {
         return [{ event: 'run_failed', taskId: evt.taskId, exitCode: evt.exitCode, verifyFailed: !!evt.verifyFailed }]

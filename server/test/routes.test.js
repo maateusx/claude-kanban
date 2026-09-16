@@ -151,3 +151,17 @@ test('PATCH webhookStatuses: só status válidos, vazio volta a notificar tudo',
   assert.equal((await patch('done')).statusCode, 400)
   assert.deepEqual(json(await patch([])).project.webhookStatuses, [])
 })
+
+test('create: true cria a pasta do projeto novo; sem a flag, path inexistente é erro', async () => {
+  const root = path.join(mkdtempSync(path.join(tmpdir(), 'ck-new-')), 'projeto-novo')
+
+  const semFlag = await app.inject({ method: 'POST', url: '/api/projects', payload: { name: 'novo', path: root } })
+  assert.equal(semFlag.statusCode, 400)
+  assert.match(json(semFlag).error, /não existe/)
+
+  const comFlag = await app.inject({
+    method: 'POST', url: '/api/projects', payload: { name: 'novo', path: root, create: true },
+  })
+  assert.equal(comFlag.statusCode, 200)
+  assert.equal(json(comFlag).project.bootstrap, 'ok', 'pasta criada já sai com o board bootstrapado')
+})

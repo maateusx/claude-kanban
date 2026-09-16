@@ -44,6 +44,8 @@ Quebra uma task grande em 2–8 subtasks encadeadas por `depends_on` (tags `subt
 ### 10. Fila global e runner
 Fila FIFO persistida (sobrevive a restart), com inserção por prioridade, reorder manual e kill. Cada task roda em sessão `claude -p` isolada com `--output-format stream-json`, modelo escolhido por task > projeto > default, timeout configurável (default 30 min), teto de turnos configurável (`--max-turns`, default 40, 0 desliga) e concorrência configurável (default 1, teto 8 — concorrência real exige worktree). (`server/src/lib/runner.js`)
 
+Modo cru (`rawMode` no projeto): em vez do prompt do kanban, a sessão recebe só título + descrição, como se alguém colasse a task no Claude Code do terminal. Três variantes: só executar, só planejar (plan mode; o plano vai para `## Plano`) e planejar + executar (retoma a sessão do plano para executá-lo). A resposta final vira o `## Resultado`.
+
 ### 11. Log de execução ao vivo
 Eventos da sessão são gravados em `.claude/claude-kanban/logs/<id>.jsonl` e transmitidos por WebSocket para o drawer da UI, com replay da última execução. (`runner.js`)
 
@@ -82,6 +84,8 @@ Ações bloqueadas pelos guardrails viram itens em `pending-actions.md` para um 
 ### 22. Human Request / Human Response
 O agente pode pausar por decisão humana escrevendo `## Human Request`; o card volta para `todo` com a tag `human-request` (fora do auto-pilot). O humano responde pela UI e a sessão retoma via `claude --resume` (com fallback de re-execução levando pergunta e resposta no prompt). (`runner.js`)
 
+Com `autoDecide` ligado no projeto, ninguém precisa responder: o prompt já manda o agente decidir sozinho, e se ele perguntar mesmo assim o orquestrador escreve a `## Human Response` ("assuma a opção que você recomendou") e devolve a task para a fila. O card decidido sozinho ganha a tag `auto-decided` (badge "🤖 decidido sozinho" no board e no detalhe) — rastro, não estado: não sai do auto-pilot. Depois de 3 decisões automáticas na mesma task o card volta a esperar um humano — perguntar e responder a si mesmo custa uma sessão por volta. (`runner.js`)
+
 ### 23. Skill claude-kanban
 `SKILL.md` instalado em cada projeto instrui a sessão: schema da task, preenchimento de `## Resultado`, criação de tasks no backlog e as políticas de guardrails. (`server/templates/SKILL.md`)
 
@@ -117,7 +121,7 @@ Inicia/para o servidor de desenvolvimento do projeto pela UI, com buffer de logs
 Escolha de modelo por task/projeto, com normalização de aliases legados (`opus`, `sonnet`…) para o slug oficial mais recente da família. O catálogo vem da Models API da Anthropic (`GET /v1/models`, autenticada com o login do Claude Code) pelo botão **atualizar modelos** nas configurações globais, e fica em `~/.claude-kanban/models.json`; sem refresh, vale a lista embutida no código. (`server/src/lib/models.js`, `web/src/models.js`)
 
 ### 33. UI React completa
-Board com drag-and-drop (dnd-kit), colunas por status, filtros por tag, ordenação configurável, drawer de log, visualização de diff, notificações do sistema e sons. (`web/src/`)
+Board com drag-and-drop (dnd-kit), colunas por status, filtros por tag, ordenação configurável, drawer de log, visualização de diff, notificações do sistema e sons. Os projetos do rail lateral também se arrastam (mouse ou teclado: foco + espaço + setas) para definir a ordem, persistida em `projects.json` via `POST /api/projects/reorder`. (`web/src/`)
 
 ### 34. Webhook de mudança de status, falha e ação humana
 Com `webhookUrl` configurado no projeto, o servidor faz `POST` de JSON (`{ event, projectId, project, taskId, taskTitle, at, … }`) nos casos em que ninguém pode ficar esperando o board aberto: `task_status_changed` (task mudou de status pela UI, pela API ou por move manual de arquivo — com `from` e `to`, incluindo `to: "archived"`), `run_failed` (exit code ≠ 0, timeout ou verificação reprovada), `human_request` (o agente deixou uma `## Human Request`) e `pending_action` (guardrail bloqueou um comando). O `webhookStatuses` do projeto — checkboxes "Status avisados" nas Configurações do projeto — restringe quais status disparam `task_status_changed` (nenhum marcado = todos); os outros eventos passam sempre. Fire-and-forget com timeout de 10s: endpoint fora do ar não trava nem derruba o run. (`server/src/lib/webhook.js`)

@@ -1,7 +1,6 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+import { render, screen, within } from '@testing-library/react'
 
 vi.mock('@dnd-kit/core', () => ({
   DndContext: ({ children }) => <div>{children}</div>,
@@ -18,7 +17,7 @@ vi.mock('@dnd-kit/core', () => ({
 vi.mock('../src/api.js', () => ({
   api: {
     health: vi.fn(), usage: vi.fn(), projects: vi.fn(), queue: vi.fn(),
-    tasks: vi.fn(), pending: vi.fn(), removeProject: vi.fn(), models: vi.fn(),
+    tasks: vi.fn(), pending: vi.fn(), models: vi.fn(),
   },
   connectWS: vi.fn(() => () => {}),
 }))
@@ -30,35 +29,30 @@ const P1 = { id: 'p1', name: 'Proj Um', bootstrap: 'ok', branch: 'main' }
 const P2 = { id: 'p2', name: 'Proj Dois', bootstrap: 'ok', branch: 'main' }
 
 beforeEach(() => {
-  localStorage.setItem('ck.rail.expanded', '1') // o botão de remover só aparece com o rail aberto
   api.health.mockResolvedValue({ ok: true, claudeAvailable: true })
   api.usage.mockResolvedValue({ available: false })
   api.projects.mockResolvedValue({ projects: [P1, P2] })
-  api.queue.mockResolvedValue({ actives: [], queue: [], maxConcurrency: 1 })
   api.pending.mockResolvedValue({ actions: [] })
   api.tasks.mockResolvedValue({ tasks: [] })
   api.models.mockResolvedValue({ models: [] })
-  api.removeProject.mockResolvedValue({ ok: true })
 })
 
-const removeBtn = async name => {
-  const btns = await screen.findAllByRole('button', { name: 'Remover projeto do quadro' })
-  return btns[[P1, P2].findIndex(p => p.name === name)]
-}
-
-describe('remover projeto pelo rail', () => {
-  it('pede confirmação e chama a API sem desinstalar guardrails', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
+describe('indicador de execução no rail', () => {
+  it('mostra o spinner no projeto ativo e no indicador da fila', async () => {
+    api.queue.mockResolvedValue({ actives: [{ projectId: 'p2', taskId: 't1' }], queue: [], maxConcurrency: 1 })
     render(<App />)
-    await userEvent.click(await removeBtn('Proj Dois'))
-    expect(window.confirm).toHaveBeenCalled()
-    await waitFor(() => expect(api.removeProject).toHaveBeenCalledWith('p2', false))
+    const rail = within(document.querySelector('aside'))
+    const spinners = await rail.findAllByRole('img', { name: 'Rodando' })
+    // 1 no avatar do projeto p2 + 1 no QueueIndicator
+    expect(spinners).toHaveLength(2)
+    expect(spinners.every(s => s.className.includes('animate-spin'))).toBe(true)
+    expect(document.querySelector('aside .animate-pulse')).toBeNull()
   })
 
-  it('não chama a API quando a confirmação é cancelada', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
+  it('não mostra nada quando não há execução', async () => {
+    api.queue.mockResolvedValue({ actives: [], queue: [], maxConcurrency: 1 })
     render(<App />)
-    await userEvent.click(await removeBtn('Proj Um'))
-    expect(api.removeProject).not.toHaveBeenCalled()
+    await screen.findAllByText('Proj Um')
+    expect(screen.queryByRole('img', { name: 'Rodando' })).toBeNull()
   })
 })

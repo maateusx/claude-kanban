@@ -1,11 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback, useReducer } from 'react'
-import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors, useDroppable, useDraggable, closestCorners } from '@dnd-kit/core'
+import { DndContext, DragOverlay, PointerSensor, KeyboardSensor, useSensor, useSensors, useDroppable, useDraggable, closestCorners } from '@dnd-kit/core'
+import { SortableContext, useSortable, arrayMove, verticalListSortingStrategy, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { api, connectWS } from './api.js'
 import { reducer, effectsFor, initialState, notificationsFor, pendingIds } from './events.js'
 import * as notifications from './notify.js'
 import * as sounds from './sounds.js'
 import * as theme from './theme.js'
 import { DiffDrawer } from './Diff.jsx'
+import Markdown from './Markdown.jsx'
 import { ExtensionsDrawer } from './Extensions.jsx'
 import { SearchSourcesModal, SearchTasksModal } from './SearchSources.jsx'
 import { sortTasks, loadSorts, saveSorts, SORT_OPTIONS, DEFAULT_SORT } from './sort.js'
@@ -20,7 +22,11 @@ const COLUMNS = [
   { key: 'archived', label: 'Archived', dot: 'bg-st-archived' },
 ]
 const HUMAN_REQUEST_TAG = 'human-request'
+// Card decidido pelo próprio Claude (projeto com auto-decisão): rastro, não estado.
+const AUTO_DECIDED_TAG = 'auto-decided'
+const AUTO_DECIDED_TITLE = t('O Claude decidiu no lugar do humano (auto-decisão ligada no projeto) — a pergunta e a decisão estão no "Histórico de Human Requests" no detalhe.')
 const ENRICH_LABEL = { off: t('não enriquecer'), auto: t('Claude decide'), always: t('sempre enriquecer') }
+const RAW_LABEL = { off: t('prompt do kanban'), 'plan-execute': t('cru: planejar + executar'), plan: t('cru: só planejar'), execute: t('cru: só executar') }
 
 // Cada view escolhe as colunas visíveis. Archived nunca aparece por padrão.
 const VIEWS = [
@@ -342,6 +348,10 @@ export default function App() {
       <Rail
         projects={projects} selectedId={selectedId} onSelect={setSelectedId} queue={queue} usage={usage}
         onAdd={() => setShowAddProject(true)}
+        onReorder={next => {
+          setProjects(next) // otimista; o refresh confirma (ou desfaz) com o que o servidor gravou
+          api.reorderProjects(next.map(p => p.id)).then(refreshProjects).catch(e => { alert(e.message); refreshProjects() })
+        }}
         onRemove={p => {
           if (!confirm(t('Remover "{name}" do quadro? As tasks e o código continuam no disco.', { name: p.name }))) return
           api.removeProject(p.id, false)
@@ -533,6 +543,11 @@ const Chip = ({ children, className = '', ...props }) => {
 }
 
 const Dot = ({ className = '', style }) => <span style={style} className={`size-2 shrink-0 rounded-full ${className}`} />
+// Anel girando = "em execução" — mais legível que um ponto piscando.
+const Spinner = ({ className = '', title }) => (
+  <span role="img" aria-label={title} title={title}
+    className={`inline-block shrink-0 animate-spin rounded-full border-2 border-st-doing border-t-transparent ${className}`} />
+)
 
 const TagChip = ({ tag }) => (
   <Chip><Dot style={{ background: `hsl(${tagHue(tag)} 65% 55%)` }} />{tag}</Chip>
@@ -613,8 +628,20 @@ function HoverTip({ label, disabled, children, className }) {
   )
 }
 
-function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onSettings, queue, usage }) {
+function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onReorder, onSettings, queue, usage }) {
   const [expanded, toggle] = useRailExpanded()
+  // distance: 5 mantém o clique simples selecionando o projeto; só vira drag depois de mover.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
+  const onDragEnd = ({ active, over }) => {
+    if (!over || active.id === over.id) return
+    const from = projects.findIndex(p => p.id === active.id)
+    const to = projects.findIndex(p => p.id === over.id)
+    if (from === -1 || to === -1) return
+    onReorder(arrayMove(projects, from, to))
+  }
   return (
     <aside style={{ width: expanded ? 'var(--rail-w-open)' : 'var(--rail-w)' }}
       className={`flex shrink-0 flex-col gap-2 border-r border-line py-3 ${expanded ? 'items-stretch px-2' : 'items-center'}`}>
@@ -626,11 +653,14 @@ function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onSettings, que
           className="rounded-[6px] p-1.5 text-muted hover:bg-hover hover:text-ink-2">{expanded ? '«' : '»'}</button>
       </div>
       <div className={`mt-2 flex flex-1 flex-col gap-2 overflow-y-auto ${expanded ? '' : 'items-center'}`}>
+        <DndContext id="rail" sensors={sensors} onDragEnd={onDragEnd}>
+        <SortableContext items={projects.map(p => p.id)} strategy={verticalListSortingStrategy}>
         {projects.map(p => {
           const running = queue.actives?.some(a => a.projectId === p.id)
           return (
-            <HoverTip key={p.id} label={p.name} disabled={expanded} className="group">
-              <button onClick={() => onSelect(p.id)}
+            <SortableItem key={p.id} id={p.id}>{({ handleRef, handleProps }) => (
+            <HoverTip label={p.name} disabled={expanded} className="group">
+              <button ref={handleRef} {...handleProps} onClick={() => onSelect(p.id)}
                 className={`flex w-full items-center gap-2 rounded-[8px] ${expanded ? 'px-1.5 py-1 hover:bg-hover' : 'justify-center'} ${p.id === selectedId ? (expanded ? 'bg-hover' : '') : ''}`}>
                 <span
                   className={`ck-avatar relative flex size-9 shrink-0 items-center justify-center rounded-[8px] text-meta font-semibold ${p.id === selectedId ? 'ring-2 ring-accent' : ''}`}
@@ -640,7 +670,7 @@ function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onSettings, que
                   {p.pendingCount > 0 && (
                     <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-warning px-1 text-[10px] font-semibold leading-4 text-on-accent">{p.pendingCount}</span>
                   )}
-                  {running && <Dot className="absolute -bottom-0.5 -right-0.5 animate-pulse bg-st-doing" />}
+                  {running && <Spinner title={t('Rodando')} className="absolute -bottom-1 -right-1 size-3.5 bg-bg" />}
                 </span>
                 {expanded && (
                   <span className={`truncate text-body ${p.id === selectedId ? 'font-semibold text-ink' : 'text-ink-2'}`}>{p.name}</span>
@@ -652,8 +682,11 @@ function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onSettings, que
                   className="absolute right-1 top-1/2 hidden -translate-y-1/2 rounded-[6px] px-1.5 py-0.5 text-muted hover:bg-hover hover:text-danger group-hover:block">×</button>
               )}
             </HoverTip>
+            )}</SortableItem>
           )
         })}
+        </SortableContext>
+        </DndContext>
         <HoverTip label={t('Cadastrar projeto')} disabled={expanded}>
           <button onClick={onAdd}
             className={`flex items-center gap-2 rounded-[8px] text-muted hover:bg-hover hover:text-ink-2 ${expanded ? 'w-full px-1.5 py-1' : 'size-9 justify-center border border-dashed border-line-strong'}`}>
@@ -673,6 +706,18 @@ function Rail({ projects, selectedId, onSelect, onAdd, onRemove, onSettings, que
   )
 }
 
+// Wrapper sortable genérico: o nó que se move é o wrapper, o ativador (quem
+// recebe listeners/aria) é o botão do projeto — assim o "×" de remover não vira alça.
+function SortableItem({ id, children }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id })
+  return (
+    <div ref={setNodeRef} style={{ transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined, transition }}
+      className={isDragging ? 'z-10 opacity-60' : ''}>
+      {children({ handleRef: setActivatorNodeRef, handleProps: { ...attributes, ...listeners } })}
+    </div>
+  )
+}
+
 function QueueIndicator({ queue }) {
   const actives = queue.actives?.length || 0
   const waiting = queue.queue?.length || 0
@@ -680,7 +725,7 @@ function QueueIndicator({ queue }) {
   return (
     <div title={t('{a} ativa(s) · {q} na fila', { a: actives, q: waiting })}
       className="flex flex-col items-center gap-0.5 text-[10px] text-muted">
-      <Dot className="animate-pulse bg-st-doing" />
+      <Spinner title={t('Rodando')} className="size-3" />
       <span className="font-mono">{actives}/{actives + waiting}</span>
     </div>
   )
@@ -821,6 +866,7 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
         <BootstrapBadge project={project} onRerun={onRerun} />
         <BranchSelector project={project} onChanged={onChanged} />
         {project.skipPermissions && <Chip className="text-danger">skip-permissions</Chip>}
+        {project.rawMode && project.rawMode !== 'off' && <Chip>{RAW_LABEL[project.rawMode]}</Chip>}
         <div className="flex-1" />
         <DevServerButton project={project} onChanged={onChanged} />
         <button onClick={onSettings} title={t('Configurações do projeto')}
@@ -1101,11 +1147,14 @@ function CardBody({ task, queue, onRun, onOpen, selected, defaultModel, pending 
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
         <span title={prio.label} className={`text-body ${prio.cls}`}>{prio.arrow}</span>
-        {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG).map(tag => <TagChip key={tag} tag={tag} />)}
+        {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG && t !== AUTO_DECIDED_TAG).map(tag => <TagChip key={tag} tag={tag} />)}
         {(task.tags || []).includes(HUMAN_REQUEST_TAG) && (
           <Chip className="text-warning" title={t('O agente precisa de uma decisão sua — veja a seção Human Request no detalhe.')}>
             {t('⚑ decisão humana')}
           </Chip>
+        )}
+        {(task.tags || []).includes(AUTO_DECIDED_TAG) && (
+          <Chip className="text-info" title={AUTO_DECIDED_TITLE}>{t('🤖 decidido sozinho')}</Chip>
         )}
         <div className="flex-1" />
         {isFuture(task.scheduled_at) && (
@@ -1132,6 +1181,24 @@ function CardBody({ task, queue, onRun, onOpen, selected, defaultModel, pending 
   )
 }
 
+// Motivo do fim do run (run.exit_reason, gravado pelo runner). Runs antigos só
+// têm exit_code — cai no "exit N" de sempre.
+const EXIT_REASONS = {
+  timeout: 'Tempo esgotado',
+  killed: 'Cancelada pelo usuário',
+  max_turns: 'Teto de turnos atingido',
+  max_budget: 'Teto de custo atingido',
+  execution_error: 'Erro na execução',
+  api_error: 'Erro da API do Claude',
+  signal: 'Processo encerrado por sinal',
+  verify_failed: 'Verificação falhou',
+}
+const runFailed = run => !!run.exit_reason || (run.exit_code != null && run.exit_code !== 0)
+const exitLabel = run => {
+  const code = run.exit_code != null ? ` (exit ${run.exit_code})` : ''
+  return EXIT_REASONS[run.exit_reason] ? t(EXIT_REASONS[run.exit_reason]) + code : `exit ${run.exit_code ?? '?'}`
+}
+
 // Assinatura da UI: bloco inset com o estado do run — vivo enquanto executa,
 // pós-mortem quando termina.
 function RunStrip({ task, running, openPending, onRun }) {
@@ -1147,7 +1214,7 @@ function RunStrip({ task, running, openPending, onRun }) {
       </button>
     )
   }
-  const failed = !running && run.exit_code != null && run.exit_code !== 0
+  const failed = !running && runFailed(run)
   return (
     <div className="mt-3 rounded-[6px] bg-subtle px-2.5 py-2 text-meta">
       {openPending > 0 && (
@@ -1167,7 +1234,7 @@ function RunStrip({ task, running, openPending, onRun }) {
       ) : (
         <div className="flex flex-wrap items-center gap-x-1.5 text-ink-2">
           <Dot className={`size-1.5 ${failed ? 'bg-danger' : 'bg-success'}`} />
-          <span>{failed ? `exit ${run.exit_code}` : t('concluído')}</span>
+          <span className={failed ? 'text-danger' : ''}>{failed ? exitLabel(run) : t('concluído')}</span>
           {run.completed_at && <span className="text-muted">· {ago(run.completed_at)}</span>}
           {run.cost_usd != null && <span className="font-mono text-muted">· {fmtCost(run.cost_usd)}</span>}
           {run.duration_ms != null && <span className="text-muted">· {fmtDur(run.duration_ms)}</span>}
@@ -1332,8 +1399,9 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
           <option value="on">{t('✦ enriquecer')}</option>
           <option value="off">{t('✦ não enriquecer')}</option>
         </select>
-        {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG).map(t => <TagChip key={t} tag={t} />)}
+        {(task.tags || []).filter(t => t !== HUMAN_REQUEST_TAG && t !== AUTO_DECIDED_TAG).map(t => <TagChip key={t} tag={t} />)}
         {(task.tags || []).includes(HUMAN_REQUEST_TAG) && <Chip className="text-warning">{t('aguardando decisão humana')}</Chip>}
+        {(task.tags || []).includes(AUTO_DECIDED_TAG) && <Chip className="text-info" title={AUTO_DECIDED_TITLE}>{t('🤖 decidido sozinho')}</Chip>}
       </div>
 
       {editing ? (
@@ -1371,7 +1439,7 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
       {humanRequest && (
         <div className="mt-3 rounded-[8px] border border-warning p-3">
           <div className="text-meta font-semibold uppercase tracking-wide text-warning">{t('Decisão humana necessária')}</div>
-          <div className="mt-1.5 whitespace-pre-wrap text-body text-ink-2">{humanRequest}</div>
+          <Markdown text={humanRequest} className="mt-1.5" />
           <HumanResponseForm
             disabled={running || queued}
             hasSession={!!run.session_id}
@@ -1427,9 +1495,9 @@ function TaskDrawer({ task, project, queue, pending, deps = [], onClose, onPatch
         ) : (
           <div className="rounded-[6px] border border-line p-2.5 text-meta">
             <div className="flex items-center gap-2">
-              <Dot className={running ? 'animate-pulse bg-success' : run.exit_code ? 'bg-danger' : 'bg-muted'} />
+              <Dot className={running ? 'animate-pulse bg-success' : runFailed(run) ? 'bg-danger' : 'bg-muted'} />
               <span className="text-ink-2">
-                {running ? t('Ativa') : run.exit_code ? t('Falhou (exit {code})', { code: run.exit_code }) : t('Concluída')}
+                {running ? t('Ativa') : runFailed(run) ? t('Falhou: {reason}', { reason: exitLabel(run) }) : t('Concluída')}
               </span>
               <div className="flex-1" />
               <button onClick={onLog} className="text-accent hover:underline">
@@ -2501,6 +2569,19 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
           </span>
         </label>
 
+        <label className="flex items-start gap-3">
+          <span className="mt-1">{t('Modo de execução')}</span>
+          <span className="flex-1">
+            <select value={project.rawMode || 'off'} onChange={e => onPatch({ rawMode: e.target.value })}
+              className="rounded-[6px] border border-line px-2 py-1 text-body outline-none">
+              {Object.entries(RAW_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+            <span className="mt-1 block text-meta text-muted">
+              {t('Cru: a task vai para o Claude Code headless só com título e descrição, sem as instruções do kanban. "Planejar" roda em plan mode e guarda o plano em "## Plano"; "planejar + executar" depois retoma a sessão e executa o plano. A resposta final vira o "## Resultado".')}
+            </span>
+          </span>
+        </label>
+
         <label className="flex items-center gap-3">
           <span>{t('Timeout da execução (minutos)')}</span>
           <input type="number" min={1} max={240} value={timeoutMin}
@@ -2565,6 +2646,12 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
             desc={t('Antes de executar, o Claude avalia cada task sem opção própria de quebra: se ela for grande demais, é desmembrada em subtasks menores em vez de rodar inteira.')}
             checked={!!project.autoDecompose}
             onChange={v => onPatch({ autoDecompose: v })} />
+          <div className="mt-3 border-t border-line pt-3">
+            <GitCheck label={t('Claude decide os pedidos de decisão humana')}
+              desc={t('Quando o agente abre um "## Human Request", em vez de o card parar com a tag human-request, o próprio Claude assume a opção que recomendou e continua na execução seguinte (a decisão fica registrada no histórico da task). Depois de 3 decisões automáticas na mesma task, o card volta a esperar por um humano.')}
+              checked={!!project.autoDecide}
+              onChange={v => onPatch({ autoDecide: v })} />
+          </div>
         </div>
 
         <PluginSettings project={project} />
@@ -2985,8 +3072,11 @@ function QueueBar({ queue, tasks, projects, usage, onOpen, onKill, onReorder, on
     onReorder(ids)
   }
   return (
-    <footer className="flex items-center gap-2 overflow-x-auto border-t border-line px-4 py-2 text-meta">
+    // O botão de pausa fica fora do container com scroll: overflow-x-auto também
+    // recorta no eixo y e esconderia o popover que abre para cima.
+    <footer className="flex items-center gap-2 border-t border-line px-4 py-2 text-meta">
       <GlobalPauseButton queue={queue} usage={usage} onPause={onPause} onResume={onResume} />
+      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
       {(queue.actives || []).map(a => (
         <div key={a.taskId} className="flex shrink-0 items-center gap-2 rounded-[6px] bg-subtle px-3 py-1.5">
           <Dot className="animate-pulse bg-st-doing" />
@@ -3004,6 +3094,7 @@ function QueueBar({ queue, tasks, projects, usage, onOpen, onKill, onReorder, on
             className="px-0.5 text-muted hover:text-danger">✕</button>
         </div>
       ))}
+      </div>
     </footer>
   )
 }
