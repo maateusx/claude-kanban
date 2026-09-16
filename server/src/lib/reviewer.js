@@ -10,7 +10,7 @@ const MAX_DIFF_CHARS = 120_000
 // Gate de revisão (`reviewGate` no projeto): depois do verifyCommand, uma sessão
 // barata e somente leitura julga se o diff entrega o que a task pede. Testes só
 // pegam o que cobrem; isto pega "fez outra coisa" e "fez pela metade".
-export function buildReviewPrompt(task, diff) {
+export function buildReviewPrompt(task, diff, evidence = []) {
   const d = diff || '(a sessão não produziu diff)'
   return `Você é o revisor do claude-kanban. Uma sessão do Claude executou a task abaixo
 neste repositório (o diretório atual é o worktree com o resultado). Julgue se o
@@ -30,7 +30,13 @@ ${getSection(task.body, 'Descrição') || ''}
 ${getSection(task.body, 'Resultado') || '(vazio)'}
 </resultado-declarado>
 
-<diff>
+${evidence.length ? `<evidencia-dos-testes>
+${evidence.join('\n\n')}
+</evidencia-dos-testes>
+
+Testes de aceite reprovados ou teste de bug que não reproduz são motivo de reprovação.
+
+` : ''}<diff>
 ${d.length > MAX_DIFF_CHARS ? d.slice(0, MAX_DIFF_CHARS) + '\n[diff truncado]' : d}
 </diff>
 
@@ -54,13 +60,13 @@ Read e confira se a parte visual está coerente com o que a task pede.
 
 // Resolve { approved, feedback, costUsd }. Nunca rejeita: revisor fora do ar não
 // pode reprovar trabalho que passou nos testes — vira aprovado com a nota do erro.
-export function reviewTask(project, task, diff, cwd, shot = null) {
+export function reviewTask(project, task, diff, cwd, shot = null, evidence = []) {
   return new Promise(resolve => {
     const pass = why => resolve({ approved: true, feedback: `(revisão não rodou: ${why})`, costUsd: null, skipped: true })
     let child
     try {
       child = spawn('claude', [
-        '-p', buildReviewPrompt(task, diff) + shotNote(shot),
+        '-p', buildReviewPrompt(task, diff, evidence) + shotNote(shot),
         '--output-format', 'json',
         '--allowedTools', 'Read Glob Grep',
         '--model', auxModel(project),

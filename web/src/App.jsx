@@ -129,7 +129,7 @@ export default function App() {
   const [projects, setProjects] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [{ tasks, pending, logs }, dispatch] = useReducer(reducer, initialState)
-  const [queue, setQueue] = useState({ actives: [], queue: [], maxConcurrency: 1, paused: false, pausedUntil: null })
+  const [queue, setQueue] = useState({ actives: [], queue: [], merges: [], maxConcurrency: 1, paused: false, pausedUntil: null })
   const usage = useUsage()
   const [logTask, setLogTask] = useState(null)
   const [diffTask, setDiffTask] = useState(null)
@@ -143,6 +143,7 @@ export default function App() {
   const [showSources, setShowSources] = useState(false)
   const [showSearchTasks, setShowSearchTasks] = useState(false)
   const [showClaudeConfig, setShowClaudeConfig] = useState(false)
+  const [showSpec, setShowSpec] = useState(false)
   // null = fechado; t('global') | 'project' = escopo inicial da tela de extensões
   const [extScope, setExtScope] = useState(null)
   const [showAddProject, setShowAddProject] = useState(false)
@@ -398,6 +399,7 @@ export default function App() {
               onSearchSources={() => setShowSources(true)}
               onSearchTasks={() => setShowSearchTasks(true)}
               onClaudeConfig={() => setShowClaudeConfig(true)}
+              onSpec={() => setShowSpec(true)}
               onExtensions={() => setExtScope('project')}
               onSettings={() => setShowSettings(true)}
               onRerun={() => api.rebootstrap(project.id).then(refreshProjects)}
@@ -513,6 +515,7 @@ export default function App() {
           onResolve={aid => api.resolvePending(project.id, aid).then(d => setPending(d.actions))}
           onRun={aid => api.runPending(project.id, aid)} />
       )}
+      {showSpec && project && <SpecModal project={project} onClose={() => setShowSpec(false)} />}
       {showClaudeConfig && project && (
         <ClaudeConfigModal project={project} onClose={() => setShowClaudeConfig(false)} />
       )}
@@ -877,7 +880,7 @@ function UsageRail({ usage }) {
 /* ------------------------------------------------------------------- header */
 
 function BoardHeader({ project, health, view, onView, query, onQuery, searchRef, pendingCount,
-  onNewTask, onPending, onSuggest, onImportIssues, onSearchSources, onSearchTasks, onClaudeConfig, onExtensions, onSettings, onRerun, onAutoRun, onChanged }) {
+  onNewTask, onPending, onSuggest, onImportIssues, onSearchSources, onSearchTasks, onClaudeConfig, onSpec, onExtensions, onSettings, onRerun, onAutoRun, onChanged }) {
   return (
     <header className="border-b border-line px-4 py-3">
       <div className="flex items-center gap-2">
@@ -895,6 +898,7 @@ function BoardHeader({ project, health, view, onView, query, onQuery, searchRef,
         <Menu items={[
           { label: t('Re-rodar bootstrap (guardrails)'), onClick: onRerun },
           { label: t('Config do Claude (.claude)'), onClick: onClaudeConfig },
+          { label: t('Spec e ADRs do sistema'), onClick: onSpec },
           { label: t('Extensões (skills, hooks, agents, plugins)'), onClick: onExtensions },
           { label: t('✦ Sugerir tasks com o Claude'), onClick: onSuggest, disabled: !health.claudeAvailable },
           { label: t('Importar issues do GitHub'), onClick: onImportIssues },
@@ -1212,6 +1216,15 @@ function CardBody({ task, queue, onRun, onOpen, selected, defaultModel, pending 
 
 // Motivo do fim do run (run.exit_reason, gravado pelo runner). Runs antigos só
 // têm exit_code — cai no "exit N" de sempre.
+const DIAGNOSIS_CAUSES = {
+  ambiente: 'Ambiente',
+  flaky: 'Teste instável',
+  spec_ambigua: 'Spec ambígua',
+  grande_demais: 'Grande demais',
+  falta_dependencia: 'Falta dependência',
+  externo: 'Externa (precisa de humano)',
+}
+
 const EXIT_REASONS = {
   timeout: 'Tempo esgotado',
   killed: 'Cancelada pelo usuário',
@@ -1924,6 +1937,20 @@ function AutonomyStats({ a }) {
           </table>
         </Panel>
       )}
+      {a.byDiagnosis?.length > 0 && (
+        <Panel title={t('Causas diagnosticadas')}>
+          <table className="w-full text-body">
+            <tbody>
+              {a.byDiagnosis.map(r => (
+                <tr key={r.cause} className="border-b border-line last:border-0">
+                  <td className="py-1.5">{DIAGNOSIS_CAUSES[r.cause] ? t(DIAGNOSIS_CAUSES[r.cause]) : r.cause}</td>
+                  <td className="py-1.5 text-right tabular-nums">{r.n}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      )}
     </>
   )
 }
@@ -2292,12 +2319,25 @@ const summarize = input => {
 function PendingPanel({ actions, onClose, onResolve, onRun }) {
   const pend = actions.filter(a => a.status === 'pending')
   const done = actions.filter(a => a.status !== 'pending')
+  const auto = done.filter(a => a.policy)
   return (
     <Modal onClose={onClose} title={t('Ações manuais pendentes')}>
       <div className="max-h-[60vh] space-y-3 overflow-y-auto">
         {pend.length === 0 && <Empty>{t('Nenhuma ação pendente.')}</Empty>}
         {pend.map(a => <PendingItem key={a.id} action={a} onResolve={onResolve} onRun={onRun} />)}
         {done.length > 0 && <div className="pt-2 text-meta text-muted">{t('{n} resolvida(s)', { n: done.length })}</div>}
+        {auto.slice(-10).reverse().map(a => (
+          <details key={a.id} className="rounded-[8px] border border-line p-2 text-meta">
+            <summary className="cursor-pointer">
+              <span className="font-mono">{a.command}</span>
+              <span className={`ml-2 ${a.policy.result === 'exit 0' ? 'text-success' : 'text-danger'}`}>{a.policy.result}</span>
+              <span className="ml-2 text-muted">{t('pela política {p}', { p: a.policy.pattern })}</span>
+            </summary>
+            <pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap break-all rounded-[4px] bg-subtle p-2 font-mono text-[11px] text-ink-2">
+              {a.policy.output || t('(sem saída)')}
+            </pre>
+          </details>
+        ))}
       </div>
     </Modal>
   )
@@ -2483,6 +2523,23 @@ const intIn = (min, max, empty = min) => v => {
 const csv = v => v.split(',').map(x => x.trim()).filter(Boolean)
 const Hint = ({ children }) => <span className="mt-1 block text-meta text-muted">{children}</span>
 
+// Allowlist de guardrail: um padrão de comando por linha.
+function PolicyField({ value, onCommit }) {
+  const shown = value.join('\n')
+  const [v, setV] = useState(shown)
+  useEffect(() => setV(shown), [shown])
+  const lines = v.split('\n').map(x => x.trim()).filter(Boolean)
+  return (
+    <label className="block">
+      <span className="text-ink">{t('Ações que o servidor executa sozinho')}</span>
+      <textarea value={v} rows={3} onChange={e => setV(e.target.value)}
+        onBlur={() => { if (lines.join('\n') !== shown) onCommit(lines) }}
+        placeholder="git branch -d kanban/*" className={`mt-1 w-full font-mono ${fieldCls}`} />
+      <Hint>{t('Um padrão por linha (* = qualquer trecho). Comando bloqueado pelos guardrails que casar inteiro é executado pelo servidor e resolvido na hora, com a saída no item. Nunca casa: ; && | $() aspas, leitura de .env ou push na branch principal. Vazio: tudo vai para o humano.')}</Hint>
+    </label>
+  )
+}
+
 // Autonomia de ponta a ponta: travas da execução, o que acontece depois da task
 // (merge, PR) e o trabalho que chega sozinho. Os jobs do autopilot rodam a cada minuto.
 function AutonomySettings({ project, onPatch }) {
@@ -2508,6 +2565,7 @@ function AutonomySettings({ project, onPatch }) {
       <GitCheck label={t('Sandbox do Claude Code')}
         desc={t('Bash roda confinado (filesystem e rede; só GitHub e registries liberados), além dos guardrails. macOS/Linux. Se o sandbox não estiver disponível, a sessão falha em vez de rodar sem ele. Recomendado antes de ligar o auto-merge.')}
         checked={!!project.sandbox} onChange={v => onPatch({ sandbox: v })} />
+      <PolicyField value={project.guardrailPolicy || []} onCommit={guardrailPolicy => onPatch({ guardrailPolicy })} />
       <div>
         <span className="text-ink">{t('Checagem visual na revisão')}</span>
         <div className={`mt-1 ${row}`}>
@@ -2568,7 +2626,49 @@ function AutonomySettings({ project, onPatch }) {
             <option value="todo">{t('A fazer (roda com o auto-pilot)')}</option>
           </select>
         </label>
-        <Hint>{t('Vale para issues, fontes de busca com intervalo, CI quebrado e sugestões agendadas.')}</Hint>
+        <Hint>{t('Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas, manutenção e lacunas da spec.')}</Hint>
+      </div>
+
+      <div className="space-y-2 border-t border-line pt-3">
+        <div className="text-ink">{t('Manutenção agendada')}</div>
+        <Hint>{t('Uma sessão somente leitura procura dívida técnica do tipo e abre tasks com a tag manutencao:<tipo>, sem repetir título.')}</Hint>
+        {[
+          ['cobertura', t('Cobertura de testes')], ['lint', t('Lint e código morto')],
+          ['dependencias', t('Dependências')], ['docs', t('README por módulo')],
+        ].map(([kind, label]) => {
+          const m = ap.maintenance?.[kind] || {}
+          const patchM = v => patchAp({ maintenance: { [kind]: v } })
+          return (
+            <div key={kind} className={row}>
+              <span className="w-40 text-ink">{label}</span>
+              <span className="text-meta text-muted">{t('a cada')}</span>
+              <CommitField value={m.hours || 0} parse={intIn(0, 720)} aria-label={`${label}: ${t('intervalo (h)')}`}
+                onCommit={hours => patchM({ hours })} />
+              <span className="text-meta text-muted">{t('h, com no máximo')}</span>
+              <CommitField value={m.max ?? 2} parse={intIn(1, 50, undefined)} aria-label={`${label}: ${t('máximo de tasks abertas')}`}
+                onCommit={max => patchM({ max })} />
+              <span className="text-meta text-muted">{t('abertas (0 h = desligado)')}</span>
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="border-t border-line pt-3">
+        <GitCheck label={t('Construir até a spec estar cumprida')}
+          desc={t('Quando um objetivo desmembrado termina a integração, uma sessão somente leitura compara a spec e os critérios de aceite com o código; o que faltar vira task (tag lacuna) e o objetivo integra de novo. Para sem lacunas (tag spec-cumprida), no teto de rodadas ou no teto de custo — aí avisa por webhook (goal_needs_human).')}
+          checked={!!ap.gapLoop?.enabled} onChange={v => patchAp({ gapLoop: { enabled: v } })} />
+        <div className={`ml-7 mt-2 ${row} ${ap.gapLoop?.enabled ? '' : 'opacity-40'}`}>
+          <span className="text-meta text-muted">{t('no máximo')}</span>
+          <CommitField value={ap.gapLoop?.maxRounds ?? 3} parse={intIn(1, 20, undefined)} disabled={!ap.gapLoop?.enabled}
+            aria-label={t('Máximo de rodadas de lacunas')} onCommit={maxRounds => patchAp({ gapLoop: { maxRounds } })} />
+          <span className="text-meta text-muted">{t('rodadas por objetivo')}</span>
+        </div>
+      </div>
+
+      <div className="border-t border-line pt-3">
+        <GitCheck label={t('Diagnosticar falhas em vez de bloquear')}
+          desc={t('Quando uma task esgota as tentativas, uma sessão somente leitura classifica a causa (ambiente, flaky, spec ambígua, grande demais, falta de dependência ou externa) e age: cria pré-requisito, repete o verify, decide pela spec, desmembra ou encadeia a dependência. Só causa externa fica blocked e avisa por webhook (task_needs_human). No máximo 2 diagnósticos por task.')}
+          checked={!!ap.diagnose?.enabled} onChange={v => patchAp({ diagnose: { enabled: v } })} />
       </div>
 
       <div className={`border-t border-line pt-3 ${row}`}>
@@ -2645,6 +2745,47 @@ const CONFIG_GROUPS = [
   { key: 'plugins', label: 'Plugins' },
   { key: 'outros', label: t('Outros') },
 ]
+
+// Spec do sistema e ADRs (.claude/claude-kanban/spec/), somente leitura.
+function SpecModal({ project, onClose }) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  const [selected, setSelected] = useState('SPEC.md')
+  useEffect(() => { api.spec(project.id).then(setData).catch(e => setError(e.message)) }, [project.id])
+  const adr = data?.adrs.find(a => a.file === selected)
+  const text = adr ? adr.content : data?.spec
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-scrim" onMouseDown={onClose} />
+      <div className="fixed inset-y-0 right-0 z-40 flex w-[900px] max-w-full flex-col border-l border-line bg-bg">
+        <div className="flex items-center gap-3 border-b border-line px-5 py-3">
+          <h2 className="font-semibold">{t('Spec e ADRs do sistema')} — {project.name}</h2>
+          <span className="text-meta text-muted">.claude/claude-kanban/spec/</span>
+          <div className="flex-1" />
+          <button onClick={onClose} className="text-muted hover:text-ink">✕</button>
+        </div>
+        <div className="flex min-h-0 flex-1">
+          <div className="w-72 shrink-0 overflow-y-auto border-r border-line py-2">
+            {[{ file: 'SPEC.md', title: 'SPEC.md' }, ...(data?.adrs || [])].map(f => (
+              <button key={f.file} onClick={() => setSelected(f.file)}
+                className={`block w-full truncate px-4 py-1.5 text-left text-body hover:bg-hover ${selected === f.file ? 'bg-subtle font-medium' : ''}`}>
+                {f.title}
+              </button>
+            ))}
+          </div>
+          <div className="min-w-0 flex-1 overflow-y-auto p-5">
+            {error && <div className="text-danger">{error}</div>}
+            {!data && !error && <div className="text-meta text-muted">{t('carregando…')}</div>}
+            {data && (text
+              ? <Markdown text={text} />
+              : <Empty>{t('Sem spec ainda: ela é criada pela subtask de desenho de um objetivo grande.')}</Empty>)}
+          </div>
+        </div>
+      </div>
+    </>
+  )
+}
 
 function ClaudeConfigModal({ project, onClose }) {
   const [files, setFiles] = useState(null)
@@ -2748,6 +2889,7 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
   const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
   const [verifyCommand, setVerifyCommand] = useState(project.verifyCommand || '')
+  const [acceptanceCommand, setAcceptanceCommand] = useState(project.acceptanceCommand || '')
   const [goalBudget, setGoalBudget] = useState(project.goalBudgetUsd != null ? String(project.goalBudgetUsd) : '')
   const [webhookUrl, setWebhookUrl] = useState(project.webhookUrl || '')
   const whStatuses = project.webhookStatuses || []
@@ -2898,6 +3040,20 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
             </span>
           </span>
         </label>
+
+        <label className="flex items-start gap-3">
+          <span className="mt-1">{t('Comando de aceite')}</span>
+          <span className="flex-1">
+            <input value={acceptanceCommand} onChange={e => setAcceptanceCommand(e.target.value)}
+              onBlur={() => onPatch({ acceptanceCommand })}
+              onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+              placeholder="npm run test:e2e"
+              className="w-full rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
+            <span className="mt-1 block text-meta text-muted">
+              {t('Testes de aceite do objetivo: rodados na integração de uma task desmembrada, que só conclui se passarem. A subtask de desenho pode registrar um comando próprio do objetivo. Vazio: só o do objetivo, se houver.')}
+            </span>
+          </span>
+        </label>
         <div className="flex items-start gap-3">
           <span className="mt-1">{t('Retentativas')}</span>
           <span className="flex-1">
@@ -2969,7 +3125,7 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
             <span className="mt-1 block text-meta text-muted">
               POST com JSON quando uma task <strong>muda de status</strong> (<code>task_status_changed</code>), quando um run
               <strong> falha</strong> (<code>run_failed</code>) ou quando <strong>precisa de humano</strong>
-              (<code>human_request</code>, <code>pending_action</code> e <code>pr_needs_human</code>) — para saber sem o board aberto.
+              (<code>human_request</code>, <code>pending_action</code>, <code>pr_needs_human</code> e <code>goal_needs_human</code>) — para saber sem o board aberto.
               Também leva o resumo diário (<code>daily_digest</code>) se ele estiver ligado em Autonomia. Vazio: desligado.
             </span>
           </span>
@@ -3397,6 +3553,17 @@ function QueueBar({ queue, tasks, projects, usage, onOpen, onKill, onReorder, on
           <button onClick={() => move(i, 1)} className="px-0.5 text-muted hover:text-ink">▸</button>
           <button onClick={() => onDequeue(q.taskId)} title={t('Cancelar (tirar da fila)')}
             className="px-0.5 text-muted hover:text-danger">✕</button>
+        </div>
+      ))}
+      {(queue.merges || []).map((m, i) => (
+        <div key={`merge-${m.taskId}`} title={`${m.branch} → ${m.into}`}
+          className="flex shrink-0 items-center gap-1.5 rounded-[6px] bg-subtle px-3 py-1.5 text-ink-2">
+          <span className="font-mono text-muted">⇢{i + 1}</span>
+          <button onClick={() => onOpen(m, false)} title={t('Ver detalhes')} className="hover:text-ink hover:underline">{label(m)}</button>
+          <span className="font-mono text-muted">→ {m.into}</span>
+          <span className={m.stage ? 'animate-pulse text-st-doing' : 'text-muted'}>
+            {m.stage === 'verify' ? t('verificando merge') : i === 0 ? t('mergeando') : t('fila de merge')}
+          </span>
         </div>
       ))}
       </div>

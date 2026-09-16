@@ -152,3 +152,20 @@ test('rotas: GET lista candidatos, POST remove só o lote pedido', async () => {
   assert.deepEqual(branches(root), ['kanban/r2'])
   await app.close()
 })
+
+test('worktree da base enxerga os node_modules do checkout (raiz e subpasta)', async () => {
+  const { withDetachedWorktree } = await import('../src/lib/git.js')
+  const root = repo()
+  fs.mkdirSync(path.join(root, 'server'))
+  fs.writeFileSync(path.join(root, 'server', 'x.js'), '')
+  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules\n')
+  sh(root, 'add', '-A')
+  sh(root, 'commit', '-q', '-m', 'server')
+  for (const d of ['node_modules/dep', 'server/node_modules/dep']) fs.mkdirSync(path.join(root, d), { recursive: true })
+  const sha = sh(root, 'rev-parse', 'HEAD')
+  const seen = withDetachedWorktree(root, sha, dir =>
+    ['node_modules/dep', 'server/node_modules/dep'].map(d => fs.existsSync(path.join(dir, d))))
+  assert.deepEqual(seen, [true, true])
+  // remover o worktree não pode apagar as dependências do checkout
+  assert.ok(fs.existsSync(path.join(root, 'server/node_modules/dep')))
+})

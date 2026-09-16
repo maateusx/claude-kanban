@@ -20,7 +20,8 @@ test('normalizeModel aceita slug, migra apelido e descarta desconhecido', () => 
   assert.equal(normalizeModel('claude-opus-4-8'), 'claude-opus-4-8')
   // apelido resolve para o mais recente da família (catálogo é newest-first)
   assert.equal(normalizeModel('opus'), 'claude-opus-5')
-  assert.equal(normalizeModel('fable'), 'claude-fable-5')
+  // o catálogo vivo pode trazer um fable mais novo que o fallback
+  assert.match(normalizeModel('fable'), /^claude-fable-5/)
   assert.equal(normalizeModel('  sonnet '), 'claude-sonnet-5')
   assert.equal(normalizeModel('gpt-4'), null)
   assert.equal(normalizeModel(''), null)

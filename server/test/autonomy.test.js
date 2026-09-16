@@ -100,7 +100,7 @@ test('decomposição: pai volta para todo esperando as filhas, fora do ledger', 
   assert.equal(p.status, 'todo')
   assert.ok(p.tags.includes(DECOMPOSED_TAG))
   assert.equal(p.decompose, false)
-  assert.equal(p.depends_on.length, 2)
+  assert.equal(p.depends_on.length, 3, 'nível 0 ganha a subtask de desenho na frente')
   assert.equal(p.run.total_cost_usd, 0.5)
   assert.ok(!wasSucceeded(parent.id))
   assert.deepEqual(runner.pendingDeps(project, parent.id), p.depends_on, 'gate segura o pai')
@@ -131,6 +131,21 @@ test('subtask concluída entra na branch do pai; aprendizados vão para notes.md
   assert.ok(c.tags.includes(INTEGRATED_TAG))
   assert.equal(sh(root, 'show', `${taskBranch(parent.id)}:novo.txt`), 'n')
   assert.match(fs.readFileSync(notesFile(root), 'utf8'), /Filha[\s\S]*npm test/)
+})
+
+test('objetivo integrado fica marcado para a auditoria de lacunas; subtask não', () => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'ck-auto-'))
+  const project = { id: 'pg2', path: root }
+  const goal = createTask(root, { title: 'Obj', status: 'doing', tags: [DECOMPOSED_TAG] })
+  const sub = createTask(root, { title: 'Sub', status: 'doing', tags: [DECOMPOSED_TAG, `pai:${goal.id}`] })
+  const { runner } = runnerFor(project)
+  for (const t of [goal, sub]) {
+    const a = active(project, t.id, { verify: null, workspace: { cwd: root, branch: null } })
+    runner.actives.set(t.id, a)
+    runner.finish(a, 0)
+  }
+  assert.equal(findTask(root, goal.id).run.gap_pending, true)
+  assert.equal(findTask(root, sub.id).run.gap_pending, undefined)
 })
 
 test('buildPrompt injeta o contexto e subtask não faz push', () => {

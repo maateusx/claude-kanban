@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process'
 import { auxModel } from './models.js'
+import { needsDesign, SPEC_REL, DESIGN_TAG } from './spec.js'
+import { getSection } from './tasks.js'
 
 const TIMEOUT_MS = 5 * 60 * 1000
 const PRIORITIES = ['low', 'medium', 'high', 'urgent']
@@ -14,6 +16,31 @@ export const MAX_DECOMPOSE_LEVEL = 2
 
 export const subtaskLevel = task =>
   Number((task.tags || []).find(t => t.startsWith('nivel:'))?.slice(6)) || 0
+
+// Primeira subtask de um objetivo grande: cria/atualiza a spec antes das demais,
+// para as outras partes seguirem os mesmos contratos.
+export function designSubtask(parent) {
+  return {
+    title: `Desenho: spec e ADRs — ${parent.title}`.slice(0, 200),
+    description: `Crie ou atualize ${SPEC_REL}/SPEC.md (resumo do sistema no topo; uma seção "## " por
+módulo com responsabilidades e contratos) para cobrir o objetivo "${parent.title}", e registre as
+decisões de arquitetura em ${SPEC_REL}/adr/NNNN-titulo.md (número seguinte ao maior existente).
+
+Escreva também os testes de aceite (e2e/integração) para os critérios do objetivo, marcados
+como pendentes/skip — as próximas subtasks os fazem passar. Registre neste arquivo de task uma
+seção "## Comando de aceite" com o comando que roda esses testes, num bloco \`\`\`; o objetivo
+só conclui quando ele passar.
+
+Não implemente a funcionalidade: as próximas subtasks seguem esta spec.
+
+<objetivo>
+${(getSection(parent.body, 'Descrição') || parent.body || '').trim().slice(0, 4000)}
+</objetivo>`,
+    priority: parent.priority || 'medium',
+    tags: [DESIGN_TAG],
+    decompose: false,
+  }
+}
 
 // mode 'forced': o usuário pediu para quebrar — sempre desmembra.
 // mode 'auto': o modelo decide se vale a pena; task pequena/atômica fica como está.
@@ -36,16 +63,25 @@ ${task.body || ''}
 </task>
 
 ${decision}
-
+${needsDesign(task, subtaskLevel(task)) ? `
+Uma subtask de desenho (spec em ${SPEC_REL}/) é criada automaticamente antes das
+suas — não crie outra; se a spec já existir, leia-a e siga os contratos dela.
+` : ''}
 Regras para as subtasks:
 - Entre 2 e ${MAX_SUBTASKS}, cada uma executável de forma independente por uma sessão do Claude.
 - Ordene por dependência: o que precisa vir primeiro aparece primeiro.
+- "depends_on": números (posição na lista, começando em 1) das subtasks que precisam
+  estar prontas antes desta; [] quando ela pode começar já. Só declare dependência
+  real — subtasks sem dependência entre si rodam em paralelo.
+- Se houver partes paralelizáveis, a PRIMEIRA subtask é a de contratos: interfaces,
+  tipos, stubs, rotas vazias e esquemas que as outras usam (sem implementar), e as
+  paralelas dependem dela ([1]). Assim cada uma parte do mesmo contrato.
 - "description" em markdown: o que fazer, onde (cite arquivos/módulos), critérios de aceite
   e, se depender de outra subtask, diga qual.
 - Títulos específicos deste projeto, nunca genéricos.
 
 Responda SOMENTE com um JSON válido, sem texto antes ou depois, no formato:
-{"decompose":true,"subtasks":[{"title":"...","description":"...","priority":"low|medium|high|urgent"}]}
+{"decompose":true,"subtasks":[{"title":"...","description":"...","priority":"low|medium|high|urgent","depends_on":[1]}]}
 ou {"decompose":false} quando não valer desmembrar.`
 }
 
@@ -56,16 +92,48 @@ export function parseDecomposition(text) {
   const parsed = JSON.parse(text.slice(start, end + 1))
   if (parsed.decompose === false) return { decompose: false, subtasks: [] }
   const list = Array.isArray(parsed.subtasks) ? parsed.subtasks : []
-  const subtasks = list
-    .filter(s => s && typeof s.title === 'string' && s.title.trim())
-    .slice(0, MAX_SUBTASKS)
-    .map(s => ({
-      title: s.title.trim().slice(0, 200),
-      description: typeof s.description === 'string' ? s.description.trim() : '',
-      priority: PRIORITIES.includes(s.priority) ? s.priority : 'medium',
-    }))
+  const valid = list.filter(s => s && typeof s.title === 'string' && s.title.trim()).slice(0, MAX_SUBTASKS)
+  const subtasks = valid.map(s => ({
+    title: s.title.trim().slice(0, 200),
+    description: typeof s.description === 'string' ? s.description.trim() : '',
+    priority: PRIORITIES.includes(s.priority) ? s.priority : 'medium',
+  }))
   if (!subtasks.length) throw new Error('o modelo não devolveu subtasks válidas')
-  return { decompose: true, subtasks }
+  // Item descartado desloca as posições que o modelo citou: aí série.
+  const graph = valid.length === list.length && dependencyGraph(valid.map(s => s.depends_on))
+  if (!graph) return { decompose: true, subtasks: subtasks.map((s, i) => ({ ...s, deps: i ? [i - 1] : [] })), parallel: false }
+  // Ordem topológica: toda dependência aponta para uma subtask anterior na lista.
+  const pos = new Map(graph.order.map((orig, i) => [orig, i]))
+  return {
+    decompose: true,
+    parallel: true,
+    subtasks: graph.order.map(orig => ({ ...subtasks[orig], deps: graph.deps[orig].map(d => pos.get(d)) })),
+  }
+}
+
+// depends_on do modelo (posições a partir de 1, uma lista por subtask) → { deps
+// (índices a partir de 0), order (ordem topológica estável) }. Devolve null — e a
+// decomposição cai para série — se nenhuma subtask declarou dependências, ou se
+// alguma é inválida (fora da lista, a própria) ou o grafo tem ciclo.
+export function dependencyGraph(raw) {
+  if (!raw.some(Array.isArray)) return null
+  const deps = []
+  for (const [i, r] of raw.entries()) {
+    if (r != null && !Array.isArray(r)) return null
+    const list = [...new Set(r || [])]
+    if (list.some(n => !Number.isInteger(n) || n < 1 || n > raw.length || n === i + 1)) return null
+    deps.push(list.map(n => n - 1))
+  }
+  // Kahn: pega sempre a menor posição pronta; sobrou alguém = ciclo.
+  const order = []
+  const done = new Set()
+  while (order.length < deps.length) {
+    const next = deps.findIndex((d, i) => !done.has(i) && d.every(x => done.has(x)))
+    if (next === -1) return null
+    order.push(next)
+    done.add(next)
+  }
+  return { deps, order }
 }
 
 // Sessão headless somente leitura que devolve a decomposição da task.

@@ -9,7 +9,7 @@ import { DevServers } from './lib/devservers.js'
 import { Scheduler, isFuture } from './lib/scheduler.js'
 import { Autopilot } from './lib/autopilot.js'
 import { notifyWebhook } from './lib/webhook.js'
-import { listPendingActions } from './lib/pending.js'
+import { listPendingActions, autoResolvePending, policyCovers } from './lib/pending.js'
 import { buildApp } from './app.js'
 
 const PORT = Number(process.env.PORT || 4400)
@@ -50,6 +50,11 @@ function emit(type, payload) {
   for (const ws of sockets) { try { ws.send(msg) } catch {} }
   maybeAutoRun(type, payload)
   const project = getProject(payload.projectId)
+  if (project && type === 'pending.updated') {
+    // o que a política resolve sozinha não vira aviso para humano
+    for (const a of payload.actions || []) if (a.status === 'pending' && policyCovers(project, a.command)) webhookSeen.add(a.id)
+    autoResolvePending(project).catch(e => console.error(`guardrailPolicy (${project.name}): ${e.message}`))
+  }
   if (project) notifyWebhook(project, { type, ...payload }, webhookSeen)
 }
 

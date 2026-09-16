@@ -1,15 +1,21 @@
 import fs from 'node:fs'
 import { spawn } from 'node:child_process'
-import { listTasks, createTask, updateTask, replaceSection } from './tasks.js'
+import { listTasks, createTask, updateTask, replaceSection, appendToSection } from './tasks.js'
 import { clearExecuted } from './ledger.js'
 import {
   prStatus, prInlineComments, mergePR, summarizePR, failedRunLog, latestRun, listIssues, issueTag, issueDescription,
+  prMergeSha, updatePRBranch, createPR,
 } from './github.js'
 import { fetchSource, itemDescription } from './searchFetch.js'
 import { listSearchSources } from './searchSources.js'
-import { analyzeProject } from './analyzer.js'
-import { autoMergeBlocker, autoMergeSettings, notesFile, PR_FEEDBACK } from './runner.js'
-import { gitSettings, applyCleanup } from './git.js'
+import { analyzeProject, findGaps } from './analyzer.js'
+import {
+  autoMergeBlocker, autoMergeSettings, notesFile, PR_FEEDBACK, parentIdOf, goalBudget, treeCost, isGoal,
+} from './runner.js'
+import {
+  gitSettings, applyCleanup, isGitRepo, resolveRef, taskBranch, withDetachedWorktree, isBehindBase, revertOnBranch,
+  pushBranch, mergeTaskBranch, fetchRemotes,
+} from './git.js'
 import { diffFile } from './paths.js'
 import { auxModel } from './models.js'
 import { postWebhook, webhookUrl } from './webhook.js'
@@ -26,7 +32,39 @@ const CLEANUP_EVERY_MS = 60 * 60_000
 export const MAX_PR_ROUNDS = 3
 export const NOTES_COMPACT_AT = 9000
 export const SUGGESTED_TAG = 'auto-sugestao'
+export const GAP_TAG = 'lacuna'
+export const SPEC_DONE_TAG = 'spec-cumprida'
+// Merge do autopilot que quebrou o CI da base e foi revertido — só uma vez por task.
+export const REVERTED_TAG = 'revertido'
 const IMPORT_STATUSES = ['backlog', 'todo']
+const OPEN_STATUSES = ['backlog', 'todo', 'doing']
+export const MAINTENANCE_TAG = 'manutencao'
+// Manutenção agendada: cada tipo vira um pedido ao analyzer (somente leitura),
+// restrito a um tipo de sugestão. As tasks saem com `manutencao:<tipo>`.
+export const MAINTENANCE_TYPES = {
+  cobertura: {
+    type: 'teste',
+    question: 'Aponte áreas do código sem teste (módulos, funções ou fluxos que nenhum teste exercita), comparando o ' +
+      'código com os testes existentes. Uma task por área, listando os casos a testar.',
+  },
+  lint: {
+    type: 'refatoracao',
+    question: 'Aponte código morto (exports, funções, arquivos e dependências sem uso), duplicação e problemas que um ' +
+      'linter pegaria. Uma task por limpeza coesa, sem mudar comportamento.',
+  },
+  dependencias: {
+    type: 'melhoria',
+    question: 'Confira as dependências declaradas (package.json, lockfiles, requirements, go.mod etc.) e aponte as que ' +
+      'valem atualizar: muito desatualizadas, deprecadas ou com vulnerabilidade conhecida. Uma task por dependência ou ' +
+      'grupo coeso, dizendo o que conferir depois da atualização.',
+  },
+  docs: {
+    type: 'documentacao',
+    question: 'Cada módulo (pasta principal de código) deve ter um README.md atualizado com propósito, arquivos ' +
+      'principais, contratos e armadilhas — ele é o contexto que as próximas tasks leem. Aponte os READMEs que faltam ' +
+      'e os que divergem do código. Uma task por módulo.',
+  },
+}
 
 export const DEFAULT_AUTOPILOT = {
   prFollowUp: false,       // CI/comentários da PR reabrem a task
@@ -39,11 +77,21 @@ export const DEFAULT_AUTOPILOT = {
   digestHour: null,        // hora local do resumo diário por webhook
   // limpeza de branches kanban/* e worktrees órfãos; confirm = humano aprova na UI
   cleanup: { enabled: false, mode: 'confirm', remote: false },
+  // objetivo integrado → auditoria da spec → lacunas viram tasks, até maxRounds
+  gapLoop: { enabled: false, maxRounds: 3 },
+  // esgotou as tentativas → diagnóstico no auxModel em vez de blocked (runner.diagnose)
+  diagnose: { enabled: false },
+  // manutenção agendada: por tipo, intervalo em horas (0 = desligado) e teto de tasks abertas
+  maintenance: Object.fromEntries(Object.keys(MAINTENANCE_TYPES).map(k => [k, { hours: 0, max: 2 }])),
 }
 
 export const autopilotSettings = p => ({
   ...DEFAULT_AUTOPILOT, ...(p?.autopilot || {}), autoMerge: autoMergeSettings(p),
   cleanup: { ...DEFAULT_AUTOPILOT.cleanup, ...(p?.autopilot?.cleanup || {}) },
+  gapLoop: { ...DEFAULT_AUTOPILOT.gapLoop, ...(p?.autopilot?.gapLoop || {}) },
+  diagnose: { ...DEFAULT_AUTOPILOT.diagnose, ...(p?.autopilot?.diagnose || {}) },
+  maintenance: Object.fromEntries(Object.entries(DEFAULT_AUTOPILOT.maintenance)
+    .map(([k, v]) => [k, { ...v, ...(p?.autopilot?.maintenance?.[k] || {}) }])),
 })
 
 const due = (at, everyMs, now) => !at || now - Date.parse(at) >= everyMs
@@ -90,9 +138,17 @@ export class Autopilot {
       run('ci', s.watchMainCI && due(st.ci, CI_EVERY_MS, now), () => this.watchCI(p, s))
       run('suggest', s.suggestHours > 0 && this.claudeAvailable() && due(st.suggest, s.suggestHours * 3600_000, now),
         () => this.suggest(p, s))
+      for (const [kind, m] of Object.entries(s.maintenance)) {
+        const key = `maintenance:${kind}`
+        run(key, m.hours > 0 && this.claudeAvailable() && due(st[key], m.hours * 3600_000, now),
+          () => this.maintain(p, s, kind))
+      }
       run('notes', this.claudeAvailable() && due(st.notes, NOTES_EVERY_MS, now), () => compactNotes(p))
       run('cleanup', s.cleanup.enabled && s.cleanup.mode === 'auto' && due(st.cleanup, CLEANUP_EVERY_MS, now),
         () => this.cleanup(p, s.cleanup))
+      // Sem intervalo: só dispara quando algum objetivo acabou de integrar.
+      run('gaps', s.gapLoop.enabled && this.claudeAvailable() && gapCandidates(p.path).length > 0,
+        () => this.gapLoop(p, s))
       run('digest', digestDue(s, st, now) && webhookUrl(p), () => this.digest(p, now))
       for (const src of listSearchSources(p)) {
         const min = Number(src.pollMinutes) || 0
@@ -135,7 +191,10 @@ export class Autopilot {
 
   // ponytail: gh síncrono (execFileSync), uma PR por vez — trava o event loop
   // alguns segundos a cada 3 min com muitas PRs abertas; vira execFile se pesar.
+  // Fila de merge das PRs: uma por tick. PR atrás da base é atualizada
+  // (update-branch) e só mergeia quando o CI passar de novo em cima da base atual.
   followPRs(p, s) {
+    let landed = false
     const tasks = listTasks(p.path).filter(t =>
       t.status === 'done' && t.run?.pr?.number && (t.run.pr.state ?? 'OPEN') === 'OPEN' && !this.busy(t.id))
     for (const t of tasks) {
@@ -186,15 +245,23 @@ export class Autopilot {
       if (!ciOk || sum.changesRequested || sum.conflicting) continue
       let diff = ''
       try { diff = fs.readFileSync(diffFile(p.path, t.id), 'utf8') } catch {}
-      if (autoMergeBlocker(p, { reviewApproved: t.run.review_approved, diff })) continue
+      if (landed || autoMergeBlocker(p, { reviewApproved: t.run.review_approved, diff })) continue
+      const base = gitSettings(p).baseBranch
+      if (isBehindBase(p.path, base, sum.sha)) {
+        try { updatePRBranch(p.path, n) } catch (e) { console.error(`autopilot: update-branch da PR #${n} falhou: ${e.message}`) }
+        continue
+      }
       try { mergePR(p.path, n) } catch (e) {
         console.error(`autopilot: merge da PR #${n} falhou: ${e.message}`)
         continue
       }
+      landed = true
+      let mergeSha = null
+      try { mergeSha = prMergeSha(p.path, n) } catch {}
       const u = updateTask(p.path, t.id, {
         status: 'archived',
         tags: [...new Set([...(t.tags || []), 'merged'])],
-        run: { pr: { ...t.run.pr, state: 'MERGED' } },
+        run: { pr: { ...t.run.pr, state: 'MERGED' }, merge_sha: mergeSha },
       })
       this.emit('task.moved', { projectId: p.id, taskId: t.id, from: 'done', to: 'archived' })
       this.emit('task.upserted', { projectId: p.id, task: u })
@@ -246,8 +313,11 @@ export class Autopilot {
     const run = latestRun(p.path, base)
     if (run?.conclusion !== 'failure' || !run.headSha) return
     const tag = `ci:${run.headSha.slice(0, 10)}`
-    if (tagsOf(listTasks(p.path)).has(tag)) return
+    const tasks = listTasks(p.path)
+    if (tagsOf(tasks).has(tag)) return
     const log = failedRunLog(p.path, run.url)
+    const culprit = tasks.find(t => t.run?.merge_sha === run.headSha && !(t.tags || []).includes(REVERTED_TAG))
+    if (culprit && this.revertMerge(p, culprit, run, log, tag)) return
     this.created(p, createTask(p.path, {
       title: `CI quebrado em ${base}: ${run.workflowName || 'workflow'}`,
       description: `O workflow **${run.workflowName || '?'}** falhou em \`${base}\` no commit \`${run.headSha.slice(0, 10)}\` ` +
@@ -257,19 +327,159 @@ export class Autopilot {
     }))
   }
 
-  async suggest(p, s) {
-    const tasks = listTasks(p.path)
-    const open = tasks.filter(t => (t.tags || []).includes(SUGGESTED_TAG) && ['backlog', 'todo', 'doing'].includes(t.status))
-    const room = s.suggestMax - open.length
+  // O CI da base quebrou no merge que o autopilot fez: reverte numa branch
+  // (merge local → a fila mergeia o revert como mergeou a task; PR → abre PR de
+  // revert) e reabre a task com o log. Devolve false se não deu (vira task de CI).
+  revertMerge(p, t, run, log, ciTag) {
+    const base = gitSettings(p).baseBranch
+    const viaPR = !!t.run?.pr
+    const branch = `kanban/revert-${t.id}`
+    const sha = run.headSha
+    let where, revertSha
+    try {
+      if (viaPR) fetchRemotes(p.path)
+      const onto = resolveRef(p.path, viaPR ? `origin/${base}` : base)
+      if (!onto) throw new Error(`base ${base} não encontrada`)
+      revertSha = revertOnBranch(p.path, sha, onto, branch)
+      if (viaPR) {
+        pushBranch(p.path, branch)
+        const url = createPR(p.path, {
+          base, head: branch, title: `Revert: ${t.title}`,
+          body: `O merge ${sha.slice(0, 10)} (task ${t.id}) quebrou o CI de \`${base}\`: ${run.url}\n\nRevert aberto pelo autopilot do claude-kanban.`,
+        })
+        where = `PR ${url} — precisa ser mergeada`
+        this.emit('task.attention', { projectId: p.id, taskId: t.id, reason: `merge quebrou o CI de ${base}; PR de revert aberta: ${url}` })
+      } else {
+        const res = mergeTaskBranch(p, branch)
+        where = `já mergeado em ${base}${res.pushed ? ' (com push)' : ''}`
+      }
+    } catch (e) {
+      console.error(`autopilot: revert de ${sha.slice(0, 10)} falhou: ${e.message}`)
+      return false
+    }
+    const ref = viaPR ? `origin/${base}` : base
+    const feedback = `O merge desta task em \`${base}\` (commit ${sha.slice(0, 10)}) quebrou o CI ([run](${run.url})) e foi ` +
+      `revertido automaticamente na branch \`${branch}\` (commit ${revertSha.slice(0, 10)}, ${where}).\n\n` +
+      `Antes de corrigir, nesta branch: \`${viaPR ? 'git fetch origin && ' : ''}git merge ${ref}\`. Se depois disso o commit ` +
+      `${revertSha.slice(0, 10)} estiver no histórico (\`git merge-base --is-ancestor ${revertSha.slice(0, 10)} HEAD\`), ` +
+      `rode \`git revert --no-edit ${revertSha.slice(0, 10)}\` para trazer seu trabalho de volta — senão ele some no próximo merge. ` +
+      `Então corrija a causa da falha, rode os testes e commite.` +
+      (log ? `\n\nCauda do log das etapas que falharam:\n\n\`\`\`\n${log}\n\`\`\`` : '')
+    const tags = [...new Set([...(t.tags || []).filter(x => x !== 'merged'), REVERTED_TAG, ciTag])]
+    const cur = updateTask(p.path, t.id, { tags })
+    this.reopen(p, cur, feedback, { merge_sha: null, pr: null, pr_rounds: 0 })
+    return true
+  }
+
+  suggest(p, s) {
+    return this.fromAnalysis(p, s, { tag: SUGGESTED_TAG, max: s.suggestMax, tags: sug => [sug.type, SUGGESTED_TAG] })
+  }
+
+  maintain(p, s, kind) {
+    const { type, question } = MAINTENANCE_TYPES[kind]
+    const tag = `${MAINTENANCE_TAG}:${kind}`
+    return this.fromAnalysis(p, s, {
+      tag, max: s.maintenance[kind].max, types: [type], question, tags: () => [type, MAINTENANCE_TAG, tag],
+    })
+  }
+
+  // Abre sugestões do analyzer até `max` tasks abertas com `tag`; dedupe por título.
+  async fromAnalysis(p, s, { tag, max, types = [], question = '', tags }) {
+    const open = listTasks(p.path).filter(t => (t.tags || []).includes(tag) && OPEN_STATUSES.includes(t.status))
+    const room = max - open.length
     if (room <= 0) return
-    const { suggestions } = await analyzeProject(p, [], '', false)
-    const titles = new Set(tasks.map(t => t.title.toLowerCase()))
-    for (const sug of suggestions.filter(x => !titles.has(x.title.toLowerCase())).slice(0, room)) {
+    const { suggestions } = await analyzeProject(p, types, question, false)
+    // Relê depois da análise: outro job pode ter criado tasks no meio.
+    const titles = new Set(listTasks(p.path).map(t => t.title.toLowerCase()))
+    const fresh = suggestions.filter(x => !titles.has(x.title.toLowerCase()) && titles.add(x.title.toLowerCase()))
+    for (const sug of fresh.slice(0, room)) {
       this.created(p, createTask(p.path, {
         title: sug.title, description: sug.description, priority: sug.priority,
-        tags: [sug.type, SUGGESTED_TAG], status: importStatus(s),
+        tags: tags(sug), status: importStatus(s),
       }))
     }
+  }
+
+  // ---- loop de objetivo: até a spec estar cumprida ----
+
+  async gapLoop(p, s) {
+    for (const goal of gapCandidates(p.path)) {
+      if (!this.busy(goal.id)) await this.auditGoal(p, s, goal)
+    }
+  }
+
+  // Uma rodada: audita o objetivo e abre as lacunas como filhas dele. O objetivo
+  // volta para todo dependendo delas e, quando concluírem, integra de novo (o
+  // runner marca gap_pending outra vez). Para sem lacunas, no teto de rodadas ou
+  // no goalBudgetUsd — nesses dois, evento goal.attention (webhook).
+  async auditGoal(p, s, goal) {
+    const tasks = listTasks(p.path)
+    const rounds = goal.run?.gap_rounds || 0
+    const note = text => appendToSection(p.path, goal.id, 'Resultado', `_Loop de lacunas: ${text}_`)
+    const settle = (patch, text, attention) => {
+      const t = updateTask(p.path, goal.id, { ...patch, run: { ...patch.run, gap_pending: false } })
+      note(text)
+      this.emit('task.upserted', { projectId: p.id, task: t })
+      if (attention) this.emit('goal.attention', { projectId: p.id, taskId: goal.id, reason: text })
+    }
+
+    const budget = goalBudget(p)
+    const spent = treeCost(tasks, goal.id)
+    if (budget && spent >= budget) {
+      return settle({}, `teto de custo do objetivo atingido (US$ ${spent.toFixed(2)} de US$ ${budget.toFixed(2)}) — ` +
+        'a auditoria da spec não rodou; precisa de um humano.', true)
+    }
+
+    const mine = tasks.filter(t => parentIdOf(t) === goal.id)
+    const known = mine.filter(t => (t.tags || []).includes(GAP_TAG))
+    const audit = cwd => findGaps(p, goal, cwd, known)
+    // O código do objetivo está na branch dele; se ela já foi mergeada e
+    // removida, na base.
+    let res
+    if (isGitRepo(p.path)) {
+      const sha = resolveRef(p.path, taskBranch(goal.id)) || resolveRef(p.path, gitSettings(p).baseBranch)
+      res = sha ? await withDetachedWorktree(p.path, sha, audit, '_gaps') : await audit(p.path)
+    } else {
+      res = await audit(p.path)
+    }
+    const run = { total_cost_usd: (goal.run?.total_cost_usd ?? goal.run?.cost_usd ?? 0) + (res.costUsd || 0) }
+
+    if (!res.gaps.length) {
+      return settle({ run, tags: [...new Set([...(goal.tags || []), SPEC_DONE_TAG])] },
+        `sem lacunas após ${rounds} rodada(s) — especificação cumprida.`)
+    }
+    const titles = new Set(mine.map(t => t.title.toLowerCase()))
+    const fresh = res.gaps.filter(g => !titles.has(g.title.toLowerCase()) && titles.add(g.title.toLowerCase()))
+    const list = res.gaps.map(g => `\n- ${g.title}`).join('')
+    if (!fresh.length) {
+      return settle({ run }, `as lacunas apontadas já tinham task e continuam abertas — precisa de um humano:${list}`, true)
+    }
+    if (rounds >= s.gapLoop.maxRounds) {
+      return settle({ run }, `teto de ${s.gapLoop.maxRounds} rodada(s) atingido e ainda faltam — precisa de um humano:${list}`, true)
+    }
+
+    // Em série, como no desmembramento: todas integram na mesma branch.
+    const created = []
+    for (const g of fresh) {
+      created.push(this.created(p, createTask(p.path, {
+        title: g.title,
+        description: `${g.description}\n\n_Lacuna apontada na auditoria da spec do objetivo "${goal.title}" (${goal.id}), rodada ${rounds + 1}._`,
+        priority: g.priority,
+        tags: [GAP_TAG, `pai:${goal.id}`, g.type],
+        status: importStatus(s),
+        depends_on: created.length ? [created[created.length - 1].id] : [],
+      })))
+    }
+    const t = updateTask(p.path, goal.id, {
+      status: 'todo', scheduled_at: null,
+      tags: (goal.tags || []).filter(x => x !== SPEC_DONE_TAG && x !== 'merged'),
+      depends_on: created.map(c => c.id),
+      run: { ...run, gap_pending: false, gap_rounds: rounds + 1, attempts: 0 },
+    })
+    note(`rodada ${rounds + 1} abriu ${created.length} lacuna(s):${created.map(c => `\n- ${c.id} — ${c.title}`).join('')}`)
+    clearExecuted(goal.id)
+    this.emit('task.moved', { projectId: p.id, taskId: goal.id, from: goal.status, to: 'todo' })
+    this.emit('task.upserted', { projectId: p.id, task: t })
   }
 
   digest(p, now) {
@@ -280,6 +490,13 @@ export class Autopilot {
       ...buildDigest(listTasks(p.path), now, p.autopilotState?.cleanupLast),
     })
   }
+}
+
+// Objetivos que acabaram de integrar (done, ou já mergeados) e esperam auditoria.
+export function gapCandidates(projectPath) {
+  let tasks = []
+  try { tasks = listTasks(projectPath) } catch {}
+  return tasks.filter(t => t.run?.gap_pending && isGoal(t) && ['done', 'archived'].includes(t.status))
 }
 
 const importStatus = s => (IMPORT_STATUSES.includes(s.importStatus) ? s.importStatus : 'backlog')

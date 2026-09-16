@@ -4,6 +4,7 @@ import { saveProjects, STATUSES } from '../lib/paths.js'
 import { bootstrapProject, uninstallGuardrails } from '../lib/bootstrap.js'
 import { DEFAULT_GIT, gitSettings } from '../lib/git.js'
 import { normalizeModel } from '../lib/models.js'
+import { MAINTENANCE_TYPES } from '../lib/autopilot.js'
 import { retrySettings, MAX_MAX_TURNS, RAW_MODES } from '../lib/runner.js'
 import { pluginsView, syncProjectPlugins, normalizeKeys, PLUGIN_KEYS } from '../lib/plugins.js'
 import { invalidModelMsg, withProject, withProjectRecord, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS } from './helpers.js'
@@ -68,6 +69,37 @@ export function applyAutopilot(p, input) {
     }
     next.cleanup = cl
   }
+  if (input.gapLoop !== undefined) {
+    const g = input.gapLoop || {}
+    const gl = { ...(next.gapLoop || {}) }
+    if (g.enabled !== undefined) gl.enabled = !!g.enabled
+    if (g.maxRounds !== undefined) {
+      const n = Number(g.maxRounds)
+      if (!intIn(n, 1, 20)) return 'autopilot.gapLoop.maxRounds deve ser um inteiro entre 1 e 20'
+      gl.maxRounds = n
+    }
+    next.gapLoop = gl
+  }
+  if (input.diagnose !== undefined) {
+    next.diagnose = { ...(next.diagnose || {}), enabled: !!input.diagnose?.enabled }
+  }
+  if (input.maintenance !== undefined) {
+    const m = input.maintenance || {}
+    if (typeof m !== 'object' || Array.isArray(m)) return 'autopilot.maintenance deve ser um objeto por tipo'
+    const mt = { ...(next.maintenance || {}) }
+    for (const [kind, v] of Object.entries(m)) {
+      if (!MAINTENANCE_TYPES[kind]) return `autopilot.maintenance: tipo desconhecido "${kind}" (${Object.keys(MAINTENANCE_TYPES).join(', ')})`
+      const cur = { ...(mt[kind] || {}) }
+      for (const [k, [min, max]] of Object.entries({ hours: [0, 720], max: [1, 50] })) {
+        if (v?.[k] === undefined) continue
+        const n = Number(v[k])
+        if (!intIn(n, min, max)) return `autopilot.maintenance.${kind}.${k} deve ser um inteiro entre ${min} e ${max}`
+        cur[k] = n
+      }
+      mt[kind] = cur
+    }
+    next.maintenance = mt
+  }
   p.autopilot = next
   return null
 }
@@ -116,7 +148,7 @@ export default function projectRoutes(app, ctx) {
     const p = withProjectRecord(ctx, req, reply); if (!p) return
     const { name, description, path: projectPath, skipPermissions, git, defaultModel, auxModel: auxModelIn,
       autoRun, autoDecompose, autoDecide, reviewGate, goalBudgetUsd, devServer, timeoutMs, enrichMode, rawMode, retry, maxTurns,
-      webhookUrl, webhookStatuses, verifyCommand, stuckDetection, sandbox, visualCheck, autopilot } = req.body || {}
+      webhookUrl, webhookStatuses, verifyCommand, acceptanceCommand, stuckDetection, sandbox, visualCheck, autopilot, guardrailPolicy } = req.body || {}
     if (name !== undefined) {
       if (!String(name).trim()) return reply.code(400).send({ error: 'name não pode ser vazio' })
       p.name = String(name).trim()
@@ -198,7 +230,12 @@ export default function projectRoutes(app, ctx) {
       p.retry = next
     }
     if (verifyCommand !== undefined) p.verifyCommand = String(verifyCommand || '').trim()
+    if (acceptanceCommand !== undefined) p.acceptanceCommand = String(acceptanceCommand || '').trim()
     if (stuckDetection !== undefined) p.stuckDetection = !!stuckDetection
+    if (guardrailPolicy !== undefined) {
+      if (!Array.isArray(guardrailPolicy)) return reply.code(400).send({ error: 'guardrailPolicy deve ser uma lista de padrões' })
+      p.guardrailPolicy = [...new Set(guardrailPolicy.map(x => String(x || '').trim()).filter(Boolean))]
+    }
     if (sandbox !== undefined) p.sandbox = !!sandbox
     if (visualCheck !== undefined) {
       const v = visualCheck || {}

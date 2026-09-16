@@ -165,7 +165,8 @@ function resolveStartPoint(root, base) {
 // para o agente ler por engano num Glob — nada ali ajuda a executar a task.
 // Tasks já concluídas ficam de fora pelo mesmo motivo: o board inteiro dentro do
 // contexto do agente é custo sem retorno.
-const WORKTREE_SKIP = ['logs', 'diffs', path.join('tasks', 'done'), path.join('tasks', 'archived')]
+// spec/ é versionada: vem da branch, não da cópia (possivelmente velha) do checkout principal.
+const WORKTREE_SKIP = ['logs', 'diffs', 'spec', path.join('tasks', 'done'), path.join('tasks', 'archived')]
   .map(p => path.join('.claude', 'claude-kanban', p))
 
 export function copyClaudeDir(root, dest) {
@@ -264,22 +265,50 @@ export function diffBase(ws) {
   try { return git(ws.cwd, 'merge-base', ws.startPoint, 'HEAD') } catch { return ws.startSha || null }
 }
 
+// Worktree novo não tem dependências: sem isso o verify da base falha por
+// "módulo não encontrado" e toda falha da task parece nova. Reaproveita os
+// node_modules do checkout (raiz e um nível abaixo, para monorepos).
+// ponytail: dependências da base podem diferir das do checkout; npm ci no
+// worktree se isso gerar falso positivo.
+function linkNodeModules(root, dir) {
+  const subs = ['', ...fs.readdirSync(root, { withFileTypes: true })
+    .filter(e => e.isDirectory() && e.name !== 'node_modules' && !e.name.startsWith('.')).map(e => e.name)]
+  for (const sub of subs) {
+    const src = path.join(root, sub, 'node_modules')
+    const dest = path.join(dir, sub, 'node_modules')
+    if (!fs.existsSync(src) || !fs.existsSync(path.dirname(dest)) || fs.existsSync(dest)) continue
+    try { fs.symlinkSync(src, dest, 'dir') } catch {}
+  }
+}
+
 // Roda fn(dir) num worktree destacado em `sha` e remove o worktree no fim.
 // Usado pelo verify de referência: saber se a base já falhava sem tocar no
 // checkout de ninguém.
-export function withDetachedWorktree(root, sha, fn) {
-  const dir = path.join(HOME_DIR, 'worktrees', '_baseline', `${path.basename(root)}-${sha.slice(0, 12)}`)
+// fn pode ser async (o loop de lacunas): aí a remoção espera a promise.
+export function withDetachedWorktree(root, sha, fn, kind = '_baseline') {
+  const dir = path.join(HOME_DIR, 'worktrees', kind, `${path.basename(root)}-${sha.slice(0, 12)}`)
   fs.rmSync(dir, { recursive: true, force: true })
   try { git(root, 'worktree', 'prune') } catch {}
   git(root, 'worktree', 'add', '--detach', dir, sha)
-  try {
-    return fn(dir)
-  } finally {
+  const remove = () => {
     try { git(root, 'worktree', 'remove', '--force', dir) } catch {
       fs.rmSync(dir, { recursive: true, force: true })
       try { git(root, 'worktree', 'prune') } catch {}
     }
   }
+  let res
+  try {
+    linkNodeModules(root, dir)
+    res = fn(dir)
+  } catch (e) { remove(); throw e }
+  if (typeof res?.then === 'function') return res.finally(remove)
+  remove()
+  return res
+}
+
+// sha de uma ref, ou null se ela não existe.
+export function resolveRef(root, ref) {
+  try { return git(root, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`) } catch { return null }
 }
 
 // Arquivos e linhas (+/-) tocados por um diff unificado — base da política de auto-merge.
@@ -375,32 +404,65 @@ export function mergeTaskBranch(project, branch, { noFF = true } = {}) {
   }
 }
 
-// Merge de `branch` em `into` sem checkout nenhum (merge-tree + commit-tree):
-// a branch de integração de uma task desmembrada não está checada em lugar
-// algum enquanto as filhas rodam. Fast-forward quando dá; conflito sobe
-// MergeConflictError e nada é escrito. Exige git >= 2.38.
-export function mergeIntoBranch(root, branch, into) {
+const isAncestor = (root, a, b) => {
+  try { git(root, 'merge-base', '--is-ancestor', a, b); return true } catch { return false }
+}
+
+// Resultado do merge de `branch` em `into`, sem escrever ref nenhuma (merge-tree +
+// commit-tree): { head, sha, merged, tested }. tested = a árvore resultante é a
+// da própria branch (fast-forward), que o gate da task já verificou. A fila de
+// merge roda o verify em cima de `sha` antes de gravar. Conflito sobe
+// MergeConflictError. Exige git >= 2.38.
+export function mergeResult(root, branch, into) {
   const head = git(root, 'rev-parse', into)
   const tip = git(root, 'rev-parse', branch)
-  if (head === tip) return { sha: head, merged: false }
-  const isAncestor = (a, b) => {
-    try { git(root, 'merge-base', '--is-ancestor', a, b); return true } catch { return false }
+  if (head === tip || isAncestor(root, tip, head)) return { head, sha: head, merged: false, tested: true }
+  if (isAncestor(root, head, tip)) return { head, sha: tip, merged: true, tested: true }
+  let tree
+  try {
+    tree = execFileSync('git', ['merge-tree', '--write-tree', head, tip],
+      { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n')[0].trim()
+  } catch (e) {
+    // Conflito: merge-tree sai com 1 e lista os arquivos no stdout.
+    throw new MergeConflictError((e.stdout || e.message).toString().trim())
   }
-  if (isAncestor(tip, head)) return { sha: head, merged: false }
-  let sha = tip
-  if (!isAncestor(head, tip)) {
-    let tree
-    try {
-      tree = execFileSync('git', ['merge-tree', '--write-tree', head, tip],
-        { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n')[0].trim()
-    } catch (e) {
-      // Conflito: merge-tree sai com 1 e lista os arquivos no stdout.
-      throw new MergeConflictError((e.stdout || e.message).toString().trim())
-    }
-    sha = git(root, 'commit-tree', tree, '-p', head, '-p', tip, '-m', `Merge branch '${branch}' into ${into} (claude-kanban)`)
-  }
-  git(root, 'update-ref', `refs/heads/${into}`, sha, head)
-  return { sha, merged: true }
+  const sha = git(root, 'commit-tree', tree, '-p', head, '-p', tip, '-m', `Merge branch '${branch}' into ${into} (claude-kanban)`)
+  return { head, sha, merged: true, tested: false }
+}
+
+// Merge de `branch` em `into` sem checkout nenhum: a branch de integração de uma
+// task desmembrada não está checada em lugar algum enquanto as filhas rodam.
+// Fast-forward quando dá; conflito sobe MergeConflictError e nada é escrito.
+export function mergeIntoBranch(root, branch, into) {
+  const r = mergeResult(root, branch, into)
+  if (r.merged) git(root, 'update-ref', `refs/heads/${into}`, r.sha, r.head)
+  return { sha: r.sha, merged: r.merged }
+}
+
+// A base remota (origin/<base>) não está contida em `sha`? Para a fila de merge
+// das PRs: branch atrás da base é atualizada antes do merge. Sem remote, ou sem o
+// commit localmente, responde false (não há como saber).
+export function isBehindBase(root, base, sha) {
+  try { fetchRemotes(root) } catch {}
+  const ref = remoteBranchRef(root, base)
+  if (!ref || !resolveRef(root, sha)) return false
+  return !isAncestor(root, ref, sha)
+}
+
+// Revert de `sha` (merge ou commit simples) em cima de `onto`, gravado na branch
+// `branch` — nada muda na base aqui. Devolve o sha do commit de revert.
+export function revertOnBranch(root, sha, onto, branch) {
+  const parents = git(root, 'rev-list', '--parents', '-n', '1', sha).split(' ').length - 1
+  return withDetachedWorktree(root, onto, dir => {
+    git(dir, 'revert', '--no-edit', ...(parents > 1 ? ['-m', '1'] : []), sha)
+    const head = git(dir, 'rev-parse', 'HEAD')
+    git(root, 'branch', '-f', branch, head)
+    return head
+  }, '_revert')
+}
+
+export function pushBranch(root, branch) {
+  git(root, 'push', '-u', 'origin', branch)
 }
 
 // Descarta o trabalho da task: apaga a branch local (e o worktree, se sobrou).

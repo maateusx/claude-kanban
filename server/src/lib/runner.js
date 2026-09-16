@@ -1,12 +1,14 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync, exec } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadState, saveState, diffFile, logFile, kanbanDir } from './paths.js'
 import { findTask, updateTask, appendToSection, listTasks, createTask, getSection, removeSection, replaceSection } from './tasks.js'
-import { decomposeTask, subtaskLevel, MAX_DECOMPOSE_LEVEL } from './decomposer.js'
+import { decomposeTask, subtaskLevel, designSubtask, MAX_DECOMPOSE_LEVEL } from './decomposer.js'
+import { specBlock, needsDesign, SPEC_REL, DESIGN_TAG } from './spec.js'
+import { diagnoseTask, DIAGNOSED_PREFIX } from './diagnoser.js'
 import {
   prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, taskBranch,
-  mergeTaskBranch, withDetachedWorktree, diffStats, diffBase,
+  mergeTaskBranch, withDetachedWorktree, diffStats, diffBase, mergeResult, resolveRef,
 } from './git.js'
 import { reviewTask, screenshotApp } from './reviewer.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
@@ -87,6 +89,8 @@ const FAIL_RE = /\b(fail|failed|failing|failure|error|errors)\b|✖|✗|\bnot ok
 const normLine = l => l.replace(/\(?\d+(\.\d+)?\s?m?s\)?/g, '').replace(/\s+/g, ' ').trim()
 const failLines = out => new Set(String(out).split('\n').filter(l => FAIL_RE.test(l)).map(normLine))
 
+const BASE_DIR_MARK = '\0base-dir\0'
+
 // Falhas da task que a base não tinha. [] = tudo que falhou já falhava antes.
 export function newFailures(taskOut, baseOut) {
   const mine = failLines(taskOut)
@@ -150,7 +154,7 @@ export const MAX_AUTO_DECISIONS = 3
 // contrário de human-request, não tira a task do auto-pilot).
 export const AUTO_DECIDED_TAG = 'auto-decided'
 const AUTO_DECIDE_MARK = '[auto-decisão]'
-export const AUTO_DECIDE_RESPONSE = `${AUTO_DECIDE_MARK} Nenhum humano foi consultado: o projeto está com auto-decisão ligada. Assuma a opção que você mesmo recomendou (na falta de recomendação explícita, a mais simples e reversível), registre a escolha e o porquê em "## Resultado" e siga em frente.`
+export const AUTO_DECIDE_RESPONSE = `${AUTO_DECIDE_MARK} Nenhum humano foi consultado: o projeto está com auto-decisão ligada. Decida com base na spec e nos ADRs existentes (${SPEC_REL}/); se eles não cobrirem, assuma a opção que você mesmo recomendou (na falta de recomendação explícita, a mais simples e reversível). Registre a decisão como novo ADR (${SPEC_REL}/adr/NNNN-titulo.md) e em "## Resultado", e siga em frente.`
 
 // Quantas vezes esta task já foi decidida sozinha (o par pergunta/resposta fica
 // arquivado no histórico a cada retomada).
@@ -186,6 +190,8 @@ export function consumeHumanAnswer(projectPath, taskId) {
   return { request, response }
 }
 const MAX_CONCURRENCY = 8
+// Diagnósticos automáticos por task (autopilot.diagnose); passou disso, fica blocked.
+export const MAX_DIAGNOSES = 2
 
 // Árvore de tasks: a decomposição marca as filhas com `pai:<id>` e o pai com
 // `decomposta`. O pai fica em todo dependendo de todas as filhas (o gate de
@@ -197,6 +203,8 @@ export const REPLANNED_TAG = 'replanejada'
 export const INTEGRATED_TAG = 'integrada'
 
 export const parentIdOf = task => (task?.tags || []).find(t => t.startsWith('pai:'))?.slice(4) || null
+// Objetivo: task raiz que foi desmembrada — a que o loop de lacunas audita.
+export const isGoal = task => !!task?.tags?.includes(DECOMPOSED_TAG) && !parentIdOf(task)
 const withTag = (tags, tag) => (tags || []).includes(tag) ? (tags || []) : [...(tags || []), tag]
 const taskCost = t => t.run?.total_cost_usd ?? t.run?.cost_usd ?? 0
 
@@ -255,8 +263,44 @@ ${notes}
 
 const MAX_CHILD_RESULT = 1500
 
+// Critérios de aceite como teste: a subtask de desenho escreve os testes (em
+// skip) e registra o comando em "## Comando de aceite"; o servidor copia para o
+// `acceptance_command` do objetivo, que só conclui com ele passando.
+export const ACCEPTANCE_SECTION = 'Comando de aceite'
+// Task com tag bug: a sessão escreve antes um teste que reproduz e registra o
+// comando aqui; o servidor confere que ele falha na base e passa na branch.
+export const BUG_TAG = 'bug'
+export const REPRO_SECTION = 'Teste de reprodução'
+
+// Comando registrado numa seção: o primeiro bloco ``` ou o texto da seção.
+export function sectionCommand(body, name) {
+  const s = getSection(body, name)
+  const m = s.match(/```[^\n]*\n([\s\S]*?)```/)
+  return (m ? m[1] : s).trim().replace(/^`+|`+$/g, '').trim()
+}
+
+// Comando de aceite que vale para a task: o dela, ou o do projeto se ela é objetivo.
+export const acceptanceCommandOf = (project, task) =>
+  String(task?.acceptance_command || (isGoal(task) ? project?.acceptanceCommand : '') || '').trim()
+
+// Arquivos de teste de um diff — os que vão para a base na checagem do bug.
+// ponytail: heurística por caminho; lista explícita na seção se errar muito.
+const TEST_FILE_RE = /(^|\/)(tests?|__tests__|specs?|e2e)\/|[._-](test|spec)\.[^/]+$/
+export const testFiles = files => files.filter(f => !f.startsWith('.claude/') && TEST_FILE_RE.test(f))
+
+function bugBlock(task) {
+  if (!task.tags?.includes(BUG_TAG)) return ''
+  return `
+Esta task é um BUG. Antes de corrigir, escreva um teste automatizado que
+reproduz o problema (ele deve FALHAR sem a correção) e registre no arquivo da
+task uma seção "## ${REPRO_SECTION}" com o comando que roda só esse teste, num
+bloco \`\`\`. O servidor roda esse comando na base (com seus arquivos de teste
+copiados) e na sua branch: se ele não falhar na base, a task volta para você.
+`
+}
+
 // Contexto do run de integração de uma task desmembrada: o que cada filha fez.
-function integrationBlock(tasks, parentId) {
+function integrationBlock(tasks, parentId, acceptance = '') {
   const children = tasks.filter(t => parentIdOf(t) === parentId)
   if (!children.length) return ''
   const list = children.map(c => {
@@ -268,7 +312,10 @@ Esta task foi desmembrada em subtasks, que JÁ foram executadas e mergeadas na
 branch em que você está. Este é o run de INTEGRAÇÃO: confira se o conjunto
 entrega o que a descrição original pede — rode build e testes, corrija as
 costuras entre as partes e complete o que ficou faltando. Não refaça o que já
-está pronto.
+está pronto. Confira também se o código segue a spec (${SPEC_REL}/) e atualize
+nela o que mudou durante a execução.${acceptance ? `
+O objetivo só conclui se o comando de aceite passar: \`${acceptance}\`. Tire
+o skip/pendente dos testes de aceite que ainda estiverem marcados e faça-os passar.` : ''}
 
 <subtasks>
 ${list}
@@ -296,15 +343,23 @@ export function runVerify(command, cwd) {
     cwd, shell: true, encoding: 'utf8',
     timeout: VERIFY_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
   })
-  const out = [res.stdout, res.stderr].filter(Boolean).join('\n').trim()
-  const failedToRun = !!res.error
-  const output = (failedToRun ? `${out}\n${res.error.message}`.trim() : out).slice(-MAX_VERIFY_OUTPUT)
-  return {
-    command,
-    ok: !failedToRun && res.status === 0,
-    exitCode: failedToRun ? -1 : res.status,
-    output: output || '(sem saída)',
-  }
+  return verifyResult(command, res.stdout, res.stderr, res.error ? -1 : res.status, res.error?.message)
+}
+
+// Mesmo verify sem travar o event loop — a fila de merge roda enquanto a UI acompanha.
+export function runVerifyAsync(command, cwd) {
+  return new Promise(resolve => exec(command, {
+    cwd, encoding: 'utf8', timeout: VERIFY_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
+  }, (err, stdout, stderr) => {
+    const code = !err ? 0 : typeof err.code === 'number' ? err.code : -1
+    resolve(verifyResult(command, stdout, stderr, code, code === -1 ? err.message : null))
+  }))
+}
+
+function verifyResult(command, stdout, stderr, exitCode, error) {
+  const out = [stdout, stderr].filter(Boolean).join('\n').trim()
+  const output = (error ? `${out}\n${error}`.trim() : out).slice(-MAX_VERIFY_OUTPUT)
+  return { command, ok: exitCode === 0, exitCode, output: output || '(sem saída)' }
 }
 
 // Teto do log persistido por task. Um run longo com tool_results grandes passa
@@ -330,6 +385,11 @@ export class Runner {
     this.pausedUntil = state.pausedUntil || null
     this.actives = new Map()        // taskId -> { projectId, taskId, child, timer, ... }
     this.baselines = new Map()      // `${projectId}:${sha}:${cmd}` -> resultado do verify na base
+    this.diagnosing = new Map()     // taskId -> promise do diagnóstico em andamento
+    // Fila de merge (estilo bors): branches concluídas entram na base/no pai uma
+    // de cada vez. [{ projectId, taskId, branch, into, kind: 'base'|'parent', stage }]
+    this.mergeQueue = (state.mergeQueue || []).map(m => ({ ...m, stage: null }))
+    this.mergeDrain = null          // promise do processamento em andamento
   }
 
   persist() {
@@ -338,6 +398,7 @@ export class Runner {
       maxConcurrency: this.maxConcurrency,
       paused: this.paused,
       pausedUntil: this.pausedUntil,
+      mergeQueue: this.mergeQueue,
     })
   }
 
@@ -432,6 +493,7 @@ export class Runner {
   dropProject(projectId) {
     const dropped = this.queue.filter(q => q.projectId === projectId)
     this.queue = this.queue.filter(q => q.projectId !== projectId)
+    this.mergeQueue = this.mergeQueue.filter(m => m.projectId !== projectId || m.stage)
     for (const a of [...this.actives.values()]) {
       if (a.projectId === projectId) this.kill(a.taskId)
     }
@@ -469,6 +531,7 @@ export class Runner {
       maxConcurrency: this.maxConcurrency,
       paused: this.paused,
       pausedUntil: this.pausedUntil,
+      merges: this.mergeQueue,
     }
   }
 
@@ -500,6 +563,8 @@ export class Runner {
     return task.depends_on.filter(id => {
       const dep = byId.get(id)
       if (!dep) return false
+      // Concluída mas ainda na fila de merge: o pai não parte sem o código dela.
+      if (this.mergeQueue.some(m => m.taskId === id)) return true
       return dep.status !== 'done' && dep.status !== 'archived' && !wasSucceeded(id)
     })
   }
@@ -635,14 +700,15 @@ export class Runner {
       : resumeFrom
       ? buildResumePrompt(taskRelPath, answer, workspace.branch, promptGit(project, task), !!project.autoDecide)
       : buildPrompt(taskRelPath, md, workspace.branch, promptGit(project, task), enrichMode, answer, !!project.autoDecide,
-        notesBlock(project.path) + conflictBlock(task.run?.merge_from)
-        + (task.tags?.includes(DECOMPOSED_TAG) ? integrationBlock(listTasks(project.path), taskId) : ''))
+        notesBlock(project.path) + specBlock(workspace.cwd || project.path, task) + conflictBlock(task.run?.merge_from)
+        + (task.tags?.includes(DECOMPOSED_TAG) ? integrationBlock(listTasks(project.path), taskId, acceptanceCommandOf(project, task)) : '')
+        + bugBlock(task))
 
     // O Claude Code não auto-aprova edits em .claude/ mesmo com acceptEdits.
     // Como as tasks vivem em .claude/claude-kanban/tasks/, liberamos Edit/Write
     // desse caminho explicitamente para o modelo poder preencher o ## Resultado.
-    const kanbanGlob = '.claude/claude-kanban/tasks/**'
-    const allowRules = [`Edit(${kanbanGlob})`, `Write(${kanbanGlob})`]
+    const allowRules = ['.claude/claude-kanban/tasks/**', `${SPEC_REL}/**`]
+      .flatMap(glob => [`Edit(${glob})`, `Write(${glob})`])
     const allowedTools = [project.allowedTools, ...allowRules].filter(Boolean).join(' ')
 
     const turns = turnLimit(project)
@@ -795,20 +861,29 @@ export class Runner {
     const parent = findTask(project.path, a.taskId)
     const level = subtaskLevel(parent) + 1
     const created = []
-    for (const s of res.subtasks) {
+    // deps: índices (na lista final) de que cada subtask depende. Com desenho, ele
+    // vem primeiro e as subtasks sem dependência passam a esperar por ele.
+    const design = needsDesign(parent, level - 1)
+    const subtasks = design
+      ? [{ ...designSubtask(parent), deps: [] },
+        ...res.subtasks.map(s => ({ ...s, deps: s.deps?.length ? s.deps.map(d => d + 1) : [0] }))]
+      : res.subtasks
+    for (const [i, s] of subtasks.entries()) {
       const t = createTask(project.path, {
         title: s.title,
         description: `${s.description}\n\n_Subtask desmembrada de "${parent.title}" (${parent.id})._`,
         priority: s.priority,
-        tags: ['subtask', `pai:${parent.id}`, `nivel:${level}`],
+        tags: ['subtask', `pai:${parent.id}`, `nivel:${level}`, ...(s.tags || [])],
         status: 'todo',
         model: parent.model || null,
         // null = deixa o autoDecompose do projeto decidir se essa subtask ainda
         // vale quebrar; no último nível fecha a porta para não descer infinito.
-        decompose: level >= MAX_DECOMPOSE_LEVEL ? false : null,
-        // O modelo devolve as subtasks já ordenadas por dependência: encadeamos em
-        // série para a fila respeitar essa ordem (a 3ª não roda antes da 1ª).
-        depends_on: created.length ? [created[created.length - 1].id] : [],
+        decompose: s.decompose ?? (level >= MAX_DECOMPOSE_LEVEL ? false : null),
+        // Grafo validado pelo decomposer (sem ciclo); sem ele, série na ordem da
+        // lista. Subtasks sem dependência entre si rodam em paralelo (worktrees),
+        // todas partindo de kanban/<pai> — que já tem o que as dependências
+        // integraram.
+        depends_on: (s.deps || (i ? [i - 1] : [])).map(d => created[d].id),
       })
       created.push(t)
       this.emit('task.upserted', { projectId: a.projectId, task: t })
@@ -872,21 +947,82 @@ export class Runner {
     return events.slice(-MAX_LOG_EVENTS)
   }
 
-  // Gate de verificação: `exit 0` do claude não basta para virar done se o
-  // projeto define um comando (testes/lint). Roda no worktree da task, antes
-  // do cleanup, e o resultado vai para o log do run (visível no drawer).
+  // Gate de verificação: `exit 0` do claude não basta para virar done. Roda,
+  // no worktree da task e antes do cleanup, o verifyCommand do projeto, o
+  // comando de aceite (objetivo) e a checagem do teste de reprodução (bug);
+  // para no primeiro que reprova. Cada um vai para o log do run como `verify`.
   verifyGate(a, project, exitCode) {
-    const verifyCommand = String(project.verifyCommand || '').trim()
     a.verify = null
-    if (exitCode !== 0 || a.killed || a.timedOut || !verifyCommand) return null
-    let verify = runVerify(verifyCommand, a.workspace.cwd)
-    if (!verify.ok) verify = this.compareWithBaseline(project, a.workspace, verify)
-    a.verify = verify
-    this.logEvent(a, {
-      type: 'verify', command: verify.command, ok: verify.ok, exitCode: verify.exitCode,
-      text: verify.preexisting ? `[as falhas abaixo já existiam na base — não contam contra a task]\n\n${verify.output}` : verify.output,
-    })
-    return verify
+    a.evidence = []
+    if (exitCode !== 0 || a.killed || a.timedOut) return null
+    const task = findTask(project.path, a.taskId)
+    const checks = [
+      () => {
+        const cmd = String(project.verifyCommand || '').trim()
+        if (!cmd) return null
+        const v = runVerify(cmd, a.workspace.cwd)
+        return v.ok ? v : this.compareWithBaseline(project, a.workspace, v)
+      },
+      () => {
+        const cmd = acceptanceCommandOf(project, task)
+        if (!cmd) return null
+        const v = { ...runVerify(cmd, a.workspace.cwd), acceptance: true }
+        a.evidence.push(`Testes de aceite (\`${cmd}\`): ${v.ok ? 'passaram' : 'FALHARAM'}.\n${v.output.slice(-2000)}`)
+        return v
+      },
+      () => task?.tags?.includes(BUG_TAG) && !a.rawPhase ? this.reproCheck(a, project) : null,
+    ]
+    for (const check of checks) {
+      const v = check()
+      if (!v) continue
+      a.verify = v
+      this.logEvent(a, {
+        type: 'verify', command: v.command, ok: v.ok, exitCode: v.exitCode,
+        text: v.preexisting ? `[as falhas abaixo já existiam na base — não contam contra a task]\n\n${v.output}` : v.output,
+      })
+      if (!v.ok) break
+    }
+    return a.verify
+  }
+
+  // Bug: o teste registrado em "## Teste de reprodução" tem de passar na branch
+  // e falhar na base — rodado no worktree destacado do verify de referência,
+  // com os arquivos de teste da branch copiados (senão "arquivo não existe"
+  // contaria como reprodução).
+  reproCheck(a, project) {
+    const ws = a.workspace
+    let md = ''
+    try { md = fs.readFileSync(path.join(ws.cwd, a.taskRelPath), 'utf8') } catch {}
+    const command = sectionCommand(md || findTask(project.path, a.taskId)?.body, REPRO_SECTION)
+    const fail = (output, exitCode = 1) => ({ command: command || 'teste de reprodução', ok: false, exitCode, output })
+    if (!command) {
+      return fail(`Task com tag \`${BUG_TAG}\` sem teste que reproduz o bug. Escreva primeiro um teste que falha sem a ` +
+        `correção e registre o comando que o roda na seção "## ${REPRO_SECTION}" do arquivo da task.`)
+    }
+    const mine = runVerify(command, ws.cwd)
+    if (!mine.ok) return fail(`O teste de reprodução não passa na branch:\n\n${mine.output}`, mine.exitCode)
+    const sha = ws.baseSha
+    if (!sha || !isGitRepo(project.path)) return { ...mine, output: `(sem base git para conferir a reprodução)\n\n${mine.output}` }
+    let files = []
+    try { files = testFiles(diffStats(captureDiff(ws.cwd, diffBase(ws))).files) } catch {}
+    let base
+    try {
+      base = withDetachedWorktree(project.path, sha, dir => {
+        for (const f of files) {
+          const src = path.join(ws.cwd, f)
+          if (!fs.existsSync(src)) continue
+          fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true })
+          fs.copyFileSync(src, path.join(dir, f))
+        }
+        return runVerify(command, dir)
+      }, '_repro')
+    } catch (e) { return { ...mine, output: `(não consegui rodar na base: ${e.message})\n\n${mine.output}` } }
+    a.evidence.push(`Teste de reprodução (\`${command}\`): falha na base ${sha.slice(0, 8)}: ${!base.ok ? 'sim' : 'NÃO'}; passa na branch: sim.`)
+    if (base.ok) {
+      return fail(`O teste de reprodução \`${command}\` passa na base ${sha.slice(0, 8)} — ele não reproduz o bug. ` +
+        `Escreva um teste que falhe sem a correção.\n\n${base.output}`)
+    }
+    return { ...mine, output: `Falha na base ${sha.slice(0, 8)} e passa na branch.\n\n${mine.output}` }
   }
 
   // Verify de referência: a base (de onde a branch saiu) roda o mesmo comando
@@ -901,12 +1037,19 @@ export class Runner {
     if (!this.baselines.has(key)) {
       if (this.baselines.size > 50) this.baselines.clear()
       let res = null
-      try { res = withDetachedWorktree(project.path, sha, dir => runVerify(verify.command, dir)) } catch {}
+      // o caminho do worktree da base vira um marcador (o cache serve a tasks em cwds diferentes)
+      try {
+        res = withDetachedWorktree(project.path, sha, dir => {
+          const r = runVerify(verify.command, dir)
+          return { ...r, output: r.output.split(dir).join(BASE_DIR_MARK) }
+        })
+      } catch {}
       this.baselines.set(key, res)
     }
     const base = this.baselines.get(key)
     if (!base || base.ok) return verify
-    const fresh = newFailures(verify.output, base.output)
+    // sem isso toda linha com caminho absoluto parece falha nova
+    const fresh = newFailures(verify.output, base.output.split(BASE_DIR_MARK).join(workspace.cwd || project.path))
     if (!fresh.length) return { ...verify, ok: true, preexisting: true }
     const head = `Falhas novas — a base ${sha.slice(0, 8)} já falhava, mas não nestas linhas:\n${fresh.join('\n')}\n\n`
     return { ...verify, output: head + verify.output.slice(-(MAX_VERIFY_OUTPUT - head.length)) }
@@ -949,7 +1092,7 @@ export class Runner {
       this.logEvent(a, { type: 'raw', text: shot.path ? `[revisão] screenshot: ${shot.path}` : `[revisão] sem screenshot: ${shot.error}` })
     }
     try {
-      a.review = await reviewTask(project, { title, body: md }, diff, a.workspace.cwd, shot?.path)
+      a.review = await reviewTask(project, { title, body: md }, diff, a.workspace.cwd, shot?.path, a.evidence)
     } finally {
       if (shot?.path) fs.rmSync(shot.path, { force: true })
     }
@@ -968,7 +1111,119 @@ export class Runner {
       return true
     }
     patch.tags = withTag(patch.tags || task.tags, 'blocked')
+    // Com autopilot.diagnose, o blocked é provisório: o diagnóstico roda logo
+    // depois do updateTask do chamador e decide o que fazer com a task.
+    if (project.autopilot?.diagnose?.enabled && (task.run?.diagnoses || 0) < MAX_DIAGNOSES
+      && !this.diagnosing.has(task.id)) {
+      this.diagnosing.set(task.id, new Promise(r => setImmediate(r))
+        .then(() => this.diagnose(project, task.id))
+        .catch(() => {})
+        .finally(() => this.diagnosing.delete(task.id)))
+    }
     return false
+  }
+
+  // Diagnóstico da falha (lib/diagnoser.js) e a ação para cada causa. Falhar
+  // aqui deixa a task como estava: blocked.
+  async diagnose(project, taskId) {
+    const task = findTask(project.path, taskId)
+    if (!task?.tags?.includes('blocked')) return
+    let diff = ''
+    try { diff = fs.readFileSync(diffFile(project.path, taskId), 'utf8') } catch {}
+    const open = listTasks(project.path).filter(t => t.id !== taskId && !['done', 'archived'].includes(t.status))
+    const n = (task.run?.diagnoses || 0) + 1
+    const now = () => new Date().toISOString()
+    let dx
+    try {
+      dx = await diagnoseTask(project, task, diff, open)
+    } catch (e) {
+      updateTask(project.path, taskId, { run: { diagnoses: n } })
+      appendToSection(project.path, taskId, 'Log de erros', `[${now()}] Diagnóstico automático falhou: ${e.message}`)
+      return
+    }
+    const cur = findTask(project.path, taskId)
+    const tags = withTag(cur.tags, DIAGNOSED_PREFIX + dx.cause)
+    const run = { diagnoses: n, total_cost_usd: taskCost(cur) + (dx.costUsd || 0) }
+    // Volta para a fila do zero (as tentativas que levaram ao diagnóstico não contam).
+    const unblock = { tags: tags.filter(t => t !== 'blocked'), run: { ...run, attempts: 0 }, scheduled_at: null }
+    const spawnTask = (fallbackTitle, extraTags) => {
+      const t = createTask(project.path, {
+        title: dx.task?.title || fallbackTitle,
+        description: `${dx.task?.description || dx.summary}\n\n_Criada pelo diagnóstico da task "${cur.title}" (${taskId})._`,
+        priority: 'urgent', status: 'todo', tags: ['diagnostico', ...extraTags],
+      })
+      this.emit('task.upserted', { projectId: project.id, task: t })
+      return t
+    }
+    const dependOn = id => ({ ...unblock, depends_on: [...new Set([...(cur.depends_on || []), id])] })
+
+    let patch
+    let action
+    switch (dx.cause) {
+      case 'ambiente': {
+        const t = spawnTask(`Preparar ambiente para "${cur.title}"`, [])
+        patch = dependOn(t.id)
+        action = `criada a task pré-requisito ${t.id} (urgent); esta espera por ela.`
+        break
+      }
+      case 'flaky': {
+        const v = this.rerunVerify(project, cur)
+        if (v?.ok) {
+          patch = unblock
+          action = `o verify (\`${v.command}\`) passou ao rodar de novo na branch; nova tentativa.`
+        } else if (v) {
+          const t = spawnTask(`Corrigir ou pôr em quarentena teste instável (${cur.title})`, ['flaky'])
+          patch = dependOn(t.id)
+          action = `o verify falhou de novo; criada a task ${t.id} para corrigir/quarentenar o teste.`
+        } else {
+          patch = unblock
+          action = 'sem verify para repetir; nova tentativa.'
+        }
+        break
+      }
+      case 'spec_ambigua':
+        patch = {
+          ...unblock, tags: withTag(unblock.tags, AUTO_DECIDED_TAG),
+          body: replaceSection(cur.body, 'Human Response', `${AUTO_DECIDE_RESPONSE}\n\nDiagnóstico: ${dx.summary}`),
+        }
+        action = 'a sessão seguinte decide pela spec/ADRs e registra um ADR.'
+        break
+      case 'grande_demais':
+        // decompose: true força o desmembramento mesmo acima de MAX_DECOMPOSE_LEVEL.
+        patch = { ...unblock, decompose: true }
+        action = 'a task será desmembrada de novo.'
+        break
+      case 'falta_dependencia': {
+        const dep = dx.dependsOn && open.find(t => t.id === dx.dependsOn)
+        if (dep) {
+          patch = dependOn(dep.id)
+          action = `esta task passa a depender de ${dep.id} (${dep.title}).`
+        } else if (dx.task) {
+          const t = spawnTask(dx.task.title, [])
+          patch = dependOn(t.id)
+          action = `criada a task ${t.id} com o que falta; esta espera por ela.`
+        }
+        break
+      }
+    }
+    if (!patch) {
+      // externo (ou dependência sem task identificável): precisa de gente.
+      patch = { tags, run }
+      action = 'precisa de um humano — continua blocked.'
+      this.emit('task.attention', { projectId: project.id, taskId, reason: `${dx.cause}: ${dx.summary}` })
+    }
+    const updated = updateTask(project.path, taskId, patch)
+    appendToSection(project.path, taskId, 'Log de erros',
+      `[${now()}] Diagnóstico automático (${n}/${MAX_DIAGNOSES}): **${dx.cause}** — ${dx.summary}\nAção: ${action}`)
+    this.emit('task.upserted', { projectId: project.id, task: updated })
+  }
+
+  // Repete o verifyCommand na branch da task (o worktree dela já foi removido).
+  rerunVerify(project, task) {
+    const cmd = String(project.verifyCommand || '').trim()
+    const branch = task.run?.branch
+    if (!cmd || !branch || !isGitRepo(project.path)) return null
+    try { return withDetachedWorktree(project.path, branch, dir => runVerify(cmd, dir), '_flaky') } catch { return null }
   }
 
   finish(a, exitCode) {
@@ -1031,7 +1286,6 @@ export class Runner {
     }
 
     const task = prev
-    let integrateError = null
     const attempts = task?.run?.attempts || 0
     // Teto de turnos estourado: a sessão parou no meio, não falhou por acaso.
     // Re-executar do zero gastaria tudo de novo para parar no mesmo lugar, então
@@ -1136,35 +1390,27 @@ export class Runner {
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
       })
-    } else if (exitCode === 0 && !a.timedOut && (integrateError = this.integrate(project, task, a.workspace))) {
-      // A subtask passou, mas não entrou na branch do pai. Repetir do zero não
-      // resolve conflito: uma sessão mergeia a branch do pai na da task e resolve;
-      // se já tentou demais, vai para revisão humana (o pai segue esperando).
-      const into = taskBranch(parentIdOf(task))
-      const resolving = this.scheduleConflictFix(project, task, into, { ...runMeta, exit_reason: 'integration_conflict' },
-        `Não consegui mergear ${a.workspace.branch} na branch da task pai: ${integrateError}`)
-      this.emit('run.finished', {
-        projectId: a.projectId, taskId: a.taskId, exitCode: resolving ? 0 : -1, exitReason: 'integration_conflict',
-        conflictResolving: resolving,
-        costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
-        numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
-      })
-      if (resolving) this.enqueue(a.projectId, a.taskId)
     } else if (exitCode === 0 && !a.timedOut) {
       // No modo cru o agente não sabe do arquivo da task: a resposta final da
       // sessão vira o "## Resultado".
       if (a.rawPhase && r.result?.trim()) {
         updateTask(project.path, a.taskId, { body: replaceSection(task.body, 'Resultado', r.result.trim()) })
       }
-      let tags = (task.tags || []).filter(t => t !== CONFLICT_TAG)
-      if (parentIdOf(task) && a.workspace.branch) tags = withTag(tags, INTEGRATED_TAG)
+      const tags = (task.tags || []).filter(t => t !== CONFLICT_TAG)
       // O feedback da PR já foi atendido nesta execução.
       const cur = findTask(project.path, a.taskId)
       const done = updateTask(project.path, a.taskId, {
-        status: 'done', tags, run: { ...runMeta, merge_from: null },
+        status: 'done', tags,
+        // Objetivo integrado: o autopilot (gapLoop) confere a spec e abre as lacunas.
+        run: { ...runMeta, merge_from: null, ...(isGoal(task) ? { gap_pending: true } : {}) },
         ...(getSection(cur?.body, PR_FEEDBACK) ? { body: removeSection(cur.body, PR_FEEDBACK) } : {}),
       })
       try { harvestNotes(project.path, done) } catch {}
+      const acceptance = task.tags?.includes(DESIGN_TAG) && parentIdOf(task) && sectionCommand(done.body, ACCEPTANCE_SECTION)
+      if (acceptance) {
+        const goal = updateTask(project.path, parentIdOf(task), { acceptance_command: acceptance })
+        if (goal) this.emit('task.upserted', { projectId: a.projectId, task: goal })
+      }
       // Registra no ledger ANTES de qualquer coisa depender do status: mesmo que
       // o done/ se perca depois, o card não roda de novo.
       markSucceeded(a.taskId, { completedAt: runMeta.completed_at, sessionId: runMeta.session_id })
@@ -1174,7 +1420,15 @@ export class Runner {
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
         pr: runMeta.pr,
       })
-      this.autoMerge(project, done, diff, a.workspace.branch)
+      // Subtask integra no pai; o resto vai para a base se a política deixar.
+      const into = parentIdOf(task) && taskBranch(parentIdOf(task))
+      if (into) {
+        if (a.workspace.branch && a.workspace.branch !== into) {
+          this.enqueueMerge({ projectId: project.id, taskId: a.taskId, branch: a.workspace.branch, into, kind: 'parent' })
+        }
+      } else {
+        this.autoMerge(project, done, diff, a.workspace.branch)
+      }
     } else {
       const reason = a.timedOut
         ? `Timeout da execução. Limite configurado: ${Math.round((a.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)} min.`
@@ -1238,39 +1492,109 @@ export class Runner {
   autoMerge(project, task, diff, branch) {
     if (!task || parentIdOf(task) || task.run?.pr || !branch) return
     if (autoMergeBlocker(project, { reviewApproved: task.run.review_approved, diff })) return
-    const base = gitSettings(project).baseBranch
-    try {
-      const res = mergeTaskBranch(project, branch)
-      const merged = updateTask(project.path, task.id, { status: 'archived', tags: withTag(task.tags, 'merged') })
-      appendToSection(project.path, task.id, 'Resultado',
-        `_Mergeado automaticamente em ${base} pela política de auto-merge${res.pushed ? ' (com push)' : ''}._`)
-      this.emit('task.moved', { projectId: project.id, taskId: task.id, from: task.status, to: 'archived' })
-      this.emit('task.upserted', { projectId: project.id, task: merged })
-    } catch (e) {
-      if (e.conflict) {
-        if (this.scheduleConflictFix(project, task, base, {}, `Auto-merge em ${base} conflitou: ${e.message}`)) {
-          this.enqueue(project.id, task.id)
+    this.enqueueMerge({ projectId: project.id, taskId: task.id, branch, into: gitSettings(project).baseBranch, kind: 'base' })
+  }
+
+  // ---- fila de merge ----
+  // Branches que passam sozinhas podem quebrar juntas. Cada item: atualiza com a
+  // ponta atual do destino (merge-tree, sem checkout) → verifyCommand em cima do
+  // resultado → grava. Um item por vez, em todos os projetos.
+  // ponytail: serialização global; por destino se a fila virar gargalo.
+  enqueueMerge(item) {
+    if (this.mergeQueue.some(m => m.taskId === item.taskId)) return
+    this.mergeQueue.push({ ...item, stage: null })
+    this.persist()
+    this.emit('run.queue', this.getQueueView())
+    this.drainMerges()
+  }
+
+  drainMerges() {
+    if (this.mergeDrain) return this.mergeDrain
+    this.mergeDrain = (async () => {
+      while (this.mergeQueue.length) {
+        const item = this.mergeQueue[0]
+        let again = false
+        try { again = await this.processMerge(item) } catch (e) {
+          console.error(`fila de merge: ${item.branch} → ${item.into}: ${e.message}`)
         }
-        return
+        this.mergeQueue = this.mergeQueue.filter(m => m !== item)
+        // O destino andou durante o verify: o resultado testado não vale mais.
+        if (again) this.mergeQueue.push({ ...item, stage: null })
+        this.persist()
+        this.emit('run.queue', this.getQueueView())
       }
+    })().finally(() => {
+      this.mergeDrain = null
+      if (this.mergeQueue.length) this.drainMerges()
+      this.tick() // o pai pode ter ficado elegível
+    })
+    return this.mergeDrain
+  }
+
+  // Devolve true quando o item precisa voltar para o fim da fila.
+  async processMerge(item) {
+    const project = this.getProject(item.projectId)
+    const task = project && findTask(project.path, item.taskId)
+    if (!task) return false
+    let r
+    try { r = mergeResult(project.path, item.branch, item.into) } catch (e) {
+      if (e.conflict) return this.mergeRejected(project, task, item, `Merge de ${item.branch} em ${item.into} conflitou: ${e.message}`)
+      appendToSection(project.path, task.id, 'Log de erros', `[${new Date().toISOString()}] Merge em ${item.into} não aconteceu: ${e.message}`)
+      return false
+    }
+    const cmd = String(project.verifyCommand || '').trim()
+    if (cmd && !r.tested) {
+      item.stage = 'verify'
+      this.emit('run.queue', this.getQueueView())
+      const v = await withDetachedWorktree(project.path, r.sha, async dir => {
+        const out = await runVerifyAsync(cmd, dir)
+        return out.ok ? out : this.compareWithBaseline(project, { baseSha: r.head, cwd: dir }, out)
+      }, '_merge')
+      if (!v.ok) {
+        return this.mergeRejected(project, task, item, `A branch passou sozinha, mas quebra junto com o que já está em ${item.into}: ` +
+          `\`${v.command}\` falhou no resultado do merge (exit ${v.exitCode}).\n\n\`\`\`\n${v.output}\n\`\`\``)
+      }
+    }
+    if (resolveRef(project.path, item.into) !== r.head) return true
+    return item.kind === 'parent' ? this.landParent(project, task, item) : this.landBase(project, task, item)
+  }
+
+  landParent(project, task, item) {
+    mergeIntoBranch(project.path, item.branch, item.into)
+    const t = updateTask(project.path, task.id, { tags: withTag(task.tags, INTEGRATED_TAG) })
+    this.emit('task.upserted', { projectId: project.id, task: t })
+    return false
+  }
+
+  landBase(project, task, item) {
+    let res
+    try { res = mergeTaskBranch(project, item.branch) } catch (e) {
+      if (e.conflict) return this.mergeRejected(project, task, item, `Auto-merge em ${item.into} conflitou: ${e.message}`)
       // Checkout sujo, base inexistente…: fica para o humano aprovar pelo diff.
       appendToSection(project.path, task.id, 'Log de erros',
         `[${new Date().toISOString()}] Auto-merge não aconteceu: ${e.message}`)
+      return false
     }
+    // merge_sha: o autopilot reverte este merge se o CI da base quebrar nele.
+    const merged = updateTask(project.path, task.id, {
+      status: 'archived', tags: withTag(task.tags, 'merged'), run: { merge_sha: res.sha },
+    })
+    appendToSection(project.path, task.id, 'Resultado',
+      `_Mergeado automaticamente em ${res.base} pela fila de merge${res.pushed ? ' (com push)' : ''}._`)
+    this.emit('task.moved', { projectId: project.id, taskId: task.id, from: task.status, to: 'archived' })
+    this.emit('task.upserted', { projectId: project.id, task: merged })
+    return false
   }
 
-  // Subtask concluída: a branch dela entra na branch de integração do pai, de
-  // onde a próxima irmã parte. Devolve a mensagem de erro, ou null.
-  integrate(project, task, workspace) {
-    const parentId = parentIdOf(task)
-    const into = parentId && taskBranch(parentId)
-    if (!into || !workspace.branch || workspace.branch === into) return null
-    try {
-      mergeIntoBranch(project.path, workspace.branch, into)
-      return null
-    } catch (e) {
-      return e.message || String(e)
-    }
+  // Conflito ou verify reprovado depois de atualizar: a task volta com a
+  // resolução de conflito (mergeia o destino na branch dela e corrige).
+  mergeRejected(project, task, item, message) {
+    const run = item.kind === 'parent' ? { exit_reason: 'integration_conflict' } : {}
+    const resolving = this.scheduleConflictFix(project, task, item.into, run, message)
+    // Fora do ledger também quando vai para o humano: o pai não conta como integrada.
+    clearExecuted(task.id)
+    if (resolving) this.enqueue(project.id, task.id)
+    return false
   }
 
   // Crash recovery: tasks presas em doing/ sem processo ativo voltam para todo/
@@ -1290,6 +1614,8 @@ export class Runner {
           `[${new Date().toISOString()}] Execução interrompida (restart do orquestrador).`)
       }
     }
+    // Merge que estava na fila (ou no meio) quando o servidor caiu: refaz do zero.
+    if (this.mergeQueue.length) this.drainMerges()
   }
 }
 
@@ -1434,9 +1760,12 @@ o card para revisão humana.
 // inteira para voltar ao mesmo ponto. Decida você mesmo e deixe a escolha registrada.
 const AUTO_DECIDE_INSTRUCTIONS = `
 Este projeto está com auto-decisão ligada: NÃO existe humano para responder. Se a task
-depender de uma escolha (ambiguidade de produto, trade-off técnico), decida você mesmo
-pela opção que recomendaria — a mais simples e reversível — e registre em "## Resultado"
-a decisão, as alternativas e o porquê. Só abra uma seção "## Human Request" se a task
+depender de uma escolha (ambiguidade de produto, trade-off técnico), decida você mesmo:
+primeiro pela spec e pelos ADRs existentes (${SPEC_REL}/) — não contrarie uma decisão
+já registrada; se eles não cobrirem, pela opção que recomendaria (a mais simples e
+reversível). Registre a decisão como novo ADR em ${SPEC_REL}/adr/NNNN-titulo.md
+(número seguinte ao maior existente; contexto, decisão, alternativas, consequências),
+para tasks futuras não decidirem o contrário, e cite-a em "## Resultado". Só abra uma seção "## Human Request" se a task
 for de fato impossível sem um humano (credencial, acesso, aprovação externa).
 `
 

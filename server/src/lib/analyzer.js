@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process'
 import { auxModel } from './models.js'
+import { getSection } from './tasks.js'
+import { SPEC_REL } from './spec.js'
 
 // Tipos de sugestão que o usuário pode pedir. A chave vira tag na task criada.
 export const SUGGESTION_TYPES = {
@@ -85,8 +87,14 @@ export function analyzeProject(project, types, question, report = false) {
   if (!wanted.length) return Promise.reject(new Error('nenhum tipo de sugestão válido'))
   const q = typeof question === 'string' ? question.trim().slice(0, 2000) : ''
 
+  return runReadOnly(project, buildPrompt(wanted, { question: q, free, report: !!report }), project.path,
+    text => parseAnalysis(text, wanted))
+}
+
+// Sessão headless somente leitura em `cwd`; `parse` recebe o texto final.
+function runReadOnly(project, prompt, cwd, parse) {
   const args = [
-    '-p', buildPrompt(wanted, { question: q, free, report: !!report }),
+    '-p', prompt,
     '--output-format', 'json',
     '--allowedTools', 'Read Glob Grep',
     '--model', auxModel(project),
@@ -94,7 +102,7 @@ export function analyzeProject(project, types, question, report = false) {
 
   return new Promise((resolve, reject) => {
     const child = spawn('claude', args, {
-      cwd: project.path,
+      cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let out = ''
@@ -115,10 +123,47 @@ export function analyzeProject(project, types, question, report = false) {
       try {
         const result = JSON.parse(out)
         if (result.is_error) return reject(new Error(`análise falhou: ${String(result.result).slice(0, 300)}`))
-        resolve({ ...parseAnalysis(String(result.result || ''), wanted), costUsd: result.total_cost_usd ?? null })
+        resolve({ ...parse(String(result.result || '')), costUsd: result.total_cost_usd ?? null })
       } catch (e) {
         reject(new Error(`não consegui interpretar a resposta da análise: ${e.message}`))
       }
     })
   })
+}
+
+// Loop de objetivo: depois da integração de uma task desmembrada, compara a spec
+// e os critérios de aceite com o código e os testes do `cwd` (a branch do
+// objetivo). Mesmo formato de resposta das sugestões; lista vazia = cumprido.
+export function buildGapPrompt(goal, known = []) {
+  const types = Object.entries(SUGGESTION_TYPES).map(([k, v]) => `- "${k}": ${v}`).join('\n')
+  const seen = known.length
+    ? `\nTasks já criadas para este objetivo (não repita as que já resolvem a lacuna):\n${known.map(t => `- ${t.title} (${t.status})`).join('\n')}\n`
+    : ''
+  return `Você é o auditor do claude-kanban. O objetivo abaixo foi desmembrado, executado e
+integrado neste repositório (o diretório atual). Leia a especificação do sistema
+(${SPEC_REL}/SPEC.md e os ADRs em ${SPEC_REL}/adr/, se existirem), a descrição e os
+critérios de aceite do objetivo, e confira no código e nos testes o que ainda NÃO
+está entregue.
+
+<objetivo>
+Título: ${goal.title}
+
+${getSection(goal.body, 'Descrição') || ''}
+</objetivo>
+${seen}
+Regras:
+- Só aponte lacunas reais e verificáveis (requisito ausente, critério de aceite sem
+  implementação ou sem teste, contrato da spec descumprido). Nada de estilo ou "seria legal".
+- No máximo 8 lacunas, as mais importantes primeiro. Se está tudo entregue, lista vazia.
+- "description" em markdown: o que falta, onde, e critérios de aceite (3-8 linhas).
+- "type" é um destes:
+${types}
+
+Responda SOMENTE com um JSON válido, sem texto antes ou depois, no formato:
+{"suggestions":[{"title":"...","description":"...","type":"<um dos tipos acima>","priority":"low|medium|high|urgent"}]}`
+}
+
+export function findGaps(project, goal, cwd, known = []) {
+  return runReadOnly(project, buildGapPrompt(goal, known), cwd,
+    text => ({ gaps: parseSuggestions(text, Object.keys(SUGGESTION_TYPES)) }))
 }

@@ -93,6 +93,20 @@ export function mergePR(cwd, number) {
   gh(cwd, ['pr', 'merge', String(number), '--merge'])
 }
 
+// Commit de merge de uma PR já mergeada (o que o CI da base vai testar).
+export function prMergeSha(cwd, number) {
+  return ghJson(cwd, ['pr', 'view', String(number), '--json', 'mergeCommit'])?.mergeCommit?.oid || null
+}
+
+// Mergeia a base na branch da PR (o CI roda de novo em cima da base atual).
+export function updatePRBranch(cwd, number) {
+  gh(cwd, ['pr', 'update-branch', String(number)])
+}
+
+export function createPR(cwd, { base, head, title, body }) {
+  return gh(cwd, ['pr', 'create', '--base', base, '--head', head, '--title', title, '--body', body]).trim()
+}
+
 // Comentário de bot (cobertura, preview de deploy) não é feedback para a task.
 // ponytail: lista por nome; o `gh pr view` não diz se o autor é bot.
 const isBot = login => /\[bot\]$|^(github-actions|dependabot|codecov|vercel|netlify|sonarcloud|renovate|coderabbitai)/i.test(login || '')
