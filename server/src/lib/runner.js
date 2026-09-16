@@ -844,8 +844,14 @@ export class Runner {
     const parent = findTask(project.path, a.taskId)
     const level = subtaskLevel(parent) + 1
     const created = []
-    const subtasks = needsDesign(parent, level - 1) ? [designSubtask(parent), ...res.subtasks] : res.subtasks
-    for (const s of subtasks) {
+    // deps: índices (na lista final) de que cada subtask depende. Com desenho, ele
+    // vem primeiro e as subtasks sem dependência passam a esperar por ele.
+    const design = needsDesign(parent, level - 1)
+    const subtasks = design
+      ? [{ ...designSubtask(parent), deps: [] },
+        ...res.subtasks.map(s => ({ ...s, deps: s.deps?.length ? s.deps.map(d => d + 1) : [0] }))]
+      : res.subtasks
+    for (const [i, s] of subtasks.entries()) {
       const t = createTask(project.path, {
         title: s.title,
         description: `${s.description}\n\n_Subtask desmembrada de "${parent.title}" (${parent.id})._`,
@@ -856,9 +862,11 @@ export class Runner {
         // null = deixa o autoDecompose do projeto decidir se essa subtask ainda
         // vale quebrar; no último nível fecha a porta para não descer infinito.
         decompose: s.decompose ?? (level >= MAX_DECOMPOSE_LEVEL ? false : null),
-        // O modelo devolve as subtasks já ordenadas por dependência: encadeamos em
-        // série para a fila respeitar essa ordem (a 3ª não roda antes da 1ª).
-        depends_on: created.length ? [created[created.length - 1].id] : [],
+        // Grafo validado pelo decomposer (sem ciclo); sem ele, série na ordem da
+        // lista. Subtasks sem dependência entre si rodam em paralelo (worktrees),
+        // todas partindo de kanban/<pai> — que já tem o que as dependências
+        // integraram.
+        depends_on: (s.deps || (i ? [i - 1] : [])).map(d => created[d].id),
       })
       created.push(t)
       this.emit('task.upserted', { projectId: a.projectId, task: t })
@@ -1498,6 +1506,9 @@ export class Runner {
 
   // Subtask concluída: a branch dela entra na branch de integração do pai, de
   // onde a próxima irmã parte. Devolve a mensagem de erro, ou null.
+  // Irmãs paralelas integram uma de cada vez: finish() e mergeIntoBranch são
+  // síncronos (nada intercala no event loop) e o update-ref confere o valor
+  // antigo. Quem conflita com o que a irmã já integrou vai para a resolução.
   integrate(project, task, workspace) {
     const parentId = parentIdOf(task)
     const into = parentId && taskBranch(parentId)
