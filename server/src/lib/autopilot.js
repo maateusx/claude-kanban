@@ -1,15 +1,17 @@
 import fs from 'node:fs'
 import { spawn } from 'node:child_process'
-import { listTasks, createTask, updateTask, replaceSection } from './tasks.js'
+import { listTasks, createTask, updateTask, replaceSection, appendToSection } from './tasks.js'
 import { clearExecuted } from './ledger.js'
 import {
   prStatus, prInlineComments, mergePR, summarizePR, failedRunLog, latestRun, listIssues, issueTag, issueDescription,
 } from './github.js'
 import { fetchSource, itemDescription } from './searchFetch.js'
 import { listSearchSources } from './searchSources.js'
-import { analyzeProject } from './analyzer.js'
-import { autoMergeBlocker, autoMergeSettings, notesFile, PR_FEEDBACK } from './runner.js'
-import { gitSettings, applyCleanup } from './git.js'
+import { analyzeProject, findGaps } from './analyzer.js'
+import {
+  autoMergeBlocker, autoMergeSettings, notesFile, PR_FEEDBACK, parentIdOf, goalBudget, treeCost, isGoal,
+} from './runner.js'
+import { gitSettings, applyCleanup, isGitRepo, resolveRef, taskBranch, withDetachedWorktree } from './git.js'
 import { diffFile } from './paths.js'
 import { auxModel } from './models.js'
 import { postWebhook, webhookUrl } from './webhook.js'
@@ -26,6 +28,8 @@ const CLEANUP_EVERY_MS = 60 * 60_000
 export const MAX_PR_ROUNDS = 3
 export const NOTES_COMPACT_AT = 9000
 export const SUGGESTED_TAG = 'auto-sugestao'
+export const GAP_TAG = 'lacuna'
+export const SPEC_DONE_TAG = 'spec-cumprida'
 const IMPORT_STATUSES = ['backlog', 'todo']
 
 export const DEFAULT_AUTOPILOT = {
@@ -39,11 +43,14 @@ export const DEFAULT_AUTOPILOT = {
   digestHour: null,        // hora local do resumo diário por webhook
   // limpeza de branches kanban/* e worktrees órfãos; confirm = humano aprova na UI
   cleanup: { enabled: false, mode: 'confirm', remote: false },
+  // objetivo integrado → auditoria da spec → lacunas viram tasks, até maxRounds
+  gapLoop: { enabled: false, maxRounds: 3 },
 }
 
 export const autopilotSettings = p => ({
   ...DEFAULT_AUTOPILOT, ...(p?.autopilot || {}), autoMerge: autoMergeSettings(p),
   cleanup: { ...DEFAULT_AUTOPILOT.cleanup, ...(p?.autopilot?.cleanup || {}) },
+  gapLoop: { ...DEFAULT_AUTOPILOT.gapLoop, ...(p?.autopilot?.gapLoop || {}) },
 })
 
 const due = (at, everyMs, now) => !at || now - Date.parse(at) >= everyMs
@@ -93,6 +100,9 @@ export class Autopilot {
       run('notes', this.claudeAvailable() && due(st.notes, NOTES_EVERY_MS, now), () => compactNotes(p))
       run('cleanup', s.cleanup.enabled && s.cleanup.mode === 'auto' && due(st.cleanup, CLEANUP_EVERY_MS, now),
         () => this.cleanup(p, s.cleanup))
+      // Sem intervalo: só dispara quando algum objetivo acabou de integrar.
+      run('gaps', s.gapLoop.enabled && this.claudeAvailable() && gapCandidates(p.path).length > 0,
+        () => this.gapLoop(p, s))
       run('digest', digestDue(s, st, now) && webhookUrl(p), () => this.digest(p, now))
       for (const src of listSearchSources(p)) {
         const min = Number(src.pollMinutes) || 0
@@ -272,6 +282,88 @@ export class Autopilot {
     }
   }
 
+  // ---- loop de objetivo: até a spec estar cumprida ----
+
+  async gapLoop(p, s) {
+    for (const goal of gapCandidates(p.path)) {
+      if (!this.busy(goal.id)) await this.auditGoal(p, s, goal)
+    }
+  }
+
+  // Uma rodada: audita o objetivo e abre as lacunas como filhas dele. O objetivo
+  // volta para todo dependendo delas e, quando concluírem, integra de novo (o
+  // runner marca gap_pending outra vez). Para sem lacunas, no teto de rodadas ou
+  // no goalBudgetUsd — nesses dois, evento goal.attention (webhook).
+  async auditGoal(p, s, goal) {
+    const tasks = listTasks(p.path)
+    const rounds = goal.run?.gap_rounds || 0
+    const note = text => appendToSection(p.path, goal.id, 'Resultado', `_Loop de lacunas: ${text}_`)
+    const settle = (patch, text, attention) => {
+      const t = updateTask(p.path, goal.id, { ...patch, run: { ...patch.run, gap_pending: false } })
+      note(text)
+      this.emit('task.upserted', { projectId: p.id, task: t })
+      if (attention) this.emit('goal.attention', { projectId: p.id, taskId: goal.id, reason: text })
+    }
+
+    const budget = goalBudget(p)
+    const spent = treeCost(tasks, goal.id)
+    if (budget && spent >= budget) {
+      return settle({}, `teto de custo do objetivo atingido (US$ ${spent.toFixed(2)} de US$ ${budget.toFixed(2)}) — ` +
+        'a auditoria da spec não rodou; precisa de um humano.', true)
+    }
+
+    const mine = tasks.filter(t => parentIdOf(t) === goal.id)
+    const known = mine.filter(t => (t.tags || []).includes(GAP_TAG))
+    const audit = cwd => findGaps(p, goal, cwd, known)
+    // O código do objetivo está na branch dele; se ela já foi mergeada e
+    // removida, na base.
+    let res
+    if (isGitRepo(p.path)) {
+      const sha = resolveRef(p.path, taskBranch(goal.id)) || resolveRef(p.path, gitSettings(p).baseBranch)
+      res = sha ? await withDetachedWorktree(p.path, sha, audit, '_gaps') : await audit(p.path)
+    } else {
+      res = await audit(p.path)
+    }
+    const run = { total_cost_usd: (goal.run?.total_cost_usd ?? goal.run?.cost_usd ?? 0) + (res.costUsd || 0) }
+
+    if (!res.gaps.length) {
+      return settle({ run, tags: [...new Set([...(goal.tags || []), SPEC_DONE_TAG])] },
+        `sem lacunas após ${rounds} rodada(s) — especificação cumprida.`)
+    }
+    const titles = new Set(mine.map(t => t.title.toLowerCase()))
+    const fresh = res.gaps.filter(g => !titles.has(g.title.toLowerCase()) && titles.add(g.title.toLowerCase()))
+    const list = res.gaps.map(g => `\n- ${g.title}`).join('')
+    if (!fresh.length) {
+      return settle({ run }, `as lacunas apontadas já tinham task e continuam abertas — precisa de um humano:${list}`, true)
+    }
+    if (rounds >= s.gapLoop.maxRounds) {
+      return settle({ run }, `teto de ${s.gapLoop.maxRounds} rodada(s) atingido e ainda faltam — precisa de um humano:${list}`, true)
+    }
+
+    // Em série, como no desmembramento: todas integram na mesma branch.
+    const created = []
+    for (const g of fresh) {
+      created.push(this.created(p, createTask(p.path, {
+        title: g.title,
+        description: `${g.description}\n\n_Lacuna apontada na auditoria da spec do objetivo "${goal.title}" (${goal.id}), rodada ${rounds + 1}._`,
+        priority: g.priority,
+        tags: [GAP_TAG, `pai:${goal.id}`, g.type],
+        status: importStatus(s),
+        depends_on: created.length ? [created[created.length - 1].id] : [],
+      })))
+    }
+    const t = updateTask(p.path, goal.id, {
+      status: 'todo', scheduled_at: null,
+      tags: (goal.tags || []).filter(x => x !== SPEC_DONE_TAG && x !== 'merged'),
+      depends_on: created.map(c => c.id),
+      run: { ...run, gap_pending: false, gap_rounds: rounds + 1, attempts: 0 },
+    })
+    note(`rodada ${rounds + 1} abriu ${created.length} lacuna(s):${created.map(c => `\n- ${c.id} — ${c.title}`).join('')}`)
+    clearExecuted(goal.id)
+    this.emit('task.moved', { projectId: p.id, taskId: goal.id, from: goal.status, to: 'todo' })
+    this.emit('task.upserted', { projectId: p.id, task: t })
+  }
+
   digest(p, now) {
     const url = webhookUrl(p)
     if (!url) return
@@ -280,6 +372,13 @@ export class Autopilot {
       ...buildDigest(listTasks(p.path), now, p.autopilotState?.cleanupLast),
     })
   }
+}
+
+// Objetivos que acabaram de integrar (done, ou já mergeados) e esperam auditoria.
+export function gapCandidates(projectPath) {
+  let tasks = []
+  try { tasks = listTasks(projectPath) } catch {}
+  return tasks.filter(t => t.run?.gap_pending && isGoal(t) && ['done', 'archived'].includes(t.status))
 }
 
 const importStatus = s => (IMPORT_STATUSES.includes(s.importStatus) ? s.importStatus : 'backlog')

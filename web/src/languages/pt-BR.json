@@ -495,7 +495,7 @@
   "abertas ao mesmo tempo (0 h = desligado)": "abertas ao mesmo tempo (0 h = desligado)",
   "O que chega sozinho entra em": "O que chega sozinho entra em",
   "A fazer (roda com o auto-pilot)": "A fazer (roda com o auto-pilot)",
-  "Vale para issues, fontes de busca com intervalo, CI quebrado e sugestões agendadas.": "Vale para issues, fontes de busca com intervalo, CI quebrado e sugestões agendadas.",
+  "Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas e lacunas da spec.": "Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas e lacunas da spec.",
   "Resumo diário por webhook às": "Resumo diário por webhook às",
   "Hora do resumo diário": "Hora do resumo diário",
   "h (vazio = desligado) — evento daily_digest": "h (vazio = desligado) — evento daily_digest",
@@ -513,5 +513,10 @@
   "Remover selecionados": "Remover selecionados",
   "Removidos": "Removidos",
   "Spec e ADRs do sistema": "Spec e ADRs do sistema",
-  "Sem spec ainda: ela é criada pela subtask de desenho de um objetivo grande.": "Sem spec ainda: ela é criada pela subtask de desenho de um objetivo grande."
+  "Sem spec ainda: ela é criada pela subtask de desenho de um objetivo grande.": "Sem spec ainda: ela é criada pela subtask de desenho de um objetivo grande.",
+  "Construir até a spec estar cumprida": "Construir até a spec estar cumprida",
+  "Quando um objetivo desmembrado termina a integração, uma sessão somente leitura compara a spec e os critérios de aceite com o código; o que faltar vira task (tag lacuna) e o objetivo integra de novo. Para sem lacunas (tag spec-cumprida), no teto de rodadas ou no teto de custo — aí avisa por webhook (goal_needs_human).": "Quando um objetivo desmembrado termina a integração, uma sessão somente leitura compara a spec e os critérios de aceite com o código; o que faltar vira task (tag lacuna) e o objetivo integra de novo. Para sem lacunas (tag spec-cumprida), no teto de rodadas ou no teto de custo — aí avisa por webhook (goal_needs_human).",
+  "no máximo": "no máximo",
+  "Máximo de rodadas de lacunas": "Máximo de rodadas de lacunas",
+  "rodadas por objetivo": "rodadas por objetivo"
 }

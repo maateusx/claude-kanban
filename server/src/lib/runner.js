@@ -200,6 +200,8 @@ export const REPLANNED_TAG = 'replanejada'
 export const INTEGRATED_TAG = 'integrada'
 
 export const parentIdOf = task => (task?.tags || []).find(t => t.startsWith('pai:'))?.slice(4) || null
+// Objetivo: task raiz que foi desmembrada — a que o loop de lacunas audita.
+export const isGoal = task => !!task?.tags?.includes(DECOMPOSED_TAG) && !parentIdOf(task)
 const withTag = (tags, tag) => (tags || []).includes(tag) ? (tags || []) : [...(tags || []), tag]
 const taskCost = t => t.run?.total_cost_usd ?? t.run?.cost_usd ?? 0
 
@@ -1173,7 +1175,9 @@ export class Runner {
       // O feedback da PR já foi atendido nesta execução.
       const cur = findTask(project.path, a.taskId)
       const done = updateTask(project.path, a.taskId, {
-        status: 'done', tags, run: { ...runMeta, merge_from: null },
+        status: 'done', tags,
+        // Objetivo integrado: o autopilot (gapLoop) confere a spec e abre as lacunas.
+        run: { ...runMeta, merge_from: null, ...(isGoal(task) ? { gap_pending: true } : {}) },
         ...(getSection(cur?.body, PR_FEEDBACK) ? { body: removeSection(cur.body, PR_FEEDBACK) } : {}),
       })
       try { harvestNotes(project.path, done) } catch {}

@@ -495,7 +495,7 @@
   "abertas ao mesmo tempo (0 h = desligado)": "open at a time (0 h = off)",
   "O que chega sozinho entra em": "Incoming work goes to",
   "A fazer (roda com o auto-pilot)": "To do (runs with auto-pilot)",
-  "Vale para issues, fontes de busca com intervalo, CI quebrado e sugestões agendadas.": "Applies to issues, search sources with an interval, broken CI and scheduled suggestions.",
+  "Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas e lacunas da spec.": "Applies to issues, search sources with an interval, broken CI, scheduled suggestions and spec gaps.",
   "Resumo diário por webhook às": "Daily webhook digest at",
   "Hora do resumo diário": "Daily digest hour",
   "h (vazio = desligado) — evento daily_digest": "h (empty = off) — daily_digest event",
@@ -513,5 +513,10 @@
   "Remover selecionados": "Remove selected",
   "Removidos": "Removed",
   "Spec e ADRs do sistema": "System spec & ADRs",
-  "Sem spec ainda: ela é criada pela subtask de desenho de um objetivo grande.": "No spec yet: it is created by the design subtask of a large goal."
+  "Sem spec ainda: ela é criada pela subtask de desenho de um objetivo grande.": "No spec yet: it is created by the design subtask of a large goal.",
+  "Construir até a spec estar cumprida": "Build until the spec is met",
+  "Quando um objetivo desmembrado termina a integração, uma sessão somente leitura compara a spec e os critérios de aceite com o código; o que faltar vira task (tag lacuna) e o objetivo integra de novo. Para sem lacunas (tag spec-cumprida), no teto de rodadas ou no teto de custo — aí avisa por webhook (goal_needs_human).": "When a decomposed goal finishes integration, a read-only session compares the spec and acceptance criteria with the code; whatever is missing becomes a task (tag lacuna) and the goal integrates again. Stops when there are no gaps (tag spec-cumprida), at the round limit or at the cost ceiling — then it notifies via webhook (goal_needs_human).",
+  "no máximo": "at most",
+  "Máximo de rodadas de lacunas": "Maximum gap rounds",
+  "rodadas por objetivo": "rounds per goal"
 }

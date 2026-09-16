@@ -68,6 +68,17 @@ export function applyAutopilot(p, input) {
     }
     next.cleanup = cl
   }
+  if (input.gapLoop !== undefined) {
+    const g = input.gapLoop || {}
+    const gl = { ...(next.gapLoop || {}) }
+    if (g.enabled !== undefined) gl.enabled = !!g.enabled
+    if (g.maxRounds !== undefined) {
+      const n = Number(g.maxRounds)
+      if (!intIn(n, 1, 20)) return 'autopilot.gapLoop.maxRounds deve ser um inteiro entre 1 e 20'
+      gl.maxRounds = n
+    }
+    next.gapLoop = gl
+  }
   p.autopilot = next
   return null
 }

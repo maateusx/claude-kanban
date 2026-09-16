@@ -284,20 +284,31 @@ function linkNodeModules(root, dir) {
 // Roda fn(dir) num worktree destacado em `sha` e remove o worktree no fim.
 // Usado pelo verify de referência: saber se a base já falhava sem tocar no
 // checkout de ninguém.
-export function withDetachedWorktree(root, sha, fn) {
-  const dir = path.join(HOME_DIR, 'worktrees', '_baseline', `${path.basename(root)}-${sha.slice(0, 12)}`)
+// fn pode ser async (o loop de lacunas): aí a remoção espera a promise.
+export function withDetachedWorktree(root, sha, fn, kind = '_baseline') {
+  const dir = path.join(HOME_DIR, 'worktrees', kind, `${path.basename(root)}-${sha.slice(0, 12)}`)
   fs.rmSync(dir, { recursive: true, force: true })
   try { git(root, 'worktree', 'prune') } catch {}
   git(root, 'worktree', 'add', '--detach', dir, sha)
-  try {
-    linkNodeModules(root, dir)
-    return fn(dir)
-  } finally {
+  const remove = () => {
     try { git(root, 'worktree', 'remove', '--force', dir) } catch {
       fs.rmSync(dir, { recursive: true, force: true })
       try { git(root, 'worktree', 'prune') } catch {}
     }
   }
+  let res
+  try {
+    linkNodeModules(root, dir)
+    res = fn(dir)
+  } catch (e) { remove(); throw e }
+  if (typeof res?.then === 'function') return res.finally(remove)
+  remove()
+  return res
+}
+
+// sha de uma ref, ou null se ela não existe.
+export function resolveRef(root, ref) {
+  try { return git(root, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`) } catch { return null }
 }
 
 // Arquivos e linhas (+/-) tocados por um diff unificado — base da política de auto-merge.

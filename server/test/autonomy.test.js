@@ -133,6 +133,21 @@ test('subtask concluída entra na branch do pai; aprendizados vão para notes.md
   assert.match(fs.readFileSync(notesFile(root), 'utf8'), /Filha[\s\S]*npm test/)
 })
 
+test('objetivo integrado fica marcado para a auditoria de lacunas; subtask não', () => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'ck-auto-'))
+  const project = { id: 'pg2', path: root }
+  const goal = createTask(root, { title: 'Obj', status: 'doing', tags: [DECOMPOSED_TAG] })
+  const sub = createTask(root, { title: 'Sub', status: 'doing', tags: [DECOMPOSED_TAG, `pai:${goal.id}`] })
+  const { runner } = runnerFor(project)
+  for (const t of [goal, sub]) {
+    const a = active(project, t.id, { verify: null, workspace: { cwd: root, branch: null } })
+    runner.actives.set(t.id, a)
+    runner.finish(a, 0)
+  }
+  assert.equal(findTask(root, goal.id).run.gap_pending, true)
+  assert.equal(findTask(root, sub.id).run.gap_pending, undefined)
+})
+
 test('buildPrompt injeta o contexto e subtask não faz push', () => {
   const g = { autoPush: true, autoPR: true, baseBranch: 'main', integratesInto: 'kanban/pai' }
   const prompt = buildPrompt('t.md', 'md', 'kanban/c', g, 'off', null, false, '<notas-do-projeto>x</notas-do-projeto>')

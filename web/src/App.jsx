@@ -2572,7 +2572,19 @@ function AutonomySettings({ project, onPatch }) {
             <option value="todo">{t('A fazer (roda com o auto-pilot)')}</option>
           </select>
         </label>
-        <Hint>{t('Vale para issues, fontes de busca com intervalo, CI quebrado e sugestões agendadas.')}</Hint>
+        <Hint>{t('Vale para issues, fontes de busca com intervalo, CI quebrado, sugestões agendadas e lacunas da spec.')}</Hint>
+      </div>
+
+      <div className="border-t border-line pt-3">
+        <GitCheck label={t('Construir até a spec estar cumprida')}
+          desc={t('Quando um objetivo desmembrado termina a integração, uma sessão somente leitura compara a spec e os critérios de aceite com o código; o que faltar vira task (tag lacuna) e o objetivo integra de novo. Para sem lacunas (tag spec-cumprida), no teto de rodadas ou no teto de custo — aí avisa por webhook (goal_needs_human).')}
+          checked={!!ap.gapLoop?.enabled} onChange={v => patchAp({ gapLoop: { enabled: v } })} />
+        <div className={`ml-7 mt-2 ${row} ${ap.gapLoop?.enabled ? '' : 'opacity-40'}`}>
+          <span className="text-meta text-muted">{t('no máximo')}</span>
+          <CommitField value={ap.gapLoop?.maxRounds ?? 3} parse={intIn(1, 20, undefined)} disabled={!ap.gapLoop?.enabled}
+            aria-label={t('Máximo de rodadas de lacunas')} onCommit={maxRounds => patchAp({ gapLoop: { maxRounds } })} />
+          <span className="text-meta text-muted">{t('rodadas por objetivo')}</span>
+        </div>
       </div>
 
       <div className={`border-t border-line pt-3 ${row}`}>
@@ -3014,7 +3026,7 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
             <span className="mt-1 block text-meta text-muted">
               POST com JSON quando uma task <strong>muda de status</strong> (<code>task_status_changed</code>), quando um run
               <strong> falha</strong> (<code>run_failed</code>) ou quando <strong>precisa de humano</strong>
-              (<code>human_request</code>, <code>pending_action</code> e <code>pr_needs_human</code>) — para saber sem o board aberto.
+              (<code>human_request</code>, <code>pending_action</code>, <code>pr_needs_human</code> e <code>goal_needs_human</code>) — para saber sem o board aberto.
               Também leva o resumo diário (<code>daily_digest</code>) se ele estiver ligado em Autonomia. Vazio: desligado.
             </span>
           </span>
