@@ -532,5 +532,8 @@
   "Externa (precisa de humano)": "Externa (precisa de humano)",
   "verificando merge": "verificando merge",
   "mergeando": "mergeando",
-  "fila de merge": "fila de merge"
+  "fila de merge": "fila de merge",
+  "Ações que o servidor executa sozinho": "Ações que o servidor executa sozinho",
+  "Um padrão por linha (* = qualquer trecho). Comando bloqueado pelos guardrails que casar inteiro é executado pelo servidor e resolvido na hora, com a saída no item. Nunca casa: ; && | $() aspas, leitura de .env ou push na branch principal. Vazio: tudo vai para o humano.": "Um padrão por linha (* = qualquer trecho). Comando bloqueado pelos guardrails que casar inteiro é executado pelo servidor e resolvido na hora, com a saída no item. Nunca casa: ; && | $() aspas, leitura de .env ou push na branch principal. Vazio: tudo vai para o humano.",
+  "pela política {p}": "pela política {p}"
 }

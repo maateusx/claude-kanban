@@ -137,6 +137,8 @@ Hooks `PreToolUse` (`guard.mjs`) bloqueiam ações perigosas mesmo sob skip-perm
 ### 21. Ações manuais (pending-actions)
 Ações bloqueadas pelos guardrails viram itens em `pending-actions.md` para um humano resolver; a UI lista, permite executar o comando bloqueado (a saída aparece no próprio item) e marcar como resolvido. (`server/src/lib/pending.js`)
 
+**Política de guardrail** (`guardrailPolicy`, editável em Configurações → Autonomia, um padrão por linha; `*` = qualquer trecho): a cada `pending.updated`, o servidor executa sozinho, com o mesmo "Executar comando", toda ação pendente cujo comando casa **inteiro** com um padrão, e grava no item `status: done`, a regra, o exit e a saída (indentada). O painel lista essas execuções. O agente continua bloqueado — o `guard.mjs` não muda; só o orquestrador executa, e essas ações não disparam o webhook `pending_action`. Nunca casa: comando com metacaracteres de shell (`;`, `&`, `|`, `<`, `>`, `$`, crase, barra invertida, aspas, `*`, `?`, parênteses ou quebra de linha), comando que toca `.env` (mesma regra do guard) e push/commit/merge na branch principal (regras do guard + push que cite o `baseBranch`). Default: `git branch -d kanban/*` — o `-d` só apaga branch já mergeada; o git recusa as outras e o item fica resolvido com a falha na saída. Lista vazia: tudo vai para o humano. Decisão: ADR 0002.
+
 ### 22. Human Request / Human Response
 O agente pode pausar por decisão humana escrevendo `## Human Request`; o card volta para `todo` com a tag `human-request` (fora do auto-pilot). O humano responde pela UI e a sessão retoma via `claude --resume` (com fallback de re-execução levando pergunta e resposta no prompt). (`runner.js`)
 

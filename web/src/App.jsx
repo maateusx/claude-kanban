@@ -2319,12 +2319,25 @@ const summarize = input => {
 function PendingPanel({ actions, onClose, onResolve, onRun }) {
   const pend = actions.filter(a => a.status === 'pending')
   const done = actions.filter(a => a.status !== 'pending')
+  const auto = done.filter(a => a.policy)
   return (
     <Modal onClose={onClose} title={t('Ações manuais pendentes')}>
       <div className="max-h-[60vh] space-y-3 overflow-y-auto">
         {pend.length === 0 && <Empty>{t('Nenhuma ação pendente.')}</Empty>}
         {pend.map(a => <PendingItem key={a.id} action={a} onResolve={onResolve} onRun={onRun} />)}
         {done.length > 0 && <div className="pt-2 text-meta text-muted">{t('{n} resolvida(s)', { n: done.length })}</div>}
+        {auto.slice(-10).reverse().map(a => (
+          <details key={a.id} className="rounded-[8px] border border-line p-2 text-meta">
+            <summary className="cursor-pointer">
+              <span className="font-mono">{a.command}</span>
+              <span className={`ml-2 ${a.policy.result === 'exit 0' ? 'text-success' : 'text-danger'}`}>{a.policy.result}</span>
+              <span className="ml-2 text-muted">{t('pela política {p}', { p: a.policy.pattern })}</span>
+            </summary>
+            <pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap break-all rounded-[4px] bg-subtle p-2 font-mono text-[11px] text-ink-2">
+              {a.policy.output || t('(sem saída)')}
+            </pre>
+          </details>
+        ))}
       </div>
     </Modal>
   )
@@ -2510,6 +2523,23 @@ const intIn = (min, max, empty = min) => v => {
 const csv = v => v.split(',').map(x => x.trim()).filter(Boolean)
 const Hint = ({ children }) => <span className="mt-1 block text-meta text-muted">{children}</span>
 
+// Allowlist de guardrail: um padrão de comando por linha.
+function PolicyField({ value, onCommit }) {
+  const shown = value.join('\n')
+  const [v, setV] = useState(shown)
+  useEffect(() => setV(shown), [shown])
+  const lines = v.split('\n').map(x => x.trim()).filter(Boolean)
+  return (
+    <label className="block">
+      <span className="text-ink">{t('Ações que o servidor executa sozinho')}</span>
+      <textarea value={v} rows={3} onChange={e => setV(e.target.value)}
+        onBlur={() => { if (lines.join('\n') !== shown) onCommit(lines) }}
+        placeholder="git branch -d kanban/*" className={`mt-1 w-full font-mono ${fieldCls}`} />
+      <Hint>{t('Um padrão por linha (* = qualquer trecho). Comando bloqueado pelos guardrails que casar inteiro é executado pelo servidor e resolvido na hora, com a saída no item. Nunca casa: ; && | $() aspas, leitura de .env ou push na branch principal. Vazio: tudo vai para o humano.')}</Hint>
+    </label>
+  )
+}
+
 // Autonomia de ponta a ponta: travas da execução, o que acontece depois da task
 // (merge, PR) e o trabalho que chega sozinho. Os jobs do autopilot rodam a cada minuto.
 function AutonomySettings({ project, onPatch }) {
@@ -2535,6 +2565,7 @@ function AutonomySettings({ project, onPatch }) {
       <GitCheck label={t('Sandbox do Claude Code')}
         desc={t('Bash roda confinado (filesystem e rede; só GitHub e registries liberados), além dos guardrails. macOS/Linux. Se o sandbox não estiver disponível, a sessão falha em vez de rodar sem ele. Recomendado antes de ligar o auto-merge.')}
         checked={!!project.sandbox} onChange={v => onPatch({ sandbox: v })} />
+      <PolicyField value={project.guardrailPolicy || []} onCommit={guardrailPolicy => onPatch({ guardrailPolicy })} />
       <div>
         <span className="text-ink">{t('Checagem visual na revisão')}</span>
         <div className={`mt-1 ${row}`}>

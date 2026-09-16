@@ -4,7 +4,7 @@ import websocket from '@fastify/websocket'
 import fs from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { bootstrapStatus } from './lib/bootstrap.js'
-import { listPendingActions } from './lib/pending.js'
+import { listPendingActions, guardrailPolicy } from './lib/pending.js'
 import { gitSettings, projectBranch } from './lib/git.js'
 import { retrySettings, turnLimit } from './lib/runner.js'
 import { autopilotSettings, Autopilot } from './lib/autopilot.js'
@@ -46,6 +46,7 @@ export async function buildApp(deps) {
       retry: retrySettings(p),
       autopilot: autopilotSettings(p),
       maxTurns: turnLimit(p) ?? 0,
+      guardrailPolicy: guardrailPolicy(p),
       auxModel: auxModel(p),
       plugins: normalizeKeys(p.plugins),
       searchSources: listSearchSources(p),

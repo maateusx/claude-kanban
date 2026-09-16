@@ -532,5 +532,8 @@
   "Externa (precisa de humano)": "External (needs a human)",
   "verificando merge": "verifying merge",
   "mergeando": "merging",
-  "fila de merge": "merge queue"
+  "fila de merge": "merge queue",
+  "Ações que o servidor executa sozinho": "Actions the server runs on its own",
+  "Um padrão por linha (* = qualquer trecho). Comando bloqueado pelos guardrails que casar inteiro é executado pelo servidor e resolvido na hora, com a saída no item. Nunca casa: ; && | $() aspas, leitura de .env ou push na branch principal. Vazio: tudo vai para o humano.": "One pattern per line (* = any text). A command blocked by the guardrails that matches in full is run by the server and resolved right away, with the output in the item. Never matches: ; && | $() quotes, reading .env or pushing to the main branch. Empty: everything goes to a human.",
+  "pela política {p}": "by policy {p}"
 }
