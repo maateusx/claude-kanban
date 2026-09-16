@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { loadState, saveState, diffFile, logFile } from './paths.js'
+import { loadState, saveState, diffFile, logFile, kanbanDir } from './paths.js'
 import { findTask, updateTask, appendToSection, listTasks, createTask, getSection, removeSection, replaceSection } from './tasks.js'
 import { decomposeTask, subtaskLevel, MAX_DECOMPOSE_LEVEL } from './decomposer.js'
-import { prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo } from './git.js'
+import { prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, taskBranch } from './git.js'
+import { reviewTask } from './reviewer.js'
 import { wasSucceeded, markSucceeded, clearExecuted } from './ledger.js'
 import { PRIORITY_RANK } from './sort.js'
 import { normalizeModel } from './models.js'
@@ -92,6 +93,95 @@ export function consumeHumanAnswer(projectPath, taskId) {
   return { request, response }
 }
 const MAX_CONCURRENCY = 8
+
+// Árvore de tasks: a decomposição marca as filhas com `pai:<id>` e o pai com
+// `decomposta`. O pai fica em todo dependendo de todas as filhas (o gate de
+// depends_on segura) e, quando elas concluem, roda de novo como integração.
+export const DECOMPOSED_TAG = 'decomposta'
+// Task que travou e foi desmembrada no lugar de ficar blocked — só uma vez.
+export const REPLANNED_TAG = 'replanejada'
+// Subtask cuja branch já foi mergeada na branch de integração do pai.
+export const INTEGRATED_TAG = 'integrada'
+
+export const parentIdOf = task => (task?.tags || []).find(t => t.startsWith('pai:'))?.slice(4) || null
+const withTag = (tags, tag) => (tags || []).includes(tag) ? (tags || []) : [...(tags || []), tag]
+const taskCost = t => t.run?.total_cost_usd ?? t.run?.cost_usd ?? 0
+
+// Raiz da árvore de uma task (ela mesma, se não é subtask). O `seen` protege de
+// um pai: editado à mão formando ciclo.
+export function rootIdOf(tasks, task) {
+  const byId = new Map(tasks.map(t => [t.id, t]))
+  const seen = new Set()
+  let cur = task
+  while (parentIdOf(cur) && byId.has(parentIdOf(cur)) && !seen.has(cur.id)) {
+    seen.add(cur.id)
+    cur = byId.get(parentIdOf(cur))
+  }
+  return cur.id
+}
+
+// Custo acumulado (todas as tentativas, decomposição e revisão) da árvore inteira.
+export function treeCost(tasks, rootId) {
+  return tasks.filter(t => rootIdOf(tasks, t) === rootId).reduce((sum, t) => sum + taskCost(t), 0)
+}
+
+// Teto de custo por objetivo (`goalBudgetUsd`): null/0 = desligado.
+export const goalBudget = project => {
+  const n = Number(project?.goalBudgetUsd)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+// Memória entre tasks: cada run bem-sucedido pode deixar "## Aprendizados" no
+// arquivo da task; o orquestrador junta em notes.md e injeta nos prompts
+// seguintes. Quem escreve é só o servidor — worktrees concorrentes não brigam.
+const MAX_NOTES_IN_PROMPT = 6000
+export const notesFile = projectPath => path.join(kanbanDir(projectPath), 'notes.md')
+
+export function harvestNotes(projectPath, task) {
+  const learned = getSection(task?.body, 'Aprendizados').replace(/<!--[\s\S]*?-->/g, '').trim()
+  if (!learned) return false
+  fs.appendFileSync(notesFile(projectPath), `\n### ${task.title} (${task.id})\n\n${learned}\n`)
+  return true
+}
+
+function notesBlock(projectPath) {
+  let notes = ''
+  try { notes = fs.readFileSync(notesFile(projectPath), 'utf8').trim() } catch {}
+  if (!notes) return ''
+  // As notas mais recentes são as que valem manter quando passa do teto.
+  if (notes.length > MAX_NOTES_IN_PROMPT) notes = '[…]\n' + notes.slice(-MAX_NOTES_IN_PROMPT)
+  return `
+Aprendizados registrados por tasks anteriores deste projeto (convenções,
+armadilhas, comandos). Leve em conta:
+
+<notas-do-projeto>
+${notes}
+</notas-do-projeto>
+`
+}
+
+const MAX_CHILD_RESULT = 1500
+
+// Contexto do run de integração de uma task desmembrada: o que cada filha fez.
+function integrationBlock(tasks, parentId) {
+  const children = tasks.filter(t => parentIdOf(t) === parentId)
+  if (!children.length) return ''
+  const list = children.map(c => {
+    const res = (getSection(c.body, 'Resultado') || '').replace(/<!--[\s\S]*?-->/g, '').trim()
+    return `### ${c.title} (${c.id}) — ${c.status}\n\n${res.slice(0, MAX_CHILD_RESULT) || '(sem resultado registrado)'}`
+  }).join('\n\n')
+  return `
+Esta task foi desmembrada em subtasks, que JÁ foram executadas e mergeadas na
+branch em que você está. Este é o run de INTEGRAÇÃO: confira se o conjunto
+entrega o que a descrição original pede — rode build e testes, corrija as
+costuras entre as partes e complete o que ficou faltando. Não refaça o que já
+está pronto.
+
+<subtasks>
+${list}
+</subtasks>
+`
+}
 
 // Modo "cru": a task vai para o `claude -p` só com título + descrição, sem o
 // prompt do kanban (skill, Resultado, human request, git) — como se alguém
@@ -355,10 +445,35 @@ export class Runner {
 
     // Desmembrar em vez de executar: forçado pela task (decompose: true) ou,
     // com o autoDecompose do projeto ligado, o próprio modelo decide.
+    // Pai já desmembrado roda como integração — a não ser que o replanejamento
+    // tenha pedido explicitamente para quebrar de novo (decompose: true).
     const decomposeMode = skipDecompose || rawExec ? null
       : task.decompose === true ? 'forced'
-      : (task.decompose == null && project.autoDecompose) ? 'auto'
+      : (task.decompose == null && project.autoDecompose && !task.tags?.includes(DECOMPOSED_TAG)) ? 'auto'
       : null
+
+    // Teto de custo do objetivo: nada da árvore roda depois de estourar.
+    const budget = goalBudget(project)
+    if (budget) {
+      let tasks = []
+      try { tasks = listTasks(project.path) } catch {}
+      const rootId = rootIdOf(tasks, task)
+      const spent = treeCost(tasks, rootId)
+      if (spent >= budget) {
+        // status todo: o bloqueio pode cair num restart interno (plan-execute,
+        // fallback de resume), com a task ainda em doing.
+        task = updateTask(project.path, taskId, {
+          status: 'todo', tags: withTag(task.tags, 'blocked'), run: { exit_reason: 'goal_budget' },
+        })
+        appendToSection(project.path, taskId, 'Log de erros',
+          `[${new Date().toISOString()}] Teto de custo do objetivo atingido: US$ ${spent.toFixed(2)} gastos ` +
+          `de US$ ${budget.toFixed(2)} na árvore de ${rootId}. Aumente o teto do projeto e remova a tag blocked para continuar.`)
+        this.emit('task.upserted', { projectId, task })
+        this.emit('run.finished', { projectId, taskId, exitCode: -1, exitReason: 'goal_budget' })
+        return
+      }
+    }
+
     if (decomposeMode) return this.startDecompose(project, taskId, decomposeMode)
 
     // Resposta humana pendente: sai do corpo (vai para o histórico) antes de
@@ -390,7 +505,11 @@ export class Runner {
 
     let workspace
     try {
-      workspace = prepareWorkspace(project, taskId)
+      // Run de integração: o diff (e a revisão) cobre o objetivo inteiro, não só
+      // o que esta sessão mexeu por cima das filhas.
+      workspace = prepareWorkspace(project, taskId, {
+        parentId: parentIdOf(task), fullDiff: !!task.tags?.includes(DECOMPOSED_TAG),
+      })
     } catch (e) {
       updateTask(project.path, taskId, { status: 'todo' })
       appendToSection(project.path, taskId, 'Log de erros',
@@ -422,8 +541,9 @@ export class Runner {
     const prompt = rawPhase
       ? buildRawPrompt(task, rawPhase, rawExec?.plan, !!resumeFrom)
       : resumeFrom
-      ? buildResumePrompt(taskRelPath, answer, workspace.branch, gitSettings(project), !!project.autoDecide)
-      : buildPrompt(taskRelPath, md, workspace.branch, gitSettings(project), enrichMode, answer, !!project.autoDecide)
+      ? buildResumePrompt(taskRelPath, answer, workspace.branch, promptGit(project, task), !!project.autoDecide)
+      : buildPrompt(taskRelPath, md, workspace.branch, promptGit(project, task), enrichMode, answer, !!project.autoDecide,
+        notesBlock(project.path) + (task.tags?.includes(DECOMPOSED_TAG) ? integrationBlock(listTasks(project.path), taskId) : ''))
 
     // O Claude Code não auto-aprova edits em .claude/ mesmo com acceptEdits.
     // Como as tasks vivem em .claude/claude-kanban/tasks/, liberamos Edit/Write
@@ -501,7 +621,7 @@ export class Runner {
     })
     child.stderr.on('data', d => { a.stderr += d })
 
-    child.on('close', code => this.finish(a, code))
+    child.on('close', code => this.settle(a, code))
     child.on('error', err => {
       a.stderr += `\nspawn error: ${err.message}`
       this.finish(a, -1)
@@ -592,12 +712,21 @@ export class Runner {
     }
 
     appendToSection(project.path, a.taskId, 'Resultado',
-      `Task desmembrada em ${created.length} subtasks:\n${created.map(t => `- ${t.id} — ${t.title}`).join('\n')}`)
+      `Task desmembrada em ${created.length} subtasks:\n${created.map(t => `- ${t.id} — ${t.title}`).join('\n')}\n\n` +
+      `Ela volta a rodar, como integração, quando todas concluírem.`)
+    // O pai não está pronto: volta para todo dependendo de todas as filhas e,
+    // quando elas concluírem, roda como integração (sem desmembrar de novo).
+    // Tentativas zeradas — as que ele gastou antes do replanejamento não contam.
     const task = updateTask(project.path, a.taskId, {
-      status: 'done',
-      run: { completed_at: completedAt, exit_code: 0, cost_usd: res.costUsd },
+      status: 'todo',
+      tags: withTag(parent.tags, DECOMPOSED_TAG).filter(t => t !== 'blocked'),
+      decompose: false,
+      depends_on: created.map(t => t.id),
+      run: {
+        completed_at: completedAt, exit_code: 0, cost_usd: res.costUsd, attempts: 0,
+        total_cost_usd: taskCost(parent) + (res.costUsd || 0),
+      },
     })
-    markSucceeded(a.taskId, { completedAt })
     this.emit('task.upserted', { projectId: a.projectId, task })
     this.emit('run.finished', {
       projectId: a.projectId, taskId: a.taskId, exitCode: 0,
@@ -640,28 +769,74 @@ export class Runner {
     return events.slice(-MAX_LOG_EVENTS)
   }
 
+  // Gate de verificação: `exit 0` do claude não basta para virar done se o
+  // projeto define um comando (testes/lint). Roda no worktree da task, antes
+  // do cleanup, e o resultado vai para o log do run (visível no drawer).
+  verifyGate(a, project, exitCode) {
+    const verifyCommand = String(project.verifyCommand || '').trim()
+    a.verify = null
+    if (exitCode !== 0 || a.killed || a.timedOut || !verifyCommand) return null
+    const verify = a.verify = runVerify(verifyCommand, a.workspace.cwd)
+    this.logEvent(a, { type: 'verify', command: verify.command, ok: verify.ok, exitCode: verify.exitCode, text: verify.output })
+    return verify
+  }
+
+  logEvent(a, event) {
+    this.recordLog(a, event)
+    this.emit('run.log', { projectId: a.projectId, taskId: a.taskId, event })
+  }
+
+  // O processo saiu. Os gates que precisam de sessão (revisão) não cabem no
+  // finish síncrono: rodam aqui, com o run ainda em actives, e o finish recebe
+  // o veredito pronto em a.review.
+  async settle(a, exitCode) {
+    try { await this.reviewGate(a, exitCode) } catch (e) {
+      a.stderr += `\nfalha nos gates pós-run: ${e.message}`
+    }
+    this.finish(a, exitCode)
+  }
+
+  async reviewGate(a, exitCode) {
+    const project = this.getProject(a.projectId)
+    if (!project?.reviewGate || exitCode !== 0 || a.killed || a.timedOut || a.rawPhase === 'plan') return
+    const verify = this.verifyGate(a, project, exitCode)
+    if (verify && !verify.ok) return
+    let md = ''
+    try { md = fs.readFileSync(path.join(a.workspace.cwd, a.taskRelPath), 'utf8') } catch {}
+    if (hasHumanRequest(md)) return
+    this.logEvent(a, { type: 'raw', text: '[revisão] conferindo se o diff entrega o que a task pede…' })
+    let diff = null
+    try { diff = captureDiff(a.workspace.cwd, a.workspace.startSha) } catch {}
+    const title = findTask(project.path, a.taskId)?.title || ''
+    a.review = await reviewTask(project, { title, body: md }, diff, a.workspace.cwd)
+    this.logEvent(a, { type: 'review', approved: a.review.approved, text: a.review.feedback || 'aprovado' })
+  }
+
+  // Esgotou as tentativas: com autoDecompose ligado, a task é desmembrada (uma
+  // vez) levando o Log de erros como contexto, em vez de travar a árvore toda
+  // como blocked. Devolve true quando replanejou. Muta o patch.
+  blockOrReplan(project, task, patch) {
+    if (!task) return false
+    if (project.autoDecompose && !task.tags?.includes(REPLANNED_TAG) && !rawModeOf(project)) {
+      patch.tags = withTag(patch.tags || task.tags, REPLANNED_TAG).filter(t => t !== 'blocked')
+      patch.decompose = true
+      patch.scheduled_at = null
+      return true
+    }
+    patch.tags = withTag(patch.tags || task.tags, 'blocked')
+    return false
+  }
+
   finish(a, exitCode) {
     if (!this.actives.delete(a.taskId)) return
     clearTimeout(a.timer)
     const project = this.getProject(a.projectId)
     if (!project) { try { a.logStream?.end() } catch {}; return this.tick() }
 
-    // Gate de verificação: `exit 0` do claude não basta para virar done se o
-    // projeto define um comando (testes/lint). Roda no worktree da task, antes
-    // do cleanup, e o resultado vai para o log do run (visível no drawer).
-    const verifyCommand = String(project.verifyCommand || '').trim()
-    let verify = null
-    if (exitCode === 0 && !a.killed && !a.timedOut && verifyCommand) {
-      verify = runVerify(verifyCommand, a.workspace.cwd)
-      const event = {
-        type: 'verify',
-        command: verify.command,
-        ok: verify.ok,
-        exitCode: verify.exitCode,
-        text: verify.output,
-      }
-      this.recordLog(a, event)
-      this.emit('run.log', { projectId: a.projectId, taskId: a.taskId, event })
+    let verify = 'verify' in a ? a.verify : this.verifyGate(a, project, exitCode)
+    // Revisão reprovada segue o mesmo caminho da verificação reprovada.
+    if ((!verify || verify.ok) && a.review && !a.review.approved) {
+      verify = { command: 'revisão automática', ok: false, exitCode: 1, output: a.review.feedback || '(sem feedback)', review: true }
     }
 
     try { a.logStream?.end() } catch {}
@@ -694,6 +869,7 @@ export class Runner {
     try { cleanupWorkspace(project, a.workspace, a.taskRelPath) } catch {}
 
     const r = a.result || {}
+    const prev = findTask(project.path, a.taskId)
     const runMeta = {
       has_diff: hasDiff,
       pr,
@@ -701,12 +877,14 @@ export class Runner {
       exit_code: exitCode,
       session_id: r.session_id ?? null,
       cost_usd: r.total_cost_usd ?? null,
+      total_cost_usd: (prev ? taskCost(prev) : 0) + (r.total_cost_usd || 0) + (a.review?.costUsd || 0),
       duration_ms: r.duration_ms ?? null,
       num_turns: r.num_turns ?? null,
       exit_reason: exitReason(a, exitCode, verify),
     }
 
-    const task = findTask(project.path, a.taskId)
+    const task = prev
+    let integrateError = null
     const attempts = task?.run?.attempts || 0
     // Teto de turnos estourado: a sessão parou no meio, não falhou por acaso.
     // Re-executar do zero gastaria tudo de novo para parar no mesmo lugar, então
@@ -732,12 +910,12 @@ export class Runner {
       this.emit('run.killed', { projectId: a.projectId, taskId: a.taskId })
     } else if (maxTurnsHit && !a.timedOut) {
       const patch = { status: 'todo', run: runMeta }
-      if (task && !task.tags?.includes('blocked')) patch.tags = [...(task.tags || []), 'blocked']
+      const replanned = this.blockOrReplan(project, task, patch)
       updateTask(project.path, a.taskId, patch)
       appendToSection(project.path, a.taskId, 'Log de erros',
         `[${runMeta.completed_at}] Teto de ${turnLimit(project)} turnos atingido — a sessão parou no meio. ` +
         `Sem nova tentativa automática (repetir gastaria o mesmo para parar no mesmo ponto). ` +
-        `Quebre a task em partes menores ou aumente o limite de turnos do projeto.`)
+        (replanned ? REPLAN_NOTE : `Quebre a task em partes menores ou aumente o limite de turnos do projeto.`))
       this.emit('run.finished', {
         projectId: a.projectId, taskId: a.taskId, exitCode, maxTurns: true,
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
@@ -792,20 +970,35 @@ export class Runner {
       const { maxAttempts, backoffMinutes } = retrySettings(project)
       const patch = { status: 'todo', run: runMeta }
       let retryAt = null
+      let replanned = false
       if (attempts >= maxAttempts) {
-        if (task && !task.tags?.includes('blocked')) patch.tags = [...(task.tags || []), 'blocked']
+        replanned = this.blockOrReplan(project, task, patch)
       } else if (project.autoRun && backoffMinutes > 0) {
         retryAt = new Date(Date.parse(runMeta.completed_at) + backoffMinutes * 60_000).toISOString()
         patch.scheduled_at = retryAt
       }
       updateTask(project.path, a.taskId, patch)
-      const verifyRetryNote = retryAt
+      const verifyRetryNote = (retryAt
         ? `\nNova tentativa agendada para ${retryAt} (tentativa ${attempts + 1} de ${maxAttempts}).`
-        : ''
-      appendToSection(project.path, a.taskId, 'Log de erros',
-        `[${runMeta.completed_at}] Verificação falhou: \`${verify.command}\` (exit ${verify.exitCode}).${verifyRetryNote}\n\n\`\`\`\n${verify.output}\n\`\`\``)
+        : '') + (replanned ? `\n${REPLAN_NOTE}` : '')
+      appendToSection(project.path, a.taskId, 'Log de erros', verify.review
+        ? `[${runMeta.completed_at}] Revisão automática reprovou o trabalho.${verifyRetryNote}\n\n${verify.output}`
+        : `[${runMeta.completed_at}] Verificação falhou: \`${verify.command}\` (exit ${verify.exitCode}).${verifyRetryNote}\n\n\`\`\`\n${verify.output}\n\`\`\``)
       this.emit('run.finished', {
         projectId: a.projectId, taskId: a.taskId, exitCode, verifyFailed: true,
+        costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
+        numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
+      })
+    } else if (exitCode === 0 && !a.timedOut && (integrateError = this.integrate(project, task, a.workspace))) {
+      // A subtask passou, mas não entrou na branch do pai: repetir não resolve
+      // conflito, então vai para revisão humana (o pai segue esperando).
+      updateTask(project.path, a.taskId, {
+        status: 'todo', run: { ...runMeta, exit_reason: 'integration_conflict' }, tags: withTag(task.tags, 'blocked'),
+      })
+      appendToSection(project.path, a.taskId, 'Log de erros',
+        `[${runMeta.completed_at}] Não consegui mergear ${a.workspace.branch} na branch da task pai: ${integrateError}`)
+      this.emit('run.finished', {
+        projectId: a.projectId, taskId: a.taskId, exitCode: -1, exitReason: 'integration_conflict',
         costUsd: runMeta.cost_usd, durationMs: runMeta.duration_ms,
         numTurns: runMeta.num_turns, sessionId: runMeta.session_id,
       })
@@ -815,7 +1008,11 @@ export class Runner {
       if (a.rawPhase && r.result?.trim()) {
         updateTask(project.path, a.taskId, { body: replaceSection(task.body, 'Resultado', r.result.trim()) })
       }
-      updateTask(project.path, a.taskId, { status: 'done', run: runMeta })
+      const done = updateTask(project.path, a.taskId, {
+        status: 'done', run: runMeta,
+        ...(parentIdOf(task) && a.workspace.branch ? { tags: withTag(task.tags, INTEGRATED_TAG) } : {}),
+      })
+      try { harvestNotes(project.path, done) } catch {}
       // Registra no ledger ANTES de qualquer coisa depender do status: mesmo que
       // o done/ se perca depois, o card não roda de novo.
       markSucceeded(a.taskId, { completedAt: runMeta.completed_at, sessionId: runMeta.session_id })
@@ -836,8 +1033,9 @@ export class Runner {
       const { maxAttempts, backoffMinutes } = retrySettings(project)
       const patch = { status: 'todo', run: runMeta }
       let retryAt = null
+      let replanned = false
       if (attempts >= maxAttempts) {
-        if (task && !task.tags?.includes('blocked')) patch.tags = [...(task.tags || []), 'blocked']
+        replanned = this.blockOrReplan(project, task, patch)
       } else if (project.autoRun && backoffMinutes > 0) {
         // Ainda há tentativa sobrando: em vez de deixar o auto-run repescar a task
         // no mesmo tick, marca o horário do retry e deixa o Scheduler enfileirá-la
@@ -846,9 +1044,9 @@ export class Runner {
         patch.scheduled_at = retryAt
       }
       updateTask(project.path, a.taskId, patch)
-      const retryNote = retryAt
+      const retryNote = (retryAt
         ? `\nNova tentativa agendada para ${retryAt} (tentativa ${attempts + 1} de ${maxAttempts}).`
-        : ''
+        : '') + (replanned ? `\n${REPLAN_NOTE}` : '')
       appendToSection(project.path, a.taskId, 'Log de erros',
         `[${runMeta.completed_at}] ${reason}${retryNote}` +
         (detail ? `\n\nMensagem da sessão:\n\n> ${detail.replace(/\n/g, '\n> ')}` : '') +
@@ -860,6 +1058,20 @@ export class Runner {
       })
     }
     this.tick()
+  }
+
+  // Subtask concluída: a branch dela entra na branch de integração do pai, de
+  // onde a próxima irmã parte. Devolve a mensagem de erro, ou null.
+  integrate(project, task, workspace) {
+    const parentId = parentIdOf(task)
+    const into = parentId && taskBranch(parentId)
+    if (!into || !workspace.branch || workspace.branch === into) return null
+    try {
+      mergeIntoBranch(project.path, workspace.branch, into)
+      return null
+    } catch (e) {
+      return e.message || String(e)
+    }
   }
 
   // Crash recovery: tasks presas em doing/ sem processo ativo voltam para todo/
@@ -889,13 +1101,15 @@ export function exitReason(a, exitCode, verify) {
   if (a.timedOut) return 'timeout'
   if (a.killed) return 'killed'
   if (r.subtype === 'error_max_turns') return 'max_turns'
-  if (exitCode === 0) return verify && !verify.ok ? 'verify_failed' : null
+  if (exitCode === 0) return verify && !verify.ok ? (verify.review ? 'review_rejected' : 'verify_failed') : null
   if (r.subtype === 'error_max_budget_usd') return 'max_budget'
   if (r.subtype === 'error_during_execution') return 'execution_error'
   if (r.is_error) return 'api_error'
   // Sem exit code = processo morto por sinal que não veio do orquestrador (OOM, kill externo).
   return exitCode == null ? 'signal' : 'exit_code'
 }
+
+const REPLAN_NOTE = 'Replanejando: com o autoDecompose do projeto ligado, a task será desmembrada levando este log como contexto.'
 
 const EXIT_REASON_TEXT = {
   max_budget: 'Teto de custo da sessão atingido',
@@ -922,6 +1136,14 @@ export function buildRawPrompt(task, phase, plan, resumed) {
   return phase === 'execute' && plan ? `${base}\n\nExecute este plano, já aprovado:\n\n${plan}` : base
 }
 
+// Subtask não faz push nem PR: a branch dela é integrada pelo orquestrador na
+// branch do pai, e quem entrega (push/PR na base) é o run de integração.
+function promptGit(project, task) {
+  const g = gitSettings(project)
+  const parentId = parentIdOf(task)
+  return parentId ? { ...g, integratesInto: taskBranch(parentId) } : g
+}
+
 function gitInstructions(branch, g) {
   if (!branch) return ''
   const steps = [`
@@ -932,7 +1154,11 @@ function gitInstructions(branch, g) {
      - confirme com \`git status\` que o working tree está limpo (nada em
        "Changes not staged" nem "Untracked files") ANTES de terminar.
    Se sobrar qualquer arquivo não commitado, o trabalho será perdido.`]
-  if (g.autoPush) {
+  if (g.integratesInto) {
+    steps.push(`
+6. NÃO faça push nem abra PR — o orquestrador integra esta branch em
+   "${g.integratesInto}" (a branch da task pai) quando você terminar.`)
+  } else if (g.autoPush) {
     steps.push(`
 6. Se o repositório tiver remote configurado, faça push (git push -u origin ${branch}).`)
     if (g.autoPR) {
@@ -991,6 +1217,10 @@ const humanRequestInstructions = autoDecide =>
 // Bloco com o par pergunta/resposta quando o run é uma retomada sem sessão (ou um
 // fallback de resume que falhou): as seções já saíram do corpo da task, então o
 // contexto precisa vir pelo prompt.
+const LEARNINGS_INSTRUCTION = `4b. Se descobriu algo NÃO óbvio sobre este projeto que pouparia tempo às próximas
+   tasks (convenção, armadilha, comando que funciona), registre em bullets curtos
+   numa seção "## Aprendizados" do arquivo da task. Nada de resumo do que fez.`
+
 function humanAnswerBlock(answer) {
   if (!answer) return ''
   return `
@@ -1033,17 +1263,18 @@ Instruções obrigatórias ao concluir:
 3. Se uma ação sua for bloqueada pelos guardrails do projeto, não tente contornar:
    registre no Resultado e siga com o restante da task.
 4. Se não conseguir concluir, escreva em "## Resultado" o que foi tentado,
-   onde travou e o que falta.${gitInstructions(branch, g)}`
+   onde travou e o que falta.
+${LEARNINGS_INSTRUCTION}${gitInstructions(branch, g)}`
 }
 
-function buildPrompt(taskRelPath, md, branch, g, enrichMode = 'off', answer = null, autoDecide = false) {
+export function buildPrompt(taskRelPath, md, branch, g, enrichMode = 'off', answer = null, autoDecide = false, context = '') {
   return `Você vai executar a task abaixo, definida no arquivo ${taskRelPath} deste projeto.
 Siga a skill "claude-kanban" deste projeto para o workflow de tasks.
 
 <task>
 ${md}
 </task>
-${humanAnswerBlock(answer)}${enrichInstructions(enrichMode)}${humanRequestInstructions(autoDecide)}
+${context}${humanAnswerBlock(answer)}${enrichInstructions(enrichMode)}${humanRequestInstructions(autoDecide)}
 Instruções obrigatórias ao concluir:
 1. Edite ${taskRelPath}, seção "## Resultado": resumo do que foi feito, decisões
    técnicas e porquês, arquivos criados/alterados, contexto para memória futura
@@ -1052,5 +1283,6 @@ Instruções obrigatórias ao concluir:
 3. Se uma ação sua for bloqueada pelos guardrails do projeto, não tente contornar:
    registre no Resultado e siga com o restante da task.
 4. Se não conseguir concluir, escreva em "## Resultado" o que foi tentado,
-   onde travou e o que falta.${gitInstructions(branch, g)}`
+   onde travou e o que falta.
+${LEARNINGS_INSTRUCTION}${gitInstructions(branch, g)}`
 }

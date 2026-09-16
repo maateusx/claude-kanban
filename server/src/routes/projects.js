@@ -62,7 +62,7 @@ export default function projectRoutes(app, ctx) {
   app.patch('/api/projects/:projectId', (req, reply) => {
     const p = withProjectRecord(ctx, req, reply); if (!p) return
     const { name, description, path: projectPath, skipPermissions, git, defaultModel, auxModel: auxModelIn,
-      autoRun, autoDecompose, autoDecide, devServer, timeoutMs, enrichMode, rawMode, retry, maxTurns,
+      autoRun, autoDecompose, autoDecide, reviewGate, goalBudgetUsd, devServer, timeoutMs, enrichMode, rawMode, retry, maxTurns,
       webhookUrl, webhookStatuses } = req.body || {}
     if (name !== undefined) {
       if (!String(name).trim()) return reply.code(400).send({ error: 'name não pode ser vazio' })
@@ -203,6 +203,14 @@ export default function projectRoutes(app, ctx) {
     }
     if (autoDecompose !== undefined) p.autoDecompose = !!autoDecompose
     if (autoDecide !== undefined) p.autoDecide = !!autoDecide
+    if (reviewGate !== undefined) p.reviewGate = !!reviewGate
+    if (goalBudgetUsd !== undefined) {
+      const n = goalBudgetUsd === null || goalBudgetUsd === '' ? null : Number(goalBudgetUsd)
+      if (n !== null && (!Number.isFinite(n) || n < 0)) {
+        return reply.code(400).send({ error: 'goalBudgetUsd deve ser um valor em dólares >= 0 (vazio desliga)' })
+      }
+      p.goalBudgetUsd = n || null
+    }
     if (autoRun !== undefined) {
       p.autoRun = !!autoRun
       if (p.autoRun) ctx.autoEnqueue(p)

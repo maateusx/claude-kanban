@@ -147,7 +147,7 @@ export default function taskRoutes(app, ctx) {
     const p = withProject(ctx, req, reply); if (!p) return
     if (!ctx.claudeAvailable()) return noClaude(reply)
     try {
-      return await analyzeProject(p, req.body?.types)
+      return await analyzeProject(p, req.body?.types, req.body?.question, req.body?.report)
     } catch (e) {
       return reply.code(500).send({ error: e.message })
     }
