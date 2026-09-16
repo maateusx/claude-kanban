@@ -87,6 +87,8 @@ const FAIL_RE = /\b(fail|failed|failing|failure|error|errors)\b|✖|✗|\bnot ok
 const normLine = l => l.replace(/\(?\d+(\.\d+)?\s?m?s\)?/g, '').replace(/\s+/g, ' ').trim()
 const failLines = out => new Set(String(out).split('\n').filter(l => FAIL_RE.test(l)).map(normLine))
 
+const BASE_DIR_MARK = '\0base-dir\0'
+
 // Falhas da task que a base não tinha. [] = tudo que falhou já falhava antes.
 export function newFailures(taskOut, baseOut) {
   const mine = failLines(taskOut)
@@ -901,12 +903,19 @@ export class Runner {
     if (!this.baselines.has(key)) {
       if (this.baselines.size > 50) this.baselines.clear()
       let res = null
-      try { res = withDetachedWorktree(project.path, sha, dir => runVerify(verify.command, dir)) } catch {}
+      // o caminho do worktree da base vira um marcador (o cache serve a tasks em cwds diferentes)
+      try {
+        res = withDetachedWorktree(project.path, sha, dir => {
+          const r = runVerify(verify.command, dir)
+          return { ...r, output: r.output.split(dir).join(BASE_DIR_MARK) }
+        })
+      } catch {}
       this.baselines.set(key, res)
     }
     const base = this.baselines.get(key)
     if (!base || base.ok) return verify
-    const fresh = newFailures(verify.output, base.output)
+    // sem isso toda linha com caminho absoluto parece falha nova
+    const fresh = newFailures(verify.output, base.output.split(BASE_DIR_MARK).join(workspace.cwd || project.path))
     if (!fresh.length) return { ...verify, ok: true, preexisting: true }
     const head = `Falhas novas — a base ${sha.slice(0, 8)} já falhava, mas não nestas linhas:\n${fresh.join('\n')}\n\n`
     return { ...verify, output: head + verify.output.slice(-(MAX_VERIFY_OUTPUT - head.length)) }

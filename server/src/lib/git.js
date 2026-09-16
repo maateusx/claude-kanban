@@ -264,6 +264,22 @@ export function diffBase(ws) {
   try { return git(ws.cwd, 'merge-base', ws.startPoint, 'HEAD') } catch { return ws.startSha || null }
 }
 
+// Worktree novo não tem dependências: sem isso o verify da base falha por
+// "módulo não encontrado" e toda falha da task parece nova. Reaproveita os
+// node_modules do checkout (raiz e um nível abaixo, para monorepos).
+// ponytail: dependências da base podem diferir das do checkout; npm ci no
+// worktree se isso gerar falso positivo.
+function linkNodeModules(root, dir) {
+  const subs = ['', ...fs.readdirSync(root, { withFileTypes: true })
+    .filter(e => e.isDirectory() && e.name !== 'node_modules' && !e.name.startsWith('.')).map(e => e.name)]
+  for (const sub of subs) {
+    const src = path.join(root, sub, 'node_modules')
+    const dest = path.join(dir, sub, 'node_modules')
+    if (!fs.existsSync(src) || !fs.existsSync(path.dirname(dest)) || fs.existsSync(dest)) continue
+    try { fs.symlinkSync(src, dest, 'dir') } catch {}
+  }
+}
+
 // Roda fn(dir) num worktree destacado em `sha` e remove o worktree no fim.
 // Usado pelo verify de referência: saber se a base já falhava sem tocar no
 // checkout de ninguém.
@@ -273,6 +289,7 @@ export function withDetachedWorktree(root, sha, fn) {
   try { git(root, 'worktree', 'prune') } catch {}
   git(root, 'worktree', 'add', '--detach', dir, sha)
   try {
+    linkNodeModules(root, dir)
     return fn(dir)
   } finally {
     try { git(root, 'worktree', 'remove', '--force', dir) } catch {
