@@ -5,6 +5,7 @@ import { bootstrapProject, uninstallGuardrails } from '../lib/bootstrap.js'
 import { DEFAULT_GIT, gitSettings } from '../lib/git.js'
 import { normalizeModel } from '../lib/models.js'
 import { MAINTENANCE_TYPES } from '../lib/autopilot.js'
+import { autoResolvePending } from '../lib/pending.js'
 import { retrySettings, MAX_MAX_TURNS, RAW_MODES } from '../lib/runner.js'
 import { pluginsView, syncProjectPlugins, normalizeKeys, PLUGIN_KEYS } from '../lib/plugins.js'
 import { invalidModelMsg, withProject, withProjectRecord, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS } from './helpers.js'
@@ -303,6 +304,9 @@ export default function projectRoutes(app, ctx) {
       p.git = next
     }
     saveProjects(db)
+    // política nova vale também para o que já estava pendente (o watcher só
+    // reavalia quando o pending-actions.md muda)
+    if (guardrailPolicy !== undefined) autoResolvePending(p).catch(e => console.error(`guardrailPolicy (${p.name}): ${e.message}`))
     return { project: projectView(p) }
   })
 
