@@ -243,6 +243,11 @@ export function prepareWorkspace(project, taskId, { parentId = null } = {}) {
     // .claude/ pode não estar commitado (hooks, settings, tasks) — copia do projeto
     if (fs.existsSync(path.join(root, '.claude'))) copyClaudeDir(root, path.join(cwd, '.claude'))
     copyEnvFiles(root, cwd)
+    // Sem dependências o verify da task cai em "tsc: command not found" sempre
+    // que a sessão não rodou npm install por conta própria.
+    // ponytail: node_modules compartilhado com o checkout — npm install de dep
+    // nova na sessão escreve no do projeto; npm ci no worktree se isso pesar.
+    linkNodeModules(root, cwd)
     excludeKanbanFromCommits(cwd)
     let startSha = headSha(cwd)
     // baseSha: de onde a branch saiu — é contra ele que o verify de referência
@@ -315,7 +320,10 @@ function linkNodeModules(root, dir) {
     const src = path.join(root, sub, 'node_modules')
     const dest = path.join(dir, sub, 'node_modules')
     if (!fs.existsSync(src) || !fs.existsSync(path.dirname(dest)) || fs.existsSync(dest)) continue
-    try { fs.symlinkSync(src, dest, 'dir') } catch {}
+    try { fs.symlinkSync(src, dest, 'dir') } catch { continue }
+    // "node_modules/" no .gitignore não casa com symlink: um link não ignorado
+    // entraria no auto-commit de segurança da sessão.
+    try { git(dir, 'check-ignore', '-q', path.join(sub, 'node_modules')) } catch { fs.rmSync(dest, { force: true }) }
   }
 }
 
