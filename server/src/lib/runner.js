@@ -7,7 +7,7 @@ import { decomposeTask, subtaskLevel, designSubtask, MAX_DECOMPOSE_LEVEL } from 
 import { specBlock, needsDesign, SPEC_REL, DESIGN_TAG } from './spec.js'
 import { diagnoseTask, DIAGNOSED_PREFIX } from './diagnoser.js'
 import {
-  prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, taskBranch,
+  prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, integrationBranch,
   mergeTaskBranch, withDetachedWorktree, diffStats, diffBase, mergeResult, resolveRef,
 } from './git.js'
 import { reviewTask, screenshotApp } from './reviewer.js'
@@ -203,6 +203,17 @@ export const REPLANNED_TAG = 'replanejada'
 export const INTEGRATED_TAG = 'integrada'
 
 export const parentIdOf = task => (task?.tags || []).find(t => t.startsWith('pai:'))?.slice(4) || null
+
+// Task que pode entrar na fila sem pedido explícito (auto-run, filhas de uma
+// árvore executada): em todo, sem esperar humano, sem horário no futuro.
+// Quem re-tenta sozinho depois de uma falha: com auto-run, qualquer task; sem
+// ele, só a árvore mandada executar — as filhas e o pai que as integra.
+const retriesItself = (project, task) => !!project.autoRun || !!parentIdOf(task)
+  || !!task.tags?.includes(DECOMPOSED_TAG)
+
+export const autoRunnable = t => t.status === 'todo'
+  && !(t.tags || []).includes('blocked') && !(t.tags || []).includes(HUMAN_REQUEST_TAG)
+  && !isFuture(t.scheduled_at)
 // Objetivo: task raiz que foi desmembrada — a que o loop de lacunas audita.
 export const isGoal = task => !!task?.tags?.includes(DECOMPOSED_TAG) && !parentIdOf(task)
 const withTag = (tags, tag) => (tags || []).includes(tag) ? (tags || []) : [...(tags || []), tag]
@@ -483,6 +494,13 @@ export class Runner {
     this.queue.splice(at, 0, { projectId, taskId, priority: task.priority || 'medium' })
     this.persist()
     this.emit('run.queued', { projectId, taskId, position: at })
+    // O pai desmembrado depende das filhas: sem elas na fila ele nunca sairia.
+    // Executar o pai executa a árvore (recursivo: filha desmembrada puxa as suas).
+    if (task.tags?.includes(DECOMPOSED_TAG)) {
+      for (const c of listTasks(project.path)) {
+        if (parentIdOf(c) === taskId && autoRunnable(c)) this.enqueue(projectId, c.id, { auto: true })
+      }
+    }
     this.tick()
     return true
   }
@@ -642,7 +660,9 @@ export class Runner {
     const sessionId = task.run?.session_id || null
     // Continuar a sessão anterior só faz sentido quando há resposta humana para
     // entregar: sem ela, o run é uma re-execução do zero.
-    const raw = rawModeOf(project)
+    // Resolução de conflito roda no modo normal mesmo em projeto cru: o prompt
+    // cru é só título + descrição e não levaria as instruções do merge.
+    const raw = task.run?.merge_from ? null : rawModeOf(project)
     const rawPhase = !raw ? null : rawExec || raw === 'execute' ? 'execute' : 'plan'
     const resumeFrom = rawExec
       ? (!noResume && rawExec.plan && rawExec.sessionId) || null
@@ -1007,7 +1027,7 @@ export class Runner {
     try { files = testFiles(diffStats(captureDiff(ws.cwd, diffBase(ws))).files) } catch {}
     let base
     try {
-      base = withDetachedWorktree(project.path, sha, dir => {
+      base = withDetachedWorktree(project, sha, dir => {
         for (const f of files) {
           const src = path.join(ws.cwd, f)
           if (!fs.existsSync(src)) continue
@@ -1039,7 +1059,7 @@ export class Runner {
       let res = null
       // o caminho do worktree da base vira um marcador (o cache serve a tasks em cwds diferentes)
       try {
-        res = withDetachedWorktree(project.path, sha, dir => {
+        res = withDetachedWorktree(project, sha, dir => {
           const r = runVerify(verify.command, dir)
           return { ...r, output: r.output.split(dir).join(BASE_DIR_MARK) }
         })
@@ -1223,7 +1243,7 @@ export class Runner {
     const cmd = String(project.verifyCommand || '').trim()
     const branch = task.run?.branch
     if (!cmd || !branch || !isGitRepo(project.path)) return null
-    try { return withDetachedWorktree(project.path, branch, dir => runVerify(cmd, dir), '_flaky') } catch { return null }
+    try { return withDetachedWorktree(project, branch, dir => runVerify(cmd, dir), '_flaky') } catch { return null }
   }
 
   finish(a, exitCode) {
@@ -1374,7 +1394,7 @@ export class Runner {
       let replanned = false
       if (attempts >= maxAttempts) {
         replanned = this.blockOrReplan(project, task, patch)
-      } else if (project.autoRun && backoffMinutes > 0) {
+      } else if (retriesItself(project, task) && backoffMinutes > 0) {
         retryAt = new Date(Date.parse(runMeta.completed_at) + backoffMinutes * 60_000).toISOString()
         patch.scheduled_at = retryAt
       }
@@ -1421,7 +1441,7 @@ export class Runner {
         pr: runMeta.pr,
       })
       // Subtask integra no pai; o resto vai para a base se a política deixar.
-      const into = parentIdOf(task) && taskBranch(parentIdOf(task))
+      const into = integrationBranch(project, parentIdOf(task))
       if (into) {
         if (a.workspace.branch && a.workspace.branch !== into) {
           this.enqueueMerge({ projectId: project.id, taskId: a.taskId, branch: a.workspace.branch, into, kind: 'parent' })
@@ -1444,7 +1464,7 @@ export class Runner {
       let replanned = false
       if (attempts >= maxAttempts) {
         replanned = this.blockOrReplan(project, task, patch)
-      } else if (project.autoRun && backoffMinutes > 0) {
+      } else if (retriesItself(project, task) && backoffMinutes > 0) {
         // Ainda há tentativa sobrando: em vez de deixar o auto-run repescar a task
         // no mesmo tick, marca o horário do retry e deixa o Scheduler enfileirá-la
         // quando o backoff vencer (autoEnqueue ignora scheduled_at no futuro).
@@ -1472,7 +1492,7 @@ export class Runner {
   // task). Devolve false — e marca blocked — quando não dá para tentar de novo.
   scheduleConflictFix(project, task, mergeFrom, runMeta, message) {
     const rounds = task.run?.conflict_rounds || 0
-    const resolving = !rawModeOf(project) && rounds < MAX_CONFLICT_ROUNDS
+    const resolving = rounds < MAX_CONFLICT_ROUNDS
     const updated = updateTask(project.path, task.id, {
       status: 'todo',
       run: resolving ? { ...runMeta, merge_from: mergeFrom, conflict_rounds: rounds + 1 } : runMeta,
@@ -1546,7 +1566,7 @@ export class Runner {
     if (cmd && !r.tested) {
       item.stage = 'verify'
       this.emit('run.queue', this.getQueueView())
-      const v = await withDetachedWorktree(project.path, r.sha, async dir => {
+      const v = await withDetachedWorktree(project, r.sha, async dir => {
         const out = await runVerifyAsync(cmd, dir)
         return out.ok ? out : this.compareWithBaseline(project, { baseSha: r.head, cwd: dir }, out)
       }, '_merge')
@@ -1684,10 +1704,19 @@ export function exitPlanText(event) {
 }
 
 // Prompt do modo cru: só o que a pessoa escreveria no terminal.
+// Retentativa em modo cru: o prompt é só título + descrição, e o motivo da
+// falha anterior (revisão, verify) se perderia — a sessão repetiria o erro.
+function lastFailure(task) {
+  if (!task.run?.attempts) return ''
+  const log = (getSection(task.body, 'Log de erros') || '').replace(/<!--[\s\S]*?-->/g, '').trim()
+  const last = log.split(/\n(?=\[\d{4}-\d{2}-\d{2}T)/).pop()?.trim()
+  return last ? `\n\nA tentativa anterior não passou. Corrija isto:\n\n${last.slice(-4000)}` : ''
+}
+
 export function buildRawPrompt(task, phase, plan, resumed) {
   if (phase === 'execute' && plan && resumed) return 'Plano aprovado. Execute-o agora, do início ao fim.'
   const desc = getSection(task.body, 'Descrição') || ''
-  const base = desc ? `${task.title}\n\n${desc}` : task.title
+  const base = (desc ? `${task.title}\n\n${desc}` : task.title) + lastFailure(task)
   return phase === 'execute' && plan ? `${base}\n\nExecute este plano, já aprovado:\n\n${plan}` : base
 }
 
@@ -1696,7 +1725,9 @@ export function buildRawPrompt(task, phase, plan, resumed) {
 function promptGit(project, task) {
   const g = gitSettings(project)
   const parentId = parentIdOf(task)
-  return parentId ? { ...g, integratesInto: taskBranch(parentId) } : g
+  if (!parentId) return g
+  const into = integrationBranch(project, parentId)
+  return into ? { ...g, integratesInto: into } : { ...g, autoPush: false }
 }
 
 function gitInstructions(branch, g) {

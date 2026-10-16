@@ -433,12 +433,12 @@ export class Autopilot {
     const mine = tasks.filter(t => parentIdOf(t) === goal.id)
     const known = mine.filter(t => (t.tags || []).includes(GAP_TAG))
     const audit = cwd => findGaps(p, goal, cwd, known)
-    // O código do objetivo está na branch dele; se ela já foi mergeada e
-    // removida, na base.
+    // O código do objetivo está na branch em que o run de integração rodou (a
+    // atual, sem branch de integração); se ela já foi mergeada e removida, na base.
     let res
     if (isGitRepo(p.path)) {
-      const sha = resolveRef(p.path, taskBranch(goal.id)) || resolveRef(p.path, gitSettings(p).baseBranch)
-      res = sha ? await withDetachedWorktree(p.path, sha, audit, '_gaps') : await audit(p.path)
+      const sha = resolveRef(p.path, goal.run?.branch || taskBranch(goal.id)) || resolveRef(p.path, gitSettings(p).baseBranch)
+      res = sha ? await withDetachedWorktree(p, sha, audit, '_gaps') : await audit(p.path)
     } else {
       res = await audit(p.path)
     }

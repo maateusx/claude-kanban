@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   gitSettings, DEFAULT_GIT, prepareWorkspace, cleanupWorkspace, taskBranch, captureDiff,
-  mergeTaskBranch, deleteTaskBranch,
+  mergeTaskBranch, deleteTaskBranch, withDetachedWorktree,
 } from '../src/lib/git.js'
 
 const sh = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -56,6 +56,67 @@ test('worktree: cria branch nova a partir da base e limpa preservando a branch',
   assert.equal(sh(root, 'rev-parse', '--verify', '--quiet', 'refs/heads/kanban/tw1') !== '', true)
 })
 
+test('worktree de projeto em subpasta do repo: roda na subpasta e os metadados ficam fora do git', () => {
+  const root = repo()
+  const sub = path.join(root, 'crm')
+  mkdirSync(path.join(sub, '.claude/claude-kanban/tasks/todo'), { recursive: true })
+  writeFileSync(path.join(sub, 'app.txt'), 'app\n')
+  sh(root, 'add', 'crm/app.txt')
+  sh(root, 'commit', '-m', 'crm')
+  const rel = '.claude/claude-kanban/tasks/todo/t.md'
+  writeFileSync(path.join(sub, rel), 'task\n')
+  const project = projectFor(sub)
+
+  const ws = prepareWorkspace(project, 'ts1')
+  assert.equal(ws.cwd, path.join(ws.worktreeDir, 'crm'))
+  assert.ok(existsSync(path.join(ws.cwd, rel)), '.claude do projeto vai para a subpasta do worktree')
+  assert.equal(sh(ws.cwd, 'status', '--porcelain'), '', 'o git add -A da sessão não pega a task')
+
+  writeFileSync(path.join(ws.cwd, rel), 'resultado\n')
+  cleanupWorkspace(project, ws, rel)
+  assert.equal(readFileSync(path.join(sub, rel), 'utf8'), 'resultado\n')
+  assert.equal(withDetachedWorktree(sub, 'main', dir => readFileSync(path.join(dir, 'app.txt'), 'utf8')), 'app\n')
+})
+
+test('worktree recebe os .env que o git ignora (e só esses)', () => {
+  const root = repo()
+  mkdirSync(path.join(root, 'backend'))
+  writeFileSync(path.join(root, 'backend/app.txt'), 'app\n')
+  writeFileSync(path.join(root, '.gitignore'), '.env\nnode_modules/\n')
+  writeFileSync(path.join(root, 'backend/.gitignore'), 'node_modules\n')
+  mkdirSync(path.join(root, 'backend/node_modules/.bin'), { recursive: true })
+  mkdirSync(path.join(root, 'node_modules'))
+  sh(root, 'add', '.')
+  sh(root, 'commit', '-m', 'backend')
+  writeFileSync(path.join(root, 'backend/.env'), 'SEGREDO=1\n')
+  writeFileSync(path.join(root, 'backend/.env.local'), 'NAO_IGNORADO=1\n')
+  const project = projectFor(root)
+
+  const ws = prepareWorkspace(project, 'te1')
+  assert.ok(existsSync(path.join(ws.cwd, 'backend/node_modules/.bin')), 'dependências ligadas no worktree da sessão')
+  assert.ok(!existsSync(path.join(ws.cwd, 'node_modules')), '"node_modules/" não ignora o link: não liga')
+  assert.equal(readFileSync(path.join(ws.cwd, 'backend/.env'), 'utf8'), 'SEGREDO=1\n')
+  assert.ok(!existsSync(path.join(ws.cwd, 'backend/.env.local')), 'não ignorado iria para o auto-commit')
+  assert.equal(sh(ws.cwd, 'status', '--porcelain'), '', 'nada disso aparece para o git add -A')
+  cleanupWorkspace(project, ws, 'nada.md')
+  assert.equal(withDetachedWorktree(root, 'main', dir => existsSync(path.join(dir, 'backend/.env'))), true)
+})
+
+test('setupCommand roda no worktree da sessão e no destacado', () => {
+  const root = repo()
+  writeFileSync(path.join(root, '.gitignore'), 'gerado/\n')
+  sh(root, 'add', '.')
+  sh(root, 'commit', '-m', 'ignore')
+  const project = { ...projectFor(root), setupCommand: 'mkdir -p gerado && echo ok > gerado/client.js' }
+
+  const ws = prepareWorkspace(project, 'tsu1')
+  assert.equal(readFileSync(path.join(ws.cwd, 'gerado/client.js'), 'utf8'), 'ok\n')
+  cleanupWorkspace(project, ws, 'nada.md')
+  assert.equal(withDetachedWorktree(project, 'main', dir => existsSync(path.join(dir, 'gerado/client.js'))), true)
+  const falha = { ...project, setupCommand: 'exit 3' }
+  assert.equal(withDetachedWorktree(falha, 'main', () => 'seguiu'), 'seguiu', 'setup que falha não aborta')
+})
+
 test('sem worktree: checkout da base + branch nova', () => {
   const root = repo()
   sh(root, 'checkout', '-b', 'outra')
@@ -71,6 +132,21 @@ test('sem worktree, branch atual, sem branch nova: fica onde está', () => {
   const ws = prepareWorkspace(projectFor(root, { useWorktree: false, useCurrentBranch: true, commitToNewBranch: false }), 'tc1')
   assert.equal(ws.branch, 'feature-x')
   assert.equal(sh(root, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feature-x')
+})
+
+test('branch atual: subtask não cria branch de integração; com worktree, ela parte do HEAD', () => {
+  const root = repo()
+  sh(root, 'checkout', '-b', 'feature-x')
+  writeFileSync(path.join(root, 'b.txt'), 'b\n')
+  sh(root, 'add', '.')
+  sh(root, 'commit', '-m', 'feature')
+  const flat = projectFor(root, { useWorktree: false, useCurrentBranch: true, commitToNewBranch: false })
+  assert.equal(prepareWorkspace(flat, 'sub1', { parentId: 'pai1' }).branch, 'feature-x')
+  assert.equal(sh(root, 'branch', '--list', 'kanban/*'), '')
+
+  const ws = prepareWorkspace(projectFor(root, { useCurrentBranch: true }), 'sub2', { parentId: 'pai2' })
+  assert.equal(sh(root, 'rev-parse', 'kanban/pai2'), sh(root, 'rev-parse', 'feature-x'))
+  cleanupWorkspace(projectFor(root), ws, 'nada.md')
 })
 
 test('captureDiff: commits, não commitados e untracked; ignora .claude/claude-kanban', () => {

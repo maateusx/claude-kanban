@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { HOME_DIR } from './paths.js'
@@ -18,6 +18,14 @@ export const gitSettings = project => ({ ...DEFAULT_GIT, ...(project.git || {}) 
 
 export const taskBranch = taskId => `kanban/${taskId}`
 
+// Branch de integração de uma task desmembrada. Sem worktree, sem branch nova e
+// com "usar a branch atual", a pessoa não quer branch nenhuma: as filhas rodam em
+// sequência no mesmo checkout (sem worktree não há paralelo) e já se enxergam.
+export function integrationBranch(project, parentId) {
+  const g = gitSettings(project)
+  return parentId && (g.useWorktree || g.commitToNewBranch || !g.useCurrentBranch) ? taskBranch(parentId) : null
+}
+
 function git(cwd, ...args) {
   try {
     return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -30,6 +38,10 @@ function git(cwd, ...args) {
 export function isGitRepo(dir) {
   try { return git(dir, 'rev-parse', '--is-inside-work-tree') === 'true' } catch { return false }
 }
+
+// Caminho do projeto dentro do repo ("crm/" num monorepo, "" na raiz). Um
+// worktree é sempre do repo inteiro: a sessão roda em <worktree>/<prefixo>.
+const repoPrefix = dir => git(dir, 'rev-parse', '--show-prefix').replace(/\/$/, '')
 
 // Garante que os metadados do kanban nunca sejam commitados pela sessão (git add -A),
 // mesmo que o .gitignore do projeto não esteja commitado na branch base. Escreve os
@@ -44,14 +56,16 @@ const KANBAN_EXCLUDES = [
 ]
 export function excludeKanbanFromCommits(cwd) {
   try {
-    const gitDir = git(cwd, 'rev-parse', '--git-dir') // absoluto ou relativo ao cwd
-    const base = path.isAbsolute(gitDir) ? gitDir : path.join(cwd, gitDir)
+    // Common dir: o git ignora o info/exclude do git dir de um worktree. Os
+    // padrões são relativos à raiz do repo — projeto em subpasta leva o prefixo.
+    const base = git(cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    const prefix = repoPrefix(cwd)
     const info = path.join(base, 'info')
     const file = path.join(info, 'exclude')
     fs.mkdirSync(info, { recursive: true })
     const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
     const have = new Set(existing.split('\n'))
-    const add = KANBAN_EXCLUDES.filter(l => !have.has(l))
+    const add = KANBAN_EXCLUDES.map(l => path.posix.join(prefix, l)).filter(l => !have.has(l))
     if (add.length) {
       fs.writeFileSync(file, existing + (existing === '' || existing.endsWith('\n') ? '' : '\n') + add.join('\n') + '\n')
     }
@@ -183,11 +197,14 @@ export function copyClaudeDir(root, dest) {
 // Branch de integração de uma task desmembrada: as subtasks partem dela e voltam
 // para ela (mergeIntoBranch), então a 2ª subtask enxerga o código da 1ª. Criada
 // da base na primeira vez que alguma filha precisa dela.
-function ensureParentBranch(root, g, parentId) {
-  const branch = taskBranch(parentId)
+// Com "usar a branch atual", parte do HEAD do checkout, não da base.
+function ensureParentBranch(root, g, branch) {
   if (!branchExists(root, branch)) {
-    if (g.pullBeforeStart) updateBase(root, g.baseBranch)
-    git(root, 'branch', branch, resolveStartPoint(root, g.baseBranch))
+    if (g.useCurrentBranch) git(root, 'branch', branch, 'HEAD')
+    else {
+      if (g.pullBeforeStart) updateBase(root, g.baseBranch)
+      git(root, 'branch', branch, resolveStartPoint(root, g.baseBranch))
+    }
   }
   return branch
 }
@@ -204,7 +221,8 @@ export function prepareWorkspace(project, taskId, { parentId = null } = {}) {
   if (!isGitRepo(root)) return { cwd: root, branch: null, worktreeDir: null, startSha: null }
 
   const newBranch = taskBranch(taskId)
-  const parentBranch = parentId ? ensureParentBranch(root, g, parentId) : null
+  const into = integrationBranch(project, parentId)
+  const parentBranch = into ? ensureParentBranch(root, g, into) : null
 
   if (g.useWorktree) {
     // Worktree exige branch própria (git não permite a mesma branch em dois worktrees),
@@ -221,16 +239,24 @@ export function prepareWorkspace(project, taskId, { parentId = null } = {}) {
     const existed = branchExists(root, newBranch)
     if (existed) git(root, 'worktree', 'add', dir, newBranch)
     else git(root, 'worktree', 'add', dir, '-b', newBranch, startPoint)
+    const cwd = path.join(dir, repoPrefix(root))
     // .claude/ pode não estar commitado (hooks, settings, tasks) — copia do projeto
-    if (fs.existsSync(path.join(root, '.claude'))) copyClaudeDir(root, path.join(dir, '.claude'))
-    excludeKanbanFromCommits(dir)
-    let startSha = headSha(dir)
+    if (fs.existsSync(path.join(root, '.claude'))) copyClaudeDir(root, path.join(cwd, '.claude'))
+    copyEnvFiles(root, cwd)
+    // Sem dependências o verify da task cai em "tsc: command not found" sempre
+    // que a sessão não rodou npm install por conta própria.
+    // ponytail: node_modules compartilhado com o checkout — npm install de dep
+    // nova na sessão escreve no do projeto; npm ci no worktree se isso pesar.
+    linkNodeModules(root, cwd)
+    runSetup(project.setupCommand, cwd)
+    excludeKanbanFromCommits(cwd)
+    let startSha = headSha(cwd)
     // baseSha: de onde a branch saiu — é contra ele que o verify de referência
     // roda (numa branch retomada, o HEAD já tem commits da própria task).
     let baseSha = startSha
     try { baseSha = git(root, 'merge-base', startPoint, newBranch) } catch {}
     if (existed) startSha = baseSha
-    return { cwd: dir, branch: newBranch, worktreeDir: dir, startSha, baseSha, startPoint }
+    return { cwd, branch: newBranch, worktreeDir: dir, startSha, baseSha, startPoint }
   }
 
   let branch = currentBranch(root)
@@ -265,31 +291,66 @@ export function diffBase(ws) {
   try { return git(ws.cwd, 'merge-base', ws.startPoint, 'HEAD') } catch { return ws.startSha || null }
 }
 
+// Raiz do projeto e um nível abaixo (monorepo: backend/, frontend/…).
+const projectDirs = root => ['', ...fs.readdirSync(root, { withFileTypes: true })
+  .filter(e => e.isDirectory() && e.name !== 'node_modules' && !e.name.startsWith('.')).map(e => e.name)]
+
+// Os .env ficam fora do git: sem eles o worktree não roda os testes nem sobe a
+// app (JWT_SECRET etc.) e todo verify falha. Copia só os que o git ignora — um
+// .env não ignorado entraria no auto-commit de segurança da sessão.
+function copyEnvFiles(root, dir) {
+  for (const sub of projectDirs(root)) {
+    let names = []
+    try { names = fs.readdirSync(path.join(root, sub)).filter(n => /^\.env(\..+)?$/.test(n)) } catch {}
+    for (const n of names) {
+      const dest = path.join(dir, sub, n)
+      if (!fs.existsSync(path.dirname(dest)) || fs.existsSync(dest)) continue
+      try { git(root, 'check-ignore', '-q', path.join(sub, n)) } catch { continue }
+      try { fs.copyFileSync(path.join(root, sub, n), dest) } catch {}
+    }
+  }
+}
+
 // Worktree novo não tem dependências: sem isso o verify da base falha por
 // "módulo não encontrado" e toda falha da task parece nova. Reaproveita os
 // node_modules do checkout (raiz e um nível abaixo, para monorepos).
 // ponytail: dependências da base podem diferir das do checkout; npm ci no
 // worktree se isso gerar falso positivo.
 function linkNodeModules(root, dir) {
-  const subs = ['', ...fs.readdirSync(root, { withFileTypes: true })
-    .filter(e => e.isDirectory() && e.name !== 'node_modules' && !e.name.startsWith('.')).map(e => e.name)]
-  for (const sub of subs) {
+  for (const sub of projectDirs(root)) {
     const src = path.join(root, sub, 'node_modules')
     const dest = path.join(dir, sub, 'node_modules')
     if (!fs.existsSync(src) || !fs.existsSync(path.dirname(dest)) || fs.existsSync(dest)) continue
-    try { fs.symlinkSync(src, dest, 'dir') } catch {}
+    try { fs.symlinkSync(src, dest, 'dir') } catch { continue }
+    // "node_modules/" no .gitignore não casa com symlink: um link não ignorado
+    // entraria no auto-commit de segurança da sessão.
+    try { git(dir, 'check-ignore', '-q', path.join(sub, 'node_modules')) } catch { fs.rmSync(dest, { force: true }) }
+  }
+}
+
+// Comando de preparação do worktree (project.setupCommand): o que o checkout
+// tem e o git não — código gerado (prisma generate), migrations no banco local.
+// Falha não aborta: a sessão e o verify seguem e mostram o erro de verdade.
+// ponytail: síncrono, segura o event loop durante o setup; spawn async se doer.
+function runSetup(cmd, cwd) {
+  if (!String(cmd || '').trim()) return
+  try { execSync(cmd, { cwd, stdio: 'ignore', timeout: 10 * 60_000 }) } catch (e) {
+    console.error(`setup do worktree em ${cwd} falhou: ${e.message}`)
   }
 }
 
 // Roda fn(dir) num worktree destacado em `sha` e remove o worktree no fim.
+// target: o caminho do repo, ou o projeto (aí roda o setupCommand dele).
 // Usado pelo verify de referência: saber se a base já falhava sem tocar no
 // checkout de ninguém.
 // fn pode ser async (o loop de lacunas): aí a remoção espera a promise.
-export function withDetachedWorktree(root, sha, fn, kind = '_baseline') {
+export function withDetachedWorktree(target, sha, fn, kind = '_baseline') {
+  const root = typeof target === 'string' ? target : target.path
   const dir = path.join(HOME_DIR, 'worktrees', kind, `${path.basename(root)}-${sha.slice(0, 12)}`)
   fs.rmSync(dir, { recursive: true, force: true })
   try { git(root, 'worktree', 'prune') } catch {}
   git(root, 'worktree', 'add', '--detach', dir, sha)
+  const cwd = path.join(dir, repoPrefix(root))
   const remove = () => {
     try { git(root, 'worktree', 'remove', '--force', dir) } catch {
       fs.rmSync(dir, { recursive: true, force: true })
@@ -298,8 +359,10 @@ export function withDetachedWorktree(root, sha, fn, kind = '_baseline') {
   }
   let res
   try {
-    linkNodeModules(root, dir)
-    res = fn(dir)
+    linkNodeModules(root, cwd)
+    copyEnvFiles(root, cwd)
+    runSetup(target.setupCommand, cwd)
+    res = fn(cwd)
   } catch (e) { remove(); throw e }
   if (typeof res?.then === 'function') return res.finally(remove)
   remove()
@@ -518,7 +581,7 @@ export function capturePR(cwd, branch) {
 export function cleanupWorkspace(project, workspace, taskRelPath) {
   if (!workspace?.worktreeDir) return
   try {
-    const src = path.join(workspace.worktreeDir, taskRelPath)
+    const src = path.join(workspace.cwd, taskRelPath)
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(project.path, taskRelPath))
   } catch {}
   removeWorktree(project.path, workspace.worktreeDir)

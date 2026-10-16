@@ -149,7 +149,7 @@ export default function projectRoutes(app, ctx) {
     const p = withProjectRecord(ctx, req, reply); if (!p) return
     const { name, description, path: projectPath, skipPermissions, git, defaultModel, auxModel: auxModelIn,
       autoRun, autoDecompose, autoDecide, reviewGate, goalBudgetUsd, devServer, timeoutMs, enrichMode, rawMode, retry, maxTurns,
-      webhookUrl, webhookStatuses, verifyCommand, acceptanceCommand, stuckDetection, sandbox, visualCheck, autopilot, guardrailPolicy } = req.body || {}
+      webhookUrl, webhookStatuses, verifyCommand, acceptanceCommand, setupCommand, stuckDetection, sandbox, visualCheck, autopilot, guardrailPolicy } = req.body || {}
     if (name !== undefined) {
       if (!String(name).trim()) return reply.code(400).send({ error: 'name não pode ser vazio' })
       p.name = String(name).trim()
@@ -231,6 +231,7 @@ export default function projectRoutes(app, ctx) {
       p.retry = next
     }
     if (verifyCommand !== undefined) p.verifyCommand = String(verifyCommand || '').trim()
+    if (setupCommand !== undefined) p.setupCommand = String(setupCommand || '').trim()
     if (acceptanceCommand !== undefined) p.acceptanceCommand = String(acceptanceCommand || '').trim()
     if (stuckDetection !== undefined) p.stuckDetection = !!stuckDetection
     if (guardrailPolicy !== undefined) {

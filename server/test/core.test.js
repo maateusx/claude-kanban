@@ -218,6 +218,22 @@ test('ledger: recover reconcilia doing concluído para done, não para todo', ()
   assert.equal(findTask(root, fail.id).status, 'todo')
 })
 
+test('executar o pai desmembrado enfileira a árvore: filhas pendentes, recursivo', () => {
+  const root = proj(); bootstrapProject(root)
+  const pai = createTask(root, { title: 'Pai', status: 'todo', tags: ['decomposta'] })
+  const filha = createTask(root, { title: 'Filha', status: 'todo', tags: ['decomposta', `pai:${pai.id}`] })
+  const neta = createTask(root, { title: 'Neta', status: 'todo', tags: [`pai:${filha.id}`] })
+  createTask(root, { title: 'Feita', status: 'done', tags: [`pai:${pai.id}`] })
+  createTask(root, { title: 'Travada', status: 'todo', tags: ['blocked', `pai:${pai.id}`] })
+  createTask(root, { title: 'Outra árvore', status: 'todo' })
+  const runner = new Runner(() => ({ id: 'p1', path: root }), () => {})
+  runner.tick = () => {}
+  runner.queue = []
+
+  assert.equal(runner.enqueue('p1', pai.id), true)
+  assert.deepEqual(runner.queue.map(q => q.taskId).sort(), [pai.id, filha.id, neta.id].sort())
+})
+
 test('enqueue com projeto inexistente retorna false, sem quebrar', () => {
   const runner = new Runner(() => null, () => {})
   runner.tick = () => {}

@@ -4,9 +4,9 @@ import { HOME_DIR, LOCK_FILE, loadProjects, saveProjects } from './lib/paths.js'
 import { listTasks, reconcileProject } from './lib/tasks.js'
 import { sortTasks } from './lib/sort.js'
 import { watchProject } from './lib/watcher.js'
-import { Runner } from './lib/runner.js'
+import { Runner, autoRunnable } from './lib/runner.js'
 import { DevServers } from './lib/devservers.js'
-import { Scheduler, isFuture } from './lib/scheduler.js'
+import { Scheduler } from './lib/scheduler.js'
 import { Autopilot } from './lib/autopilot.js'
 import { notifyWebhook } from './lib/webhook.js'
 import { listPendingActions, autoResolvePending, policyCovers } from './lib/pending.js'
@@ -63,10 +63,7 @@ function autoEnqueue(project, excludeTaskId) {
   if (!project?.autoRun || !claudeAvailable || !fs.existsSync(project.path)) return
   // Task com horário marcado no futuro não entra na fila agora — quem a coloca
   // lá é o Scheduler, quando a hora chegar.
-  const todo = listTasks(project.path).filter(t =>
-    t.status === 'todo' && t.id !== excludeTaskId
-    && !(t.tags || []).includes('blocked') && !(t.tags || []).includes('human-request')
-    && !isFuture(t.scheduled_at))
+  const todo = listTasks(project.path).filter(t => t.id !== excludeTaskId && autoRunnable(t))
   // A ordem de entrada na fila é a mesma que o board mostra por default:
   // prioridade mais alta primeiro, empate pela mais antiga.
   for (const t of sortTasks(todo)) runner.enqueue(project.id, t.id, { auto: true })

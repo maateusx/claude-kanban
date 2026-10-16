@@ -543,5 +543,7 @@
   "README por módulo": "README por módulo",
   "intervalo (h)": "intervalo (h)",
   "máximo de tasks abertas": "máximo de tasks abertas",
-  "abertas (0 h = desligado)": "abertas (0 h = desligado)"
+  "abertas (0 h = desligado)": "abertas (0 h = desligado)",
+  "Preparação do worktree": "Preparação do worktree",
+  "Rodado em cada worktree novo (da task e da verificação), antes de tudo: gera o que o git não guarda, como o client do Prisma, e aplica migrations no banco local. Vazio: nada.": "Rodado em cada worktree novo (da task e da verificação), antes de tudo: gera o que o git não guarda, como o client do Prisma, e aplica migrations no banco local. Vazio: nada."
 }

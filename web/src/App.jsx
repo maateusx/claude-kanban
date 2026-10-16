@@ -2889,6 +2889,7 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
   const [baseBranch, setBaseBranch] = useState(g.baseBranch ?? 'main')
   const [timeoutMin, setTimeoutMin] = useState(String(Math.round((project.timeoutMs || DEFAULT_TIMEOUT_MS) / 60000)))
   const [verifyCommand, setVerifyCommand] = useState(project.verifyCommand || '')
+  const [setupCommand, setSetupCommand] = useState(project.setupCommand || '')
   const [acceptanceCommand, setAcceptanceCommand] = useState(project.acceptanceCommand || '')
   const [goalBudget, setGoalBudget] = useState(project.goalBudgetUsd != null ? String(project.goalBudgetUsd) : '')
   const [webhookUrl, setWebhookUrl] = useState(project.webhookUrl || '')
@@ -3023,6 +3024,20 @@ export function SettingsModal({ project, onClose, onPatch, onRemove }) {
               className="w-20 rounded-[6px] border border-line px-2 py-1 text-body outline-none focus:border-accent" />
             <span className="mt-1 block text-meta text-muted">
               {t('Cada turno da sessão reenvia todo o histórico, então uma task que se perde custa muito mais que uma task longa e objetiva. Ao estourar o teto a task volta para "A fazer" com')} <code>blocked</code>{t(', sem nova tentativa automática. 0 = sem limite (só o timeout).')}
+            </span>
+          </span>
+        </label>
+
+        <label className="flex items-start gap-3">
+          <span className="mt-1">{t('Preparação do worktree')}</span>
+          <span className="flex-1">
+            <input value={setupCommand} onChange={e => setSetupCommand(e.target.value)}
+              onBlur={() => onPatch({ setupCommand })}
+              onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+              placeholder="cd backend && npx prisma generate"
+              className="w-full rounded-[6px] border border-line px-2 py-1 font-mono text-body outline-none focus:border-accent" />
+            <span className="mt-1 block text-meta text-muted">
+              {t('Rodado em cada worktree novo (da task e da verificação), antes de tudo: gera o que o git não guarda, como o client do Prisma, e aplica migrations no banco local. Vazio: nada.')}
             </span>
           </span>
         </label>
