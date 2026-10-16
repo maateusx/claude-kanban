@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node src/index.js",
-    "test": "node --test \"test/*.test.js\""
+    "test": "CLAUDE_KANBAN_HOME=$(mktemp -d) node --test \"test/*.test.js\""
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   gitSettings, DEFAULT_GIT, prepareWorkspace, cleanupWorkspace, taskBranch, captureDiff,
-  mergeTaskBranch, deleteTaskBranch,
+  mergeTaskBranch, deleteTaskBranch, withDetachedWorktree,
 } from '../src/lib/git.js'
 
 const sh = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -56,6 +56,28 @@ test('worktree: cria branch nova a partir da base e limpa preservando a branch',
   assert.equal(sh(root, 'rev-parse', '--verify', '--quiet', 'refs/heads/kanban/tw1') !== '', true)
 })
 
+test('worktree de projeto em subpasta do repo: roda na subpasta e os metadados ficam fora do git', () => {
+  const root = repo()
+  const sub = path.join(root, 'crm')
+  mkdirSync(path.join(sub, '.claude/claude-kanban/tasks/todo'), { recursive: true })
+  writeFileSync(path.join(sub, 'app.txt'), 'app\n')
+  sh(root, 'add', 'crm/app.txt')
+  sh(root, 'commit', '-m', 'crm')
+  const rel = '.claude/claude-kanban/tasks/todo/t.md'
+  writeFileSync(path.join(sub, rel), 'task\n')
+  const project = projectFor(sub)
+
+  const ws = prepareWorkspace(project, 'ts1')
+  assert.equal(ws.cwd, path.join(ws.worktreeDir, 'crm'))
+  assert.ok(existsSync(path.join(ws.cwd, rel)), '.claude do projeto vai para a subpasta do worktree')
+  assert.equal(sh(ws.cwd, 'status', '--porcelain'), '', 'o git add -A da sessão não pega a task')
+
+  writeFileSync(path.join(ws.cwd, rel), 'resultado\n')
+  cleanupWorkspace(project, ws, rel)
+  assert.equal(readFileSync(path.join(sub, rel), 'utf8'), 'resultado\n')
+  assert.equal(withDetachedWorktree(sub, 'main', dir => readFileSync(path.join(dir, 'app.txt'), 'utf8')), 'app\n')
+})
+
 test('sem worktree: checkout da base + branch nova', () => {
   const root = repo()
   sh(root, 'checkout', '-b', 'outra')
@@ -71,6 +93,21 @@ test('sem worktree, branch atual, sem branch nova: fica onde está', () => {
   const ws = prepareWorkspace(projectFor(root, { useWorktree: false, useCurrentBranch: true, commitToNewBranch: false }), 'tc1')
   assert.equal(ws.branch, 'feature-x')
   assert.equal(sh(root, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feature-x')
+})
+
+test('branch atual: subtask não cria branch de integração; com worktree, ela parte do HEAD', () => {
+  const root = repo()
+  sh(root, 'checkout', '-b', 'feature-x')
+  writeFileSync(path.join(root, 'b.txt'), 'b\n')
+  sh(root, 'add', '.')
+  sh(root, 'commit', '-m', 'feature')
+  const flat = projectFor(root, { useWorktree: false, useCurrentBranch: true, commitToNewBranch: false })
+  assert.equal(prepareWorkspace(flat, 'sub1', { parentId: 'pai1' }).branch, 'feature-x')
+  assert.equal(sh(root, 'branch', '--list', 'kanban/*'), '')
+
+  const ws = prepareWorkspace(projectFor(root, { useCurrentBranch: true }), 'sub2', { parentId: 'pai2' })
+  assert.equal(sh(root, 'rev-parse', 'kanban/pai2'), sh(root, 'rev-parse', 'feature-x'))
+  cleanupWorkspace(projectFor(root), ws, 'nada.md')
 })
 
 test('captureDiff: commits, não commitados e untracked; ignora .claude/claude-kanban', () => {

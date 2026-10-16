@@ -7,7 +7,7 @@ import { decomposeTask, subtaskLevel, designSubtask, MAX_DECOMPOSE_LEVEL } from 
 import { specBlock, needsDesign, SPEC_REL, DESIGN_TAG } from './spec.js'
 import { diagnoseTask, DIAGNOSED_PREFIX } from './diagnoser.js'
 import {
-  prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, taskBranch,
+  prepareWorkspace, cleanupWorkspace, captureDiff, capturePR, gitSettings, isGitRepo, mergeIntoBranch, integrationBranch,
   mergeTaskBranch, withDetachedWorktree, diffStats, diffBase, mergeResult, resolveRef,
 } from './git.js'
 import { reviewTask, screenshotApp } from './reviewer.js'
@@ -203,6 +203,12 @@ export const REPLANNED_TAG = 'replanejada'
 export const INTEGRATED_TAG = 'integrada'
 
 export const parentIdOf = task => (task?.tags || []).find(t => t.startsWith('pai:'))?.slice(4) || null
+
+// Task que pode entrar na fila sem pedido explícito (auto-run, filhas de uma
+// árvore executada): em todo, sem esperar humano, sem horário no futuro.
+export const autoRunnable = t => t.status === 'todo'
+  && !(t.tags || []).includes('blocked') && !(t.tags || []).includes(HUMAN_REQUEST_TAG)
+  && !isFuture(t.scheduled_at)
 // Objetivo: task raiz que foi desmembrada — a que o loop de lacunas audita.
 export const isGoal = task => !!task?.tags?.includes(DECOMPOSED_TAG) && !parentIdOf(task)
 const withTag = (tags, tag) => (tags || []).includes(tag) ? (tags || []) : [...(tags || []), tag]
@@ -483,6 +489,13 @@ export class Runner {
     this.queue.splice(at, 0, { projectId, taskId, priority: task.priority || 'medium' })
     this.persist()
     this.emit('run.queued', { projectId, taskId, position: at })
+    // O pai desmembrado depende das filhas: sem elas na fila ele nunca sairia.
+    // Executar o pai executa a árvore (recursivo: filha desmembrada puxa as suas).
+    if (task.tags?.includes(DECOMPOSED_TAG)) {
+      for (const c of listTasks(project.path)) {
+        if (parentIdOf(c) === taskId && autoRunnable(c)) this.enqueue(projectId, c.id, { auto: true })
+      }
+    }
     this.tick()
     return true
   }
@@ -1421,7 +1434,7 @@ export class Runner {
         pr: runMeta.pr,
       })
       // Subtask integra no pai; o resto vai para a base se a política deixar.
-      const into = parentIdOf(task) && taskBranch(parentIdOf(task))
+      const into = integrationBranch(project, parentIdOf(task))
       if (into) {
         if (a.workspace.branch && a.workspace.branch !== into) {
           this.enqueueMerge({ projectId: project.id, taskId: a.taskId, branch: a.workspace.branch, into, kind: 'parent' })
@@ -1696,7 +1709,9 @@ export function buildRawPrompt(task, phase, plan, resumed) {
 function promptGit(project, task) {
   const g = gitSettings(project)
   const parentId = parentIdOf(task)
-  return parentId ? { ...g, integratesInto: taskBranch(parentId) } : g
+  if (!parentId) return g
+  const into = integrationBranch(project, parentId)
+  return into ? { ...g, integratesInto: into } : { ...g, autoPush: false }
 }
 
 function gitInstructions(branch, g) {

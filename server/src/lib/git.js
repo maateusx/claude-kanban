@@ -18,6 +18,14 @@ export const gitSettings = project => ({ ...DEFAULT_GIT, ...(project.git || {}) 
 
 export const taskBranch = taskId => `kanban/${taskId}`
 
+// Branch de integração de uma task desmembrada. Sem worktree, sem branch nova e
+// com "usar a branch atual", a pessoa não quer branch nenhuma: as filhas rodam em
+// sequência no mesmo checkout (sem worktree não há paralelo) e já se enxergam.
+export function integrationBranch(project, parentId) {
+  const g = gitSettings(project)
+  return parentId && (g.useWorktree || g.commitToNewBranch || !g.useCurrentBranch) ? taskBranch(parentId) : null
+}
+
 function git(cwd, ...args) {
   try {
     return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -30,6 +38,10 @@ function git(cwd, ...args) {
 export function isGitRepo(dir) {
   try { return git(dir, 'rev-parse', '--is-inside-work-tree') === 'true' } catch { return false }
 }
+
+// Caminho do projeto dentro do repo ("crm/" num monorepo, "" na raiz). Um
+// worktree é sempre do repo inteiro: a sessão roda em <worktree>/<prefixo>.
+const repoPrefix = dir => git(dir, 'rev-parse', '--show-prefix').replace(/\/$/, '')
 
 // Garante que os metadados do kanban nunca sejam commitados pela sessão (git add -A),
 // mesmo que o .gitignore do projeto não esteja commitado na branch base. Escreve os
@@ -44,14 +56,16 @@ const KANBAN_EXCLUDES = [
 ]
 export function excludeKanbanFromCommits(cwd) {
   try {
-    const gitDir = git(cwd, 'rev-parse', '--git-dir') // absoluto ou relativo ao cwd
-    const base = path.isAbsolute(gitDir) ? gitDir : path.join(cwd, gitDir)
+    // Common dir: o git ignora o info/exclude do git dir de um worktree. Os
+    // padrões são relativos à raiz do repo — projeto em subpasta leva o prefixo.
+    const base = git(cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    const prefix = repoPrefix(cwd)
     const info = path.join(base, 'info')
     const file = path.join(info, 'exclude')
     fs.mkdirSync(info, { recursive: true })
     const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
     const have = new Set(existing.split('\n'))
-    const add = KANBAN_EXCLUDES.filter(l => !have.has(l))
+    const add = KANBAN_EXCLUDES.map(l => path.posix.join(prefix, l)).filter(l => !have.has(l))
     if (add.length) {
       fs.writeFileSync(file, existing + (existing === '' || existing.endsWith('\n') ? '' : '\n') + add.join('\n') + '\n')
     }
@@ -183,11 +197,14 @@ export function copyClaudeDir(root, dest) {
 // Branch de integração de uma task desmembrada: as subtasks partem dela e voltam
 // para ela (mergeIntoBranch), então a 2ª subtask enxerga o código da 1ª. Criada
 // da base na primeira vez que alguma filha precisa dela.
-function ensureParentBranch(root, g, parentId) {
-  const branch = taskBranch(parentId)
+// Com "usar a branch atual", parte do HEAD do checkout, não da base.
+function ensureParentBranch(root, g, branch) {
   if (!branchExists(root, branch)) {
-    if (g.pullBeforeStart) updateBase(root, g.baseBranch)
-    git(root, 'branch', branch, resolveStartPoint(root, g.baseBranch))
+    if (g.useCurrentBranch) git(root, 'branch', branch, 'HEAD')
+    else {
+      if (g.pullBeforeStart) updateBase(root, g.baseBranch)
+      git(root, 'branch', branch, resolveStartPoint(root, g.baseBranch))
+    }
   }
   return branch
 }
@@ -204,7 +221,8 @@ export function prepareWorkspace(project, taskId, { parentId = null } = {}) {
   if (!isGitRepo(root)) return { cwd: root, branch: null, worktreeDir: null, startSha: null }
 
   const newBranch = taskBranch(taskId)
-  const parentBranch = parentId ? ensureParentBranch(root, g, parentId) : null
+  const into = integrationBranch(project, parentId)
+  const parentBranch = into ? ensureParentBranch(root, g, into) : null
 
   if (g.useWorktree) {
     // Worktree exige branch própria (git não permite a mesma branch em dois worktrees),
@@ -221,16 +239,17 @@ export function prepareWorkspace(project, taskId, { parentId = null } = {}) {
     const existed = branchExists(root, newBranch)
     if (existed) git(root, 'worktree', 'add', dir, newBranch)
     else git(root, 'worktree', 'add', dir, '-b', newBranch, startPoint)
+    const cwd = path.join(dir, repoPrefix(root))
     // .claude/ pode não estar commitado (hooks, settings, tasks) — copia do projeto
-    if (fs.existsSync(path.join(root, '.claude'))) copyClaudeDir(root, path.join(dir, '.claude'))
-    excludeKanbanFromCommits(dir)
-    let startSha = headSha(dir)
+    if (fs.existsSync(path.join(root, '.claude'))) copyClaudeDir(root, path.join(cwd, '.claude'))
+    excludeKanbanFromCommits(cwd)
+    let startSha = headSha(cwd)
     // baseSha: de onde a branch saiu — é contra ele que o verify de referência
     // roda (numa branch retomada, o HEAD já tem commits da própria task).
     let baseSha = startSha
     try { baseSha = git(root, 'merge-base', startPoint, newBranch) } catch {}
     if (existed) startSha = baseSha
-    return { cwd: dir, branch: newBranch, worktreeDir: dir, startSha, baseSha, startPoint }
+    return { cwd, branch: newBranch, worktreeDir: dir, startSha, baseSha, startPoint }
   }
 
   let branch = currentBranch(root)
@@ -290,6 +309,7 @@ export function withDetachedWorktree(root, sha, fn, kind = '_baseline') {
   fs.rmSync(dir, { recursive: true, force: true })
   try { git(root, 'worktree', 'prune') } catch {}
   git(root, 'worktree', 'add', '--detach', dir, sha)
+  const cwd = path.join(dir, repoPrefix(root))
   const remove = () => {
     try { git(root, 'worktree', 'remove', '--force', dir) } catch {
       fs.rmSync(dir, { recursive: true, force: true })
@@ -298,8 +318,8 @@ export function withDetachedWorktree(root, sha, fn, kind = '_baseline') {
   }
   let res
   try {
-    linkNodeModules(root, dir)
-    res = fn(dir)
+    linkNodeModules(root, cwd)
+    res = fn(cwd)
   } catch (e) { remove(); throw e }
   if (typeof res?.then === 'function') return res.finally(remove)
   remove()
@@ -518,7 +538,7 @@ export function capturePR(cwd, branch) {
 export function cleanupWorkspace(project, workspace, taskRelPath) {
   if (!workspace?.worktreeDir) return
   try {
-    const src = path.join(workspace.worktreeDir, taskRelPath)
+    const src = path.join(workspace.cwd, taskRelPath)
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(project.path, taskRelPath))
   } catch {}
   removeWorktree(project.path, workspace.worktreeDir)
