@@ -206,6 +206,10 @@ export const parentIdOf = task => (task?.tags || []).find(t => t.startsWith('pai
 
 // Task que pode entrar na fila sem pedido explícito (auto-run, filhas de uma
 // árvore executada): em todo, sem esperar humano, sem horário no futuro.
+// Quem re-tenta sozinho depois de uma falha: com auto-run, qualquer task; sem
+// ele, só subtask — a árvore foi mandada executar e o pai espera pelas filhas.
+const retriesItself = (project, task) => !!project.autoRun || !!parentIdOf(task)
+
 export const autoRunnable = t => t.status === 'todo'
   && !(t.tags || []).includes('blocked') && !(t.tags || []).includes(HUMAN_REQUEST_TAG)
   && !isFuture(t.scheduled_at)
@@ -1387,7 +1391,7 @@ export class Runner {
       let replanned = false
       if (attempts >= maxAttempts) {
         replanned = this.blockOrReplan(project, task, patch)
-      } else if (project.autoRun && backoffMinutes > 0) {
+      } else if (retriesItself(project, task) && backoffMinutes > 0) {
         retryAt = new Date(Date.parse(runMeta.completed_at) + backoffMinutes * 60_000).toISOString()
         patch.scheduled_at = retryAt
       }
@@ -1457,7 +1461,7 @@ export class Runner {
       let replanned = false
       if (attempts >= maxAttempts) {
         replanned = this.blockOrReplan(project, task, patch)
-      } else if (project.autoRun && backoffMinutes > 0) {
+      } else if (retriesItself(project, task) && backoffMinutes > 0) {
         // Ainda há tentativa sobrando: em vez de deixar o auto-run repescar a task
         // no mesmo tick, marca o horário do retry e deixa o Scheduler enfileirá-la
         // quando o backoff vencer (autoEnqueue ignora scheduled_at no futuro).
