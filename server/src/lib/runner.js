@@ -1027,7 +1027,7 @@ export class Runner {
     try { files = testFiles(diffStats(captureDiff(ws.cwd, diffBase(ws))).files) } catch {}
     let base
     try {
-      base = withDetachedWorktree(project.path, sha, dir => {
+      base = withDetachedWorktree(project, sha, dir => {
         for (const f of files) {
           const src = path.join(ws.cwd, f)
           if (!fs.existsSync(src)) continue
@@ -1059,7 +1059,7 @@ export class Runner {
       let res = null
       // o caminho do worktree da base vira um marcador (o cache serve a tasks em cwds diferentes)
       try {
-        res = withDetachedWorktree(project.path, sha, dir => {
+        res = withDetachedWorktree(project, sha, dir => {
           const r = runVerify(verify.command, dir)
           return { ...r, output: r.output.split(dir).join(BASE_DIR_MARK) }
         })
@@ -1243,7 +1243,7 @@ export class Runner {
     const cmd = String(project.verifyCommand || '').trim()
     const branch = task.run?.branch
     if (!cmd || !branch || !isGitRepo(project.path)) return null
-    try { return withDetachedWorktree(project.path, branch, dir => runVerify(cmd, dir), '_flaky') } catch { return null }
+    try { return withDetachedWorktree(project, branch, dir => runVerify(cmd, dir), '_flaky') } catch { return null }
   }
 
   finish(a, exitCode) {
@@ -1566,7 +1566,7 @@ export class Runner {
     if (cmd && !r.tested) {
       item.stage = 'verify'
       this.emit('run.queue', this.getQueueView())
-      const v = await withDetachedWorktree(project.path, r.sha, async dir => {
+      const v = await withDetachedWorktree(project, r.sha, async dir => {
         const out = await runVerifyAsync(cmd, dir)
         return out.ok ? out : this.compareWithBaseline(project, { baseSha: r.head, cwd: dir }, out)
       }, '_merge')

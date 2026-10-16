@@ -438,7 +438,7 @@ export class Autopilot {
     let res
     if (isGitRepo(p.path)) {
       const sha = resolveRef(p.path, goal.run?.branch || taskBranch(goal.id)) || resolveRef(p.path, gitSettings(p).baseBranch)
-      res = sha ? await withDetachedWorktree(p.path, sha, audit, '_gaps') : await audit(p.path)
+      res = sha ? await withDetachedWorktree(p, sha, audit, '_gaps') : await audit(p.path)
     } else {
       res = await audit(p.path)
     }

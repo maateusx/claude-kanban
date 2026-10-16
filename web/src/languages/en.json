@@ -543,5 +543,7 @@
   "README por módulo": "README per module",
   "intervalo (h)": "interval (h)",
   "máximo de tasks abertas": "max open tasks",
-  "abertas (0 h = desligado)": "open (0 h = off)"
+  "abertas (0 h = desligado)": "open (0 h = off)",
+  "Preparação do worktree": "Worktree setup",
+  "Rodado em cada worktree novo (da task e da verificação), antes de tudo: gera o que o git não guarda, como o client do Prisma, e aplica migrations no banco local. Vazio: nada.": "Run in every new worktree (the task’s and verification’s) before anything else: generates what git doesn’t store, like the Prisma client, and applies migrations to the local database. Empty: nothing."
 }

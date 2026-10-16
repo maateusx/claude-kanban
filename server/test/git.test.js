@@ -102,6 +102,21 @@ test('worktree recebe os .env que o git ignora (e só esses)', () => {
   assert.equal(withDetachedWorktree(root, 'main', dir => existsSync(path.join(dir, 'backend/.env'))), true)
 })
 
+test('setupCommand roda no worktree da sessão e no destacado', () => {
+  const root = repo()
+  writeFileSync(path.join(root, '.gitignore'), 'gerado/\n')
+  sh(root, 'add', '.')
+  sh(root, 'commit', '-m', 'ignore')
+  const project = { ...projectFor(root), setupCommand: 'mkdir -p gerado && echo ok > gerado/client.js' }
+
+  const ws = prepareWorkspace(project, 'tsu1')
+  assert.equal(readFileSync(path.join(ws.cwd, 'gerado/client.js'), 'utf8'), 'ok\n')
+  cleanupWorkspace(project, ws, 'nada.md')
+  assert.equal(withDetachedWorktree(project, 'main', dir => existsSync(path.join(dir, 'gerado/client.js'))), true)
+  const falha = { ...project, setupCommand: 'exit 3' }
+  assert.equal(withDetachedWorktree(falha, 'main', () => 'seguiu'), 'seguiu', 'setup que falha não aborta')
+})
+
 test('sem worktree: checkout da base + branch nova', () => {
   const root = repo()
   sh(root, 'checkout', '-b', 'outra')

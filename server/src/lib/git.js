@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { HOME_DIR } from './paths.js'
@@ -248,6 +248,7 @@ export function prepareWorkspace(project, taskId, { parentId = null } = {}) {
     // ponytail: node_modules compartilhado com o checkout — npm install de dep
     // nova na sessão escreve no do projeto; npm ci no worktree se isso pesar.
     linkNodeModules(root, cwd)
+    runSetup(project.setupCommand, cwd)
     excludeKanbanFromCommits(cwd)
     let startSha = headSha(cwd)
     // baseSha: de onde a branch saiu — é contra ele que o verify de referência
@@ -327,11 +328,24 @@ function linkNodeModules(root, dir) {
   }
 }
 
+// Comando de preparação do worktree (project.setupCommand): o que o checkout
+// tem e o git não — código gerado (prisma generate), migrations no banco local.
+// Falha não aborta: a sessão e o verify seguem e mostram o erro de verdade.
+// ponytail: síncrono, segura o event loop durante o setup; spawn async se doer.
+function runSetup(cmd, cwd) {
+  if (!String(cmd || '').trim()) return
+  try { execSync(cmd, { cwd, stdio: 'ignore', timeout: 10 * 60_000 }) } catch (e) {
+    console.error(`setup do worktree em ${cwd} falhou: ${e.message}`)
+  }
+}
+
 // Roda fn(dir) num worktree destacado em `sha` e remove o worktree no fim.
+// target: o caminho do repo, ou o projeto (aí roda o setupCommand dele).
 // Usado pelo verify de referência: saber se a base já falhava sem tocar no
 // checkout de ninguém.
 // fn pode ser async (o loop de lacunas): aí a remoção espera a promise.
-export function withDetachedWorktree(root, sha, fn, kind = '_baseline') {
+export function withDetachedWorktree(target, sha, fn, kind = '_baseline') {
+  const root = typeof target === 'string' ? target : target.path
   const dir = path.join(HOME_DIR, 'worktrees', kind, `${path.basename(root)}-${sha.slice(0, 12)}`)
   fs.rmSync(dir, { recursive: true, force: true })
   try { git(root, 'worktree', 'prune') } catch {}
@@ -347,6 +361,7 @@ export function withDetachedWorktree(root, sha, fn, kind = '_baseline') {
   try {
     linkNodeModules(root, cwd)
     copyEnvFiles(root, cwd)
+    runSetup(target.setupCommand, cwd)
     res = fn(cwd)
   } catch (e) { remove(); throw e }
   if (typeof res?.then === 'function') return res.finally(remove)
