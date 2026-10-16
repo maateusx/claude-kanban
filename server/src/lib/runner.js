@@ -207,8 +207,9 @@ export const parentIdOf = task => (task?.tags || []).find(t => t.startsWith('pai
 // Task que pode entrar na fila sem pedido explícito (auto-run, filhas de uma
 // árvore executada): em todo, sem esperar humano, sem horário no futuro.
 // Quem re-tenta sozinho depois de uma falha: com auto-run, qualquer task; sem
-// ele, só subtask — a árvore foi mandada executar e o pai espera pelas filhas.
+// ele, só a árvore mandada executar — as filhas e o pai que as integra.
 const retriesItself = (project, task) => !!project.autoRun || !!parentIdOf(task)
+  || !!task.tags?.includes(DECOMPOSED_TAG)
 
 export const autoRunnable = t => t.status === 'todo'
   && !(t.tags || []).includes('blocked') && !(t.tags || []).includes(HUMAN_REQUEST_TAG)
@@ -1703,10 +1704,19 @@ export function exitPlanText(event) {
 }
 
 // Prompt do modo cru: só o que a pessoa escreveria no terminal.
+// Retentativa em modo cru: o prompt é só título + descrição, e o motivo da
+// falha anterior (revisão, verify) se perderia — a sessão repetiria o erro.
+function lastFailure(task) {
+  if (!task.run?.attempts) return ''
+  const log = (getSection(task.body, 'Log de erros') || '').replace(/<!--[\s\S]*?-->/g, '').trim()
+  const last = log.split(/\n(?=\[\d{4}-\d{2}-\d{2}T)/).pop()?.trim()
+  return last ? `\n\nA tentativa anterior não passou. Corrija isto:\n\n${last.slice(-4000)}` : ''
+}
+
 export function buildRawPrompt(task, phase, plan, resumed) {
   if (phase === 'execute' && plan && resumed) return 'Plano aprovado. Execute-o agora, do início ao fim.'
   const desc = getSection(task.body, 'Descrição') || ''
-  const base = desc ? `${task.title}\n\n${desc}` : task.title
+  const base = (desc ? `${task.title}\n\n${desc}` : task.title) + lastFailure(task)
   return phase === 'execute' && plan ? `${base}\n\nExecute este plano, já aprovado:\n\n${plan}` : base
 }
 

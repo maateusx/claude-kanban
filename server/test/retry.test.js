@@ -86,3 +86,9 @@ test('sem auto-run, subtask re-tenta sozinha (o pai espera por ela)', () => {
   updateTask(project.path, taskId, { tags: ['pai:abc123'], run: { attempts: 1 } })
   assert.ok(failRun(runner, project, taskId).scheduled_at, 'backoff agendado')
 })
+
+test('sem auto-run, o pai desmembrado também re-tenta sozinho', () => {
+  const { project, runner, taskId } = setup({ maxAttempts: 3, backoffMinutes: 5 }, { autoRun: false })
+  updateTask(project.path, taskId, { tags: ['decomposta'], run: { attempts: 1 } })
+  assert.ok(failRun(runner, project, taskId).scheduled_at, 'backoff agendado')
+})

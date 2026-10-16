@@ -84,3 +84,11 @@ test('projeto cru: conflito de merge agenda a resolução em vez de bloquear', (
   assert.equal(t.run.merge_from, 'kanban/abc123')
   assert.ok(t.tags.includes('conflito') && !t.tags.includes('blocked'))
 })
+
+test('prompt cru na retentativa leva o motivo da falha anterior', () => {
+  const body = '\n## Descrição\n\nsoma a+b\n\n## Log de erros\n<!-- x -->\n[2026-10-16T10:00:00.000Z] velho\n\n[2026-10-16T11:00:00.000Z] Revisão automática reprovou: falta o teste\n'
+  assert.equal(buildRawPrompt({ title: 'Somar', body, run: { attempts: 0 } }, 'execute'), 'Somar\n\nsoma a+b')
+  const p = buildRawPrompt({ title: 'Somar', body, run: { attempts: 1 } }, 'execute')
+  assert.match(p, /anterior não passou[\s\S]*falta o teste$/)
+  assert.doesNotMatch(p, /velho/)
+})
