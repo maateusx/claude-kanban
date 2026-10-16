@@ -78,6 +78,24 @@ test('worktree de projeto em subpasta do repo: roda na subpasta e os metadados f
   assert.equal(withDetachedWorktree(sub, 'main', dir => readFileSync(path.join(dir, 'app.txt'), 'utf8')), 'app\n')
 })
 
+test('worktree recebe os .env que o git ignora (e só esses)', () => {
+  const root = repo()
+  mkdirSync(path.join(root, 'backend'))
+  writeFileSync(path.join(root, 'backend/app.txt'), 'app\n')
+  writeFileSync(path.join(root, '.gitignore'), '.env\n')
+  sh(root, 'add', '.')
+  sh(root, 'commit', '-m', 'backend')
+  writeFileSync(path.join(root, 'backend/.env'), 'SEGREDO=1\n')
+  writeFileSync(path.join(root, 'backend/.env.local'), 'NAO_IGNORADO=1\n')
+  const project = projectFor(root)
+
+  const ws = prepareWorkspace(project, 'te1')
+  assert.equal(readFileSync(path.join(ws.cwd, 'backend/.env'), 'utf8'), 'SEGREDO=1\n')
+  assert.ok(!existsSync(path.join(ws.cwd, 'backend/.env.local')), 'não ignorado iria para o auto-commit')
+  cleanupWorkspace(project, ws, 'nada.md')
+  assert.equal(withDetachedWorktree(root, 'main', dir => existsSync(path.join(dir, 'backend/.env'))), true)
+})
+
 test('sem worktree: checkout da base + branch nova', () => {
   const root = repo()
   sh(root, 'checkout', '-b', 'outra')

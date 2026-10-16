@@ -242,6 +242,7 @@ export function prepareWorkspace(project, taskId, { parentId = null } = {}) {
     const cwd = path.join(dir, repoPrefix(root))
     // .claude/ pode não estar commitado (hooks, settings, tasks) — copia do projeto
     if (fs.existsSync(path.join(root, '.claude'))) copyClaudeDir(root, path.join(cwd, '.claude'))
+    copyEnvFiles(root, cwd)
     excludeKanbanFromCommits(cwd)
     let startSha = headSha(cwd)
     // baseSha: de onde a branch saiu — é contra ele que o verify de referência
@@ -284,15 +285,33 @@ export function diffBase(ws) {
   try { return git(ws.cwd, 'merge-base', ws.startPoint, 'HEAD') } catch { return ws.startSha || null }
 }
 
+// Raiz do projeto e um nível abaixo (monorepo: backend/, frontend/…).
+const projectDirs = root => ['', ...fs.readdirSync(root, { withFileTypes: true })
+  .filter(e => e.isDirectory() && e.name !== 'node_modules' && !e.name.startsWith('.')).map(e => e.name)]
+
+// Os .env ficam fora do git: sem eles o worktree não roda os testes nem sobe a
+// app (JWT_SECRET etc.) e todo verify falha. Copia só os que o git ignora — um
+// .env não ignorado entraria no auto-commit de segurança da sessão.
+function copyEnvFiles(root, dir) {
+  for (const sub of projectDirs(root)) {
+    let names = []
+    try { names = fs.readdirSync(path.join(root, sub)).filter(n => /^\.env(\..+)?$/.test(n)) } catch {}
+    for (const n of names) {
+      const dest = path.join(dir, sub, n)
+      if (!fs.existsSync(path.dirname(dest)) || fs.existsSync(dest)) continue
+      try { git(root, 'check-ignore', '-q', path.join(sub, n)) } catch { continue }
+      try { fs.copyFileSync(path.join(root, sub, n), dest) } catch {}
+    }
+  }
+}
+
 // Worktree novo não tem dependências: sem isso o verify da base falha por
 // "módulo não encontrado" e toda falha da task parece nova. Reaproveita os
 // node_modules do checkout (raiz e um nível abaixo, para monorepos).
 // ponytail: dependências da base podem diferir das do checkout; npm ci no
 // worktree se isso gerar falso positivo.
 function linkNodeModules(root, dir) {
-  const subs = ['', ...fs.readdirSync(root, { withFileTypes: true })
-    .filter(e => e.isDirectory() && e.name !== 'node_modules' && !e.name.startsWith('.')).map(e => e.name)]
-  for (const sub of subs) {
+  for (const sub of projectDirs(root)) {
     const src = path.join(root, sub, 'node_modules')
     const dest = path.join(dir, sub, 'node_modules')
     if (!fs.existsSync(src) || !fs.existsSync(path.dirname(dest)) || fs.existsSync(dest)) continue
@@ -319,6 +338,7 @@ export function withDetachedWorktree(root, sha, fn, kind = '_baseline') {
   let res
   try {
     linkNodeModules(root, cwd)
+    copyEnvFiles(root, cwd)
     res = fn(cwd)
   } catch (e) { remove(); throw e }
   if (typeof res?.then === 'function') return res.finally(remove)
