@@ -659,7 +659,9 @@ export class Runner {
     const sessionId = task.run?.session_id || null
     // Continuar a sessão anterior só faz sentido quando há resposta humana para
     // entregar: sem ela, o run é uma re-execução do zero.
-    const raw = rawModeOf(project)
+    // Resolução de conflito roda no modo normal mesmo em projeto cru: o prompt
+    // cru é só título + descrição e não levaria as instruções do merge.
+    const raw = task.run?.merge_from ? null : rawModeOf(project)
     const rawPhase = !raw ? null : rawExec || raw === 'execute' ? 'execute' : 'plan'
     const resumeFrom = rawExec
       ? (!noResume && rawExec.plan && rawExec.sessionId) || null
@@ -1489,7 +1491,7 @@ export class Runner {
   // task). Devolve false — e marca blocked — quando não dá para tentar de novo.
   scheduleConflictFix(project, task, mergeFrom, runMeta, message) {
     const rounds = task.run?.conflict_rounds || 0
-    const resolving = !rawModeOf(project) && rounds < MAX_CONFLICT_ROUNDS
+    const resolving = rounds < MAX_CONFLICT_ROUNDS
     const updated = updateTask(project.path, task.id, {
       status: 'todo',
       run: resolving ? { ...runMeta, merge_from: mergeFrom, conflict_rounds: rounds + 1 } : runMeta,

@@ -72,3 +72,15 @@ test('execute cru: a resposta final vira ## Resultado', () => {
   assert.equal(getSection(task.body, 'Resultado'), 'resumo')
   assert.equal(task.status, 'done')
 })
+
+test('projeto cru: conflito de merge agenda a resolução em vez de bloquear', () => {
+  const root = proj(); bootstrapProject(root)
+  const project = { id: 'p1', path: root, rawMode: 'execute' }
+  const task = createTask(root, { title: 'Filha', status: 'done', tags: ['pai:abc123'] })
+  const runner = new Runner(() => project, () => {})
+  runner.tick = () => {}
+  assert.equal(runner.scheduleConflictFix(project, task, 'kanban/abc123', {}, 'conflitou'), true)
+  const t = findTask(root, task.id)
+  assert.equal(t.run.merge_from, 'kanban/abc123')
+  assert.ok(t.tags.includes('conflito') && !t.tags.includes('blocked'))
+})
